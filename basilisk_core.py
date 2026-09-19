@@ -241,6 +241,11 @@ SILICONFLOW_CATALOGUE: List[ModelInfo] = [
               "OpenAI tools function-calling flow. Falls back to V4-Flash.",
               tier="workhorse",
               cached_in_usd=0.028,
+              # Vision: verified against SiliconFlow's live API (Sep 2026) —
+              # a real image round-trips and the model answers correctly.  The
+              # default vision model is this same id, so the chat picker and
+              # the vision picker are one model and cost no extra key.
+              vision=True,
               # SAME family as V4-Flash, which honours enable_thinking, and on
               # DeepSeek's own platform the v4-flash id ROUTES to V4.1 — so the
               # switch is understood. If this new architecture ever rejects it,
@@ -394,10 +399,14 @@ PROVIDERS_BY_KEY: Dict[str, ProviderSpec] = {p.key: p for p in PROVIDERS}
 # natively (vision=True) — those are listed first so the vision picker and
 # the chat picker can be the same model and save an API key round-trip.
 VISION_MODELS: Dict[str, List[str]] = {
-    # Only the kept catalogue's vision-capable model is suggested now; the
-    # field stays free-text, so any current SiliconFlow vision id can still be
-    # typed by hand if the line-up shifts.
+    # The default vision model is V4.1-Flash — the same id the operator chats
+    # with — so seeing an image costs no second model and no second key.
+    # GLM-5.3-Flash stays listed as the one-click alternative (and is still
+    # the fallback when a stale vision id is saved).  The field stays
+    # free-text, so any current SiliconFlow vision id can still be typed by
+    # hand if the line-up shifts.
     "siliconflow": [
+        "deepseek-ai/DeepSeek-V4.1-Flash",
         "zai-org/GLM-5.3-Flash",
     ],
 }
@@ -603,7 +612,11 @@ DEFAULT_SETTINGS = {
     # catalogue actually carries AND advertises as vision-capable, and
     # _resolve_vision_model() below re-checks that at call time so a stale
     # value saved by an older build repairs itself instead of failing.
-    "vision_model":            "zai-org/GLM-5.3-Flash",  # vision-capable
+    # The default is the SAME model the operator chats with (V4.1-Flash) --
+    # verified to accept image_url on SiliconFlow -- so the chat and vision
+    # pickers agree and no second model/key is needed. GLM-5.3-Flash remains
+    # the one-click alternative and the stale-id repair target.
+    "vision_model":            "deepseek-ai/DeepSeek-V4.1-Flash",  # vision-capable
                                         # model on the active OpenAI-compatible
                                         # provider (SiliconFlow); lets Basilisk SEE
                                         # images.  Change to any VL model the
@@ -635,11 +648,14 @@ DEFAULT_SETTINGS = {
     "voice_autosend":   True,           # auto-send after a voice message transcribes
     "stt_model":        "whisper-large-v3-turbo",
     "stt_language":     "",             # ISO-639-1 hint (blank = auto-detect)
-    # Which cloud transcribes voice input.  "auto" = use your active chat
+    # Which engine transcribes voice input.  "auto" = use your active chat
     # provider if it supports speech (SiliconFlow→SenseVoiceSmall,
-    # Groq→Whisper), else fall back to whichever key you have set.
-    "stt_provider":     "auto",         # auto | siliconflow | groq
+    # Groq→Whisper), else fall back to whichever key you have set.  "local"
+    # runs whisper.cpp on this machine with no key and no network — the option
+    # that works when the configured provider carries no ASR model at all.
+    "stt_provider":     "auto",         # auto | siliconflow | groq | local
     "stt_model_siliconflow": "",         # blank = FunAudioLLM/SenseVoiceSmall
+    "stt_model_local":  "",              # ggml .bin path (blank = auto-find)
 
     # ── Chat history / retention ──
     # Ephemeral by default: start fresh each launch, roll off stale chats,

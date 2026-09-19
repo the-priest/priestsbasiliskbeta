@@ -9371,11 +9371,15 @@ class SettingsDialog(Adw.PreferencesDialog):
         # Input (speak instead of type)
         ig = Adw.PreferencesGroup()
         ig.set_title("Speak instead of type")
+        _local_model = (basilisk_voice.find_whisper_model(
+            parent.settings.get("stt_model_local", ""))
+            if basilisk_voice is not None else None)
         if stt is not None and stt.recorder_available():
             ig.set_description(
                 f"Mic recorder: {stt.recorder_name()}.  Transcribed by "
-                "SiliconFlow (SenseVoiceSmall) or Groq (Whisper) — whichever "
-                "key you have.")
+                "SiliconFlow, Groq, or locally with whisper.cpp"
+                + (f" ({os.path.basename(_local_model)} found on this machine)"
+                   if _local_model else "") + ".")
         elif stt is not None:
             ig.set_description(
                 "No microphone recorder found.  Install pulseaudio-utils "
@@ -9397,10 +9401,14 @@ class SettingsDialog(Adw.PreferencesDialog):
         self.stt_provider_row = Adw.ComboRow()
         self.stt_provider_row.set_title("Transcription provider")
         self.stt_provider_row.set_subtitle(
-            "Auto uses your active chat provider when it can transcribe.")
-        self._stt_provider_keys = ["auto", "siliconflow", "groq"]
+            "Auto uses a cloud provider you configured.  Local runs "
+            "whisper.cpp on this machine — no key, no network.")
+        self._stt_provider_keys = ["auto", "local", "siliconflow", "groq"]
         self.stt_provider_row.set_model(Gtk.StringList.new(
-            ["Auto", "SiliconFlow (SenseVoiceSmall)", "Groq (Whisper)"]))
+            ["Auto (cloud, if configured)",
+             "Local — whisper.cpp (offline)",
+             "SiliconFlow (SenseVoiceSmall)",
+             "Groq (Whisper)"]))
         cur_sp = (parent.settings.get("stt_provider") or "auto").lower()
         if cur_sp in self._stt_provider_keys:
             self.stt_provider_row.set_selected(
@@ -9450,6 +9458,22 @@ class SettingsDialog(Adw.PreferencesDialog):
                                                        r.get_text().strip()
                                                        or "whisper-large-v3-turbo"))
         ig.add(self.stt_model_row)
+
+        # Offline whisper.cpp model path.  Blank = auto-find in the usual
+        # directories; the detected path is shown as the subtitle so the
+        # operator can see WHICH model voice will use.
+        self.stt_local_model_row = Adw.EntryRow()
+        self.stt_local_model_row.set_title("Local whisper model (ggml .bin)")
+        self.stt_local_model_row.set_text(
+            parent.settings.get("stt_model_local", "") or "")
+        if _local_model:
+            self.stt_local_model_row.set_tooltip_text(
+                f"Auto-detected: {_local_model}")
+        self.stt_local_model_row.set_show_apply_button(True)
+        self.stt_local_model_row.connect(
+            "apply",
+            lambda r: self._set("stt_model_local", r.get_text().strip()))
+        ig.add(self.stt_local_model_row)
 
         self.stt_lang_row = Adw.EntryRow()
         self.stt_lang_row.set_title("Language hint (optional)")
