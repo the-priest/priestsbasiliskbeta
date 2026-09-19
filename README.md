@@ -54,7 +54,7 @@ An auditable `PKGBUILD` lives in `packaging/` and runs the whole test suite as i
 **Or the script**, which detects your distro *and* your privilege-escalation tool (root → nothing, else `sudo`, else `doas`), parse-checks every file before it touches disk, backs up your chat history, and updates in place on the same command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/the-priest/PriestsBasilisk/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/the-priest/priestsbasiliskbeta/main/install.sh | bash
 ```
 
 Or clone, read, then run — the honest path:
