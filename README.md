@@ -37,6 +37,10 @@ Same engine, same discipline either way: *do the thing, then prove it worked.*
 
 ## 📦 Install
 
+> **This is the beta channel** — everything below installs the beta build from
+> [`the-priest/priestsbasiliskbeta`](https://github.com/the-priest/priestsbasiliskbeta).
+> For the stable release, use the main repo instead.
+
 Basilisk runs shell commands and edits files **as you**. Read the installer before you run it — that is not boilerplate, it is the security model.
 
 **Native packages** — recommended, because they resolve the GTK stack for you:
@@ -60,7 +64,7 @@ curl -fsSL https://raw.githubusercontent.com/the-priest/priestsbasiliskbeta/main
 Or clone, read, then run — the honest path:
 
 ```bash
-git clone https://github.com/the-priest/PriestsBasilisk.git basilisk
+git clone https://github.com/the-priest/priestsbasiliskbeta.git basilisk
 ```
 ```bash
 cd basilisk && less install.sh
@@ -329,10 +333,9 @@ If it earns its place in your kit, star the repo and tell someone who would use 
 
 <br/><br/>
 
-<a href="https://github.com/the-priest/PriestsBasilisk"><img src="https://img.shields.io/badge/★%20Star%20the%20repo-e11d2b?style=for-the-badge&labelColor=08090b" alt="Star the repo"></a>
+<a href="https://github.com/the-priest/priestsbasiliskbeta"><img src="https://img.shields.io/badge/★%20Star%20the%20beta%20repo-e11d2b?style=for-the-badge&labelColor=08090b" alt="Star the beta repo"></a>
 <a href="#-install"><img src="https://img.shields.io/badge/Install%20in%20one%20line-7d121b?style=for-the-badge&labelColor=08090b" alt="Install"></a>
 
 <img src="https://capsule-render.vercel.app/api?type=waving&color=0:08090b,50:4a0a11,100:e11d2b&height=130&section=footer&text=prove%20everything&fontColor=ffffff&fontSize=28&fontAlignY=72&animation=twinkling" width="100%" alt="prove everything"/>
 
 </div>
-# priestsbasiliskbeta

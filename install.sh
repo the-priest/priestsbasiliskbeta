@@ -29,11 +29,12 @@
 #   ./install.sh --no-prompt         # skip ALL interactive prompts
 #
 # Env overrides:
-#   BASILISK_REPO=the-priest/PriestsBasilisk  BASILISK_BRANCH=main  ./install.sh
+#   BASILISK_REPO=the-priest/priestsbasiliskbeta  BASILISK_BRANCH=main  ./install.sh
 #   GROQ_API_KEY=gsk_...        ./install.sh    # preset key, no prompt
 #
-# One-liner install from GitHub:
-#   curl -fsSL https://raw.githubusercontent.com/the-priest/PriestsBasilisk/main/install.sh | bash
+# One-liner install from GitHub (this is the BETA installer; it pulls the
+# beta repo by default):
+#   curl -fsSL https://raw.githubusercontent.com/the-priest/priestsbasiliskbeta/main/install.sh | bash
 #
 
 set -eo pipefail   # NOTE: no -u — curl|bash leaves BASH_SOURCE empty
@@ -157,7 +158,13 @@ for _a in "${OPTIONAL_ART[@]}"; do OPTIONAL_FILES+=("${ASSET_DIR}/${_a}"); done
 EXT_FILES=(__init__.py bench.py browser.py codescan.py engage.py exploits.py extman.py foresight.py headroom.py mcp.py memory.py \
            oracle.py juiceshop.py pentest.py reach.py research.py sandbox.py skills.py tasks.py verify.py webshield.py worker.py xbow.py \
            zdayfind.py workspace.py recall.py unblock.py)
-GITHUB_REPO="${BASILISK_REPO:-the-priest/PriestsBasilisk}"
+# ── WHICH REPO THIS INSTALLER PULLS FROM ─────────────────────────────
+# This is the BETA installer, so its default source is the beta repo. The
+# stable installer in the-priest/PriestsBasilisk keeps its own default; the
+# two never cross, which is what lets beta be tested without dragging the
+# release build (or its users) along. Override per-run with:
+#   BASILISK_REPO=the-priest/PriestsBasilisk  ./install.sh
+GITHUB_REPO="${BASILISK_REPO:-the-priest/priestsbasiliskbeta}"
 GITHUB_BRANCH="${BASILISK_BRANCH:-main}"
 
 # How to re-invoke this installer in the hints we print.  Under `curl|bash`
