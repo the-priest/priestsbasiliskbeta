@@ -1,0 +1,20453 @@
+#!/usr/bin/env python3
+"""
+basilisk — personal AI assistant.  GTK4 + libadwaita UI.
+
+Run:    python3 basilisk.py
+Or, after install:  basilisk
+"""
+
+from __future__ import annotations
+
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+gi.require_version("Pango", "1.0")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import (Gtk, Adw, GLib, Gdk, Gio, Pango, GObject,  # noqa
+                          GdkPixbuf)
+
+# Two harmless GTK4 deprecation warnings come from image calls we still use —
+# the logo texture (Gdk.Texture.new_for_pixbuf) and the watermark blit
+# (Gdk.cairo_set_source_pixbuf). Both work fine on current GTK/libadwaita; this
+# just keeps the console clean. Matched by message so any OTHER (new/real)
+# deprecation still prints.
+import warnings as _warnings
+_warnings.filterwarnings("ignore", category=DeprecationWarning,
+                         message=r"Gdk\.cairo_set_source_pixbuf")
+_warnings.filterwarnings("ignore", category=DeprecationWarning,
+                         message=r"Gdk\.Texture\.new_for_pixbuf")
+
+import sys
+import os
+import gc
+import io
+import re
+import json
+import hashlib
+import threading
+import urllib.request
+import urllib.parse
+import datetime
+import base64
+import bisect
+import traceback
+import time
+try:
+    from basilisk_btn_art import BTN_ART_B64
+except Exception:
+    BTN_ART_B64 = {}   # missing module -> art buttons just fall back to symbolic
+from typing import List, Dict, Any, Optional, Callable, Tuple
+
+from basilisk_core import (
+    _as_int,
+    fabricated_tool_result, strip_fabricated_results,
+    GroqBackend, OpenAICompatBackend, BackendRouter,
+    ChatStore, Chat,
+    load_settings, save_settings, log,
+    tool_read_file, tool_list_dir, tool_run_command, estimate_runtime,
+    tool_system_info,
+    tool_write_file, make_edit_diff,
+    tool_check_updates, tool_recent_downloads, tool_service_status,
+    tool_journal_tail, tool_disk_usage, tool_processes,
+    tool_network_status, tool_find_file,
+    run_security_audit, format_audit_for_chat, printed_url_target,
+    run_network_scan, format_scan_for_chat,
+    tool_desktop_info, tool_list_apps, tool_launch_app,
+    tool_list_windows, tool_focus_window, tool_close_window,
+    tool_notify, tool_type_text, tool_press_key,
+    tool_media_control, tool_screenshot, tool_read_screen,
+    tool_make_dir, tool_copy_path, tool_move_path, tool_delete_path,
+    tool_path_info, tool_open_url, tool_web_read, web_read_tier, tool_web_sources,
+    tool_web_search, tool_web_research, tool_browser_status,
+    tool_workspace_edits, tool_workspace_append, tool_workspace_insert,
+    tool_workspace_glob, tool_workspace_read_many, workspace_cwd,
+    tool_image_search,
+    tool_analyze_image, tool_capture_photo, tool_detect_faces,
+    tool_tooling_check, tool_pentest_plan, tool_cve_lookup,
+    tool_parse_output, tool_methodology, tool_wordlist_find,
+    tool_cheatsheet, tool_report_findings,
+    tool_nuclei_template, tool_reflect_findings,
+    tool_attack_writeup, tool_code_tooling_check, tool_code_scan_plan,
+    tool_workspace_import, tool_workspace_status, tool_workspace_overview,
+    tool_workspace_tree, tool_workspace_search, tool_workspace_read,
+    tool_workspace_replace, tool_workspace_write, tool_workspace_delete,
+    tool_workspace_diff, tool_workspace_revert, tool_workspace_export,
+    tool_workspace_close, tool_workspace_test_command,
+    tool_workspace_baseline, tool_workspace_verify,
+    tool_workspace_health, _ws_path,
+    tool_parse_scan, tool_triage_findings, tool_remediation_hint,
+    tool_scope_set, tool_scope_check, tool_scope_show, tool_asset_record,
+    tool_scope_exclude, tool_scope_window, tool_scope_authorisation,
+    tool_engagement_graph, tool_loot_record, tool_loot_list, tool_loot_reuse,
+    tool_oracle_arm, tool_oracle_check, tool_oracle_status, tool_oracle_listen,
+    tool_graph_ingest, tool_sqlmap_plan, tool_load_tools,
+    tool_submit_flag, tool_xbow_score, tool_xbow_report,
+    tool_juiceshop_score, tool_juiceshop_report,
+    tool_juiceshop_next, tool_juiceshop_diff,
+    tool_jwt_forge, tool_nosql_injection, tool_xxe_payload,
+    tool_coupon_forge, tool_captcha_solve, tool_reset_password,
+    tool_business_logic,
+    tool_ssti_payload, tool_ssrf_payload, tool_deserialization_payload,
+    tool_prototype_pollution, tool_path_traversal, tool_xss_payload,
+    tool_sqli_payload, tool_payload_encoder, tool_tech_fingerprint,
+    tool_waf_detect, tool_trick_detect,
+    tool_payload_mutate, tool_session_flow, tool_oracle_analyze,
+    tool_command_injection, tool_idor_probe, tool_race_condition,
+    tool_upload_bypass, tool_graphql_probe, tool_open_redirect, tool_cors_probe,
+    tool_ldap_injection, tool_xpath_injection, tool_crlf_injection,
+    tool_host_header_injection, tool_ssi_injection, tool_csv_injection,
+    tool_request_smuggling, tool_csrf_poc, tool_clickjacking,
+    tool_mass_assignment, tool_auth_bypass_headers, tool_cache_poisoning,
+    tool_auth_attack, tool_jwt_attack, tool_api_test,
+    tool_email_header_injection, tool_websocket_probe, tool_oauth_probe,
+    tool_attack_surface, tool_verify_solve,
+    tool_webapp_recon, tool_juiceshop_source,
+    tool_benchmark_targets, tool_benchmark_score, tool_benchmark_report,
+    tool_benchmark_compare,
+    quick_facts as tool_quick_facts,
+    sudo_cached, detect_urgency, looks_degraded, reply_intends_action,
+    reply_is_bare_stall,
+    reply_is_strong_conclusion,
+    note_command, recent_duplicate,
+    parse_tool_calls, strip_tool_calls, shell_block_command,
+    looks_like_failed_tool_call, scrub_tool_debris,
+    contains_tool_markup,
+    _normalise_tool_syntax, build_tools_schema,
+    extract_think_blocks, strip_think_blocks, speakable_text,
+    stream_visible_text,
+    is_online, is_sensitive_path, command_needs_sudo, is_catastrophic_command,
+    command_tampers_self, Watcher,
+    PROVIDERS, PROVIDERS_BY_KEY,
+    VISION_MODELS,
+    supports_reasoning_effort, _REASONING_EFFORT_LEVELS,
+    leashed_intent,
+    get_ledger,
+)
+from basilisk_persona import (
+    build_system_prompt, assemble_messages, volatile_block,
+    title_from_first_message,
+    conversational_turn, direct_answer_turn,
+)
+
+# Variant-analysis / zero-day-class source scanner (read-only, stdlib-only).
+# Imported defensively for the SAME reason as _recall below: these are sidecar
+# modules, and a missing or import-broken sidecar (a partial install, or a
+# platform-specific import error like the POSIX-only `resource` that once took
+# out the whole ext package on Windows) must degrade the tools that use it —
+# never stop the app from starting. The offensive builders below null-check it.
+try:
+    from basilisk_ext import zdayfind as _zdayfind
+except Exception:      # pragma: no cover - only on a broken/partial install
+    _zdayfind = None
+# Action recall: the per-run list of what has already been done.  Imported
+# defensively — a missing sidecar file must degrade the anti-repetition help,
+# never stop the app from starting.
+try:
+    from basilisk_ext import recall as _recall
+except Exception:      # pragma: no cover - only on a broken/partial install
+    _recall = None
+# Direct handle for newer offensive generators wired below. Same defensive
+# import: a broken exploits.py must disable those specific tools with a clean
+# "unavailable" result, not crash startup.
+try:
+    from basilisk_ext import exploits as _exploits
+except Exception:      # pragma: no cover - only on a broken/partial install
+    _exploits = None
+
+
+def _ext_unavailable(tool: str, module: str):
+    """Uniform result for an offensive tool whose sidecar module failed to
+    import. Returns a zero-arg callable so it slots into the builder table
+    exactly like a real handler."""
+    return lambda: {
+        "ok": False,
+        "error": (f"{tool} is unavailable: its module (basilisk_ext.{module}) "
+                  f"is not installed or failed to import on this system. "
+                  f"Reinstall to restore it; the rest of Basilisk is unaffected."),
+        "unavailable": True,
+    }
+
+# Voice (speech in / speech out) is optional.  If basilisk_voice is missing or
+# fails to import, the app runs exactly as before — every voice hook below
+# guards on `self.stt` / `self.tts` being present.
+try:
+    import basilisk_voice
+    basilisk_voice.set_logger(log)
+    _VOICE_OK = True
+except Exception as _ve:  # noqa
+    basilisk_voice = None
+    _VOICE_OK = False
+
+APP_ID  = "org.thepriest.basilisk"
+APP_NAME = "Basilisk"
+VERSION = "1.2.0.9"
+
+# ── Tool-chain efficiency knobs ──
+# How many model round-trips a single user turn may chain through.  With
+# read-only tools now batched (many lookups per round-trip), this budget
+# stretches much further than it looks.  On hitting it Basilisk doesn't dead-
+# end — it takes one final, tool-free turn to answer with what it gathered.
+# The y/n confirmation gate and the catastrophic-command hard block still
+# fire independently, so a high budget never means an unsupervised risky run.
+# This 150-step cap applies only in a SUPERVISED (per-command approval) mode;
+# it's overridable per-user via the "max_tool_steps" setting, and it resets
+# every turn so "keep going" always grants a fresh budget.
+MAX_TOOL_CHAIN = 150
+# Tools that count as "went and looked". The promise gate below asks whether
+# ANY of these ran this request before it lets a current-events turn end.
+_WEB_TOOL_NAMES = frozenset({
+    "web_read", "web_search", "open_url", "web_sources", "image_search",
+    "fetch", "browse", "read_url",
+})
+# ANSWER MODE stall recovery: how many times a turn may be pushed after the
+# model DESCRIBED its next action but emitted no tool call ("Let me grab the HN
+# thread…" and then nothing).  Two is deliberate — one push covers the ordinary
+# slip, a second covers a model that needed telling twice, and past that it is
+# not going to act, so the turn ends rather than burning round-trips on
+# narration.  The mission loop has always had this recovery; answer mode had
+# none, which is how a research question ended on a promise instead of a report.
+# THE COUNTER IS CONSECUTIVE, NOT CUMULATIVE — and that distinction is the
+# whole difference between "it stops before it's finished" and an agent.
+#
+# The cap exists to stop a model that ONLY narrates. A model that narrates,
+# gets pushed, then goes and RUNS SOMETHING is not that model — it is a model
+# that recovered. Counting those pushes cumulatively meant a job of any real
+# length spent its whole budget early and then died silently at the first
+# stall after it: a repo task that stalls at step 3 and again at step 40 had
+# already used both nudges on step 3, so step 40 ended the turn with the work
+# half done and nothing said about it. The doubling for work turns below was a
+# patch on that arithmetic rather than a fix for it.
+#
+# So _feed_tool_result — the one choke point every real tool result passes
+# through — resets this to zero. Real progress clears the stall record.
+ANSWER_STALL_NUDGE_MAX = 2
+# …and an absolute ceiling still bounds the pathological case: a model that
+# alternates one cheap tool call with one narration forever would otherwise
+# never trip the consecutive cap. This is the hard stop, counted per operator
+# request and never reset by progress.
+ANSWER_STALL_NUDGE_TOTAL_MAX = 12
+# Foresight: how long the (optional) consequence-prediction model pass may take
+# before the turn stops waiting for it.  A model pass is a full network round
+# trip; without a deadline a hung one wedged the whole turn forever, because
+# nothing downstream of it ever fed a tool result back.  On timeout we fall back
+# to foresight's deterministic rules, which are local pattern matching and take
+# microseconds.  The catastrophic floor at the execution primitive is separate
+# and always applies.
+FORESIGHT_TIMEOUT_S = 20.0
+# Sidecar completions (memory consolidation, the foresight model pass) are
+# short structured answers on behalf of something that is BLOCKED waiting for
+# them.  They get a real deadline and a small budget, not the chat turn's.
+EXT_COMPLETE_TIMEOUT_S = 18.0
+EXT_COMPLETE_MAX_TOKENS = 320
+# Turn watchdog: the assistant turn loop advances only when something feeds it —
+# a stream callback or a tool result.  Every feeder runs on a daemon thread, so
+# an exception in one used to strand the turn in "working…" with no way out but
+# restarting the app.  This is the last-resort backstop for a loop that has
+# genuinely died.
+#
+# The value is chosen so it CANNOT fire on real work: the longest hard timeout
+# estimate_runtime hands out is 1800s, and tool_run_command enforces it, so any
+# command returns by then; a model stream is bounded by STREAM_MAX_WALL_S.  With
+# 40 minutes of complete silence, nothing legitimate is still running — the loop
+# is dead and the operator is staring at a spinner.
+TURN_WATCHDOG_S = 2400.0
+TURN_WATCHDOG_POLL_S = 30
+# In autonomous walk-away mode (no per-command approval — the default) the run
+# is UNCAPPED: it keeps going until the task is actually finished (the model
+# stops calling tools) or the operator presses Stop. Stop and the catastrophic-
+# command block fire regardless of depth, and each turn's budget resets, so
+# "run to completion" never means "run unsupervised into something destructive."
+# Parallel workers when several read-only tools fire in one turn.
+TOOL_BATCH_MAX_WORKERS = 6
+
+# ── Autonomous mission directives ──
+# Injected as a system addendum when a mission turn settled without finishing
+# (the code re-kicks; these tell the model WHY it's being pushed again).  The
+# completion protocol (the [[MISSION_COMPLETE]] token) is also stated in the
+# autonomous addendum so the model can end a trivial task on the first turn.
+MISSION_COMPLETE_TOKEN = "[[MISSION_COMPLETE]]"
+_MISSION_CONTINUE_DIRECTIVE = (
+    "[AUTONOMOUS MISSION — NOT FINISHED, CONTINUE NOW.\n"
+    "Objective (from the operator): {obj}\n"
+    "Your last turn ended without completing it. There is NO operator watching "
+    "and NOTHING to wait for. Do NOT ask a question, do NOT say you'll wait, do "
+    "NOT restate progress and stop. Take the very NEXT concrete action toward "
+    "the objective RIGHT NOW with a tool call. USE THE run TOOL — do NOT "
+    "write a command in a ```bash``` code fence for the operator to copy. "
+    "You have a run tool; use it. A reply with a code block and no tool "
+    "call is WRONG.\n"
+    "If this is an exploitation run: consult oracle_status to see what's already "
+    "CONFIRMED (never redo a proven exploit) and what's still open, and "
+    "oracle_check every hit against its success marker before you count it — a "
+    "200 or a plausible-looking response is NOT a solve.\n"
+    "Only when the objective is genuinely 100% achieved and verified (or it was "
+    "purely a question you have now fully answered) output the exact token "
+    + MISSION_COMPLETE_TOKEN + " on its own line to end. NEVER output that token "
+    "for partial, assumed, or unverified completion. Otherwise: act.]")
+_MISSION_VERIFY_DIRECTIVE = (
+    "[MISSION COMPLETION CHECK — VERIFY, THEN END.\n"
+    "The objective: {obj}\n"
+    "Silently re-check it point by point against concrete evidence you actually "
+    "produced this run. If ANY part is incomplete, unverified, untested, or "
+    "assumed, continue working NOW — take the next action with a tool call. "
+    "If every part IS concretely confirmed complete, reply with ONE short "
+    "confirming sentence — do NOT repeat your findings or the full report, it "
+    "has already been shown — and output " + MISSION_COMPLETE_TOKEN
+    + " on its own line.]")
+# Keep this many most-recent tool_result blocks at full length in the
+# history resent to the model; older ones get trimmed to a stub (they've
+# already been consumed) so a long research chat doesn't re-bill huge
+# outputs every turn.
+HISTORY_KEEP_FULL_TOOL_RESULTS = 2
+# How large the raw history may get before we re-trim. Below this, the rendered
+# history is held BYTE-STABLE so the provider's prefix cache keeps hitting;
+# above it, the trim watermark advances once and then holds again. Trading one
+# occasional cache miss for one on every single turn.
+HISTORY_STABLE_BUDGET_CHARS = 120_000
+HISTORY_TRIM_HEAD_CHARS = 600
+# Memory: the live terminal-log TextView and the rendered chat rows are DISPLAY
+# only (the real transcript lives in the SQLite ChatStore, and the model's
+# history is rebuilt from the DB, not these widgets). Left uncapped they grow
+# without bound across a long autonomous run. Cap the *view* to a rolling window
+# — trimming old widgets frees memory and speeds up layout, and changes nothing
+# about behaviour, autonomy, or the model's context.
+MAX_TERMINAL_LINES = 2500
+# Byte ceilings so a pentest run (few but HUGE lines — full HTTP bodies, JSON,
+# base64) can't grow the view buffer without bound even when the line count
+# stays low. MAX_TERMINAL_CHARS bounds the whole buffer; MAX_TERMINAL_LINE_CHARS
+# truncates any single monster line before it's inserted.
+MAX_TERMINAL_CHARS = 220_000
+MAX_TERMINAL_LINE_CHARS = 2_000
+# Keep only the last N command-blocks (a "$ cmd" line + its output = one turn)
+# in the live log; older ones are deleted from the TextBuffer, freeing their RAM.
+MAX_TERMINAL_TURNS = 20
+# Keep only the most recent chat bubbles in the widget tree. GTK message
+# widgets (TextViews, code blocks, images) are heavy; holding a whole long
+# conversation is what balloons RAM to gigabytes. The full transcript lives in
+# the SQLite store on disk and the model's context is rebuilt from there — these
+# widgets are display-only, so once a conversation passes this many visible
+# messages the oldest are unparented AND disposed (their memory reclaimed),
+# never touching context, autonomy, or behaviour. Tune higher for more
+# scroll-back at the cost of RAM.
+MAX_CHAT_ROWS = 20
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THEME — Catppuccin Mocha, generously sized, cozy
+# ═════════════════════════════════════════════════════════════════════
+
+# Note: GTK CSS doesn't support CSS variables across rules.  We inline
+# the palette by hand and use `font-size` numbers that are large enough
+# to read on a phone screen without squinting.
+
+CSS = b"""
+/* =====================================================================
+   BASILISK THEME - a warm, dark, Claude-coloured dark theme: warm-charcoal
+   surfaces under Claude's clay/coral accent, red for danger, monospace for
+   headers and machine output. Minimalist and professional - dark first, the
+   coral only where it earns attention.
+   GTK CSS has no variables across rules, so the palette is inlined.
+
+   Palette:
+     bg base    #0a090a   surfaces  #11100f / #171716   line  #232120
+     text       #dfdedb   dim       #8e8c88
+     accent     #a94f34   accent-hi #d97757   accent-dim rgba(217, 119, 87, .15)
+     accent-fill#c15f3c (suggested-action buttons, white text)
+     ok/green   #2ecc71   warn      #f0a500   danger #e5484d
+   ===================================================================== */
+
+/* ===== Adwaita named-color overrides =====
+   libadwaita widgets (SwitchRow, SpinRow, ComboRow, AlertDialog buttons,
+   focus rings, selections, links) pull these named colours.  Without
+   overriding them every built-in control renders in GTK's stock blue or
+   the user's Plasma accent - which is exactly what made the UI look
+   inconsistent.  Retint them ALL to the Basilisk palette in one place. */
+
+/* Accent: Claude's clay/coral. #d97757 carries every highlight -- focus rings,
+   links, switches, selection, the accent glows across the custom widgets -- so
+   the app reads as warm-dark-with-coral rather than black-and-grey. Filled
+   primary (suggested-action) surfaces use the coral itself (#c15f3c, one shade
+   deeper so white text stays legible on it). The neutrals are warmed a touch
+   toward charcoal to sit under the coral. Danger red, warning amber and success
+   green are semantic and untouched. */
+@define-color accent_color              #d97757;
+@define-color accent_bg_color           #c15f3c;
+@define-color accent_fg_color           #ffffff;
+
+@define-color destructive_color         #e5484d;
+@define-color destructive_bg_color      #e5484d;
+@define-color destructive_fg_color      #ffffff;
+
+@define-color success_color             #2ecc71;
+@define-color success_bg_color          #2ecc71;
+@define-color success_fg_color          #0a090a;
+@define-color warning_color             #f0a500;
+@define-color warning_bg_color          #f0a500;
+@define-color warning_fg_color          #0a090a;
+@define-color error_color               #e5484d;
+@define-color error_bg_color            #e5484d;
+@define-color error_fg_color            #ffffff;
+
+@define-color window_bg_color           #0a090a;
+@define-color window_fg_color           #dfdedb;
+@define-color view_bg_color             #11100f;
+@define-color view_fg_color             #dfdedb;
+@define-color headerbar_bg_color        #11100f;
+@define-color headerbar_fg_color        #dfdedb;
+@define-color headerbar_border_color    #232120;
+@define-color popover_bg_color          #11100f;
+@define-color popover_fg_color          #dfdedb;
+@define-color dialog_bg_color           #11100f;
+@define-color dialog_fg_color           #dfdedb;
+@define-color card_bg_color             #171716;
+@define-color card_fg_color             #dfdedb;
+@define-color sidebar_bg_color          #0d0d0c;
+@define-color sidebar_fg_color          #dfdedb;
+
+@define-color borders                   #232120;
+
+/* ===== Base ===== */
+
+/* Texture: a very faint top-to-bottom gradient on the big surfaces gives the
+   near-black grounds real depth instead of a flat fill -- the "pro terminal"
+   feel -- without touching the structure or the palette. The deltas are a
+   couple of points of lightness, so it reads as depth, not as a colour. */
+window, .background {
+    background-color: #0a090a;
+    background-image: linear-gradient(to bottom, #0c0c0c, #09080a 60%);
+    color: #dfdedb;
+    font-family: 'Inter', 'Cantarell', 'SF Pro Text', sans-serif;
+}
+
+headerbar {
+    background-color: #11100f;
+    background-image: linear-gradient(to bottom, #161515, #100f0f);
+    color: #dfdedb;
+    border-bottom: 1px solid #232120;
+    min-height: 56px;
+    padding: 4px 8px;
+}
+
+.sidebar {
+    background-color: #0d0d0c;
+    background-image: linear-gradient(to bottom, #100f0f, #0b0a0b);
+    border-right: 1px solid #232120;
+}
+
+/* ===== App branding ===== */
+
+.app-title {
+    font-size: 27px;
+    font-weight: 900;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    color: #e7e5e4;
+    letter-spacing: 3px;
+    text-shadow: 0 2px 3px rgba(0, 0, 0, 0.9), 0 0 11px rgba(169, 167, 164, 0.041);
+}
+/* Connectivity dot beside BASILISK: green online, red offline */
+.online-dot {
+    font-size: 13px;
+    margin-top: 2px;
+}
+.online-dot.online {
+    color: #d97757;
+    text-shadow: 0 0 8px rgba(217, 119, 87, 0.45);
+}
+.online-dot.offline {
+    color: #7a7873;
+    text-shadow: 0 0 6px rgba(122, 120, 115, 0.6);
+}
+.app-subtitle {
+    font-size: 16px;
+    color: #8e8c88;
+    font-family: 'JetBrains Mono', monospace;
+    margin-top: 2px;
+}
+
+.chat-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: #dfdedb;
+}
+/* Composer input as a rounded bubble so it reads as a contained field
+   instead of bleeding into the bottom edge. */
+.input-frame {
+    background-color: #121110;
+    border: 1px solid #2d2c2a;
+    border-radius: 20px;
+    padding: 4px 8px;
+    margin-bottom: 8px;
+}
+.input-frame:focus-within {
+    border-color: #d97757;
+    background-color: #1e1c1b;
+}
+.chat-subtitle {
+    font-size: 16px;
+    color: #8e8c88;
+}
+
+/* ===== Sidebar chat list ===== */
+
+.chat-row {
+    background-color: transparent;
+    border-radius: 11px;
+    padding: 15px 16px 15px 18px;
+    margin: 5px 8px;
+    min-height: 64px;
+    border-left: 3px solid transparent;
+    transition: background-color 160ms ease, border-color 160ms ease;
+}
+.chat-row:hover {
+    background-color: #11100f;
+    border-left-color: rgba(217, 119, 87, 0.55);
+}
+.chat-row.selected, .chat-row:selected {
+    background: linear-gradient(90deg, rgba(215, 213, 210, 0.10),
+                rgba(136, 135, 131, 0.04) 55%, rgba(17, 16, 15, 0) 90%);
+    border-left: 3px solid #d5d3d0;
+    /* NO INFINITE ANIMATION HERE. This rule is on the SELECTED chat row,
+       which means it is on screen from the moment the app opens until it
+       closes - so a 3s infinite keyframe kept a repaint loop running at
+       idle, forever, for a glow nobody is looking at. It was the only
+       always-on animation in the stylesheet and the most likely reason the
+       app "feels laggy" when nothing is happening. The lit state is now
+       static; the animated ones that remain are all gated behind a state
+       class (.working, .live, .busy) and stop when the work does. */
+    box-shadow: inset 0 0 0 1px rgba(239, 239, 238, 0.046),
+                -2px 0 15px rgba(220, 219, 217, 0.22);
+}
+@keyframes metalglow {
+    0%   { border-left-color: #8e8c88; box-shadow: inset 0 0 0 1px rgba(215, 213, 210, 0.08), -2px 0 12px rgba(205, 204, 202, 0.16); }
+    50%  { border-left-color: #f4f4f3; box-shadow: inset 0 0 0 1px rgba(239, 239, 238, 0.18), -2px 0 17px rgba(232, 231, 230, 0.30); }
+    100% { border-left-color: #8e8c88; box-shadow: inset 0 0 0 1px rgba(215, 213, 210, 0.08), -2px 0 12px rgba(205, 204, 202, 0.16); }
+}
+.chat-row .title-line {
+    color: #edeceb;
+    font-weight: 700;
+    font-size: 20px;
+}
+.chat-row .meta-line {
+    color: #7c7a76;
+    font-size: 12px;
+    letter-spacing: 0.3px;
+    margin-top: 3px;
+}
+.chat-row .pin-icon {
+    font-size: 12px;
+}
+
+/* ===== Empty states ===== */
+
+.empty-state {
+    color: #696762;
+    padding: 60px 32px;
+}
+.empty-state-title {
+    font-size: 34px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    color: #dfdedb;
+    margin-bottom: 18px;
+}
+.empty-state-body {
+    font-size: 22px;
+    color: #8e8c88;
+    line-height: 1.55;
+}
+
+/* ===== Message bubbles ===== */
+
+.msg-row {
+    padding: 4px 0;
+}
+
+/* User: right-aligned bubble */
+.msg-user {
+    background-color: rgba(64, 20, 96, 0.14);
+    color: #f3f3f1;
+    border-radius: 12px 12px 4px 12px;
+    padding: 18px 22px;
+    margin: 8px 12px;
+    font-size: 30px;
+    line-height: 1.45;
+    border: 1px solid rgba(64, 20, 96, 0.40);
+}
+
+/* Assistant: left-aligned, translucent SILVER bubble (matches Basilisk's icon;
+   contrasts the user's green) */
+.msg-assistant {
+    background-color: rgba(217, 119, 87, 0.13);
+    color: #f3f2f1;
+    padding: 16px 20px;
+    margin: 8px 12px;
+    font-size: 30px;
+    line-height: 1.55;
+    border-radius: 12px 12px 12px 4px;
+    border: 1px solid rgba(217, 119, 87, 0.36);
+}
+
+/* ---- WHY THE 60px INSET LIVES HERE AND NOT ON THE BUBBLE ----
+   Both bubbles used to carry the inset themselves:
+
+       .msg-user      { margin: 8px 12px 8px 60px; }
+       .msg-assistant { margin: 8px 60px 8px 12px; }
+
+   and that one-sided margin is what made text spill out of the bubble
+   background. Each bubble is halign:START/END with hexpand:false, so GTK
+   allocates it its NATURAL width -- but the height-for-width query that
+   decided how TALL to make it was answered for a different, wider size.
+   A margin of 12 on one side and 60 on the other widens that disagreement
+   by 48px, and on the steep part of a wrapped list's height curve 48px of
+   width is ~200px of height.
+
+   Measured on a real reply (eight wrapped bullets, 810px window): the
+   bubble asked for 1593px, was given 1394px, and drew its last ~200px of
+   text below its own background -- which is exactly what "text is flowing
+   out of bubbles" looks like. The same 200px inflated the scroll range, so
+   finishing a reply jumped the view to a bottom that was mostly empty.
+
+   Moving the inset one level up fixes both: the column is a plain
+   hexpanding box, so its margin cannot disagree with anything, and the
+   bubble's own margin is symmetric. The rendered inset is unchanged --
+   12 + 48 is the 60 it always was. */
+.msg-column-assistant { margin-right: 48px; }
+.msg-column-user      { margin-left: 48px; }
+
+/* Compact tool indicator (replaces visible JSON dump) */
+.msg-tool-indicator {
+    padding: 6px 16px 6px 70px;
+    margin: 2px 12px;
+}
+.tool-indicator-label {
+    color: #8e8c88;
+    font-size: 17px;
+    font-family: 'JetBrains Mono', monospace;
+    opacity: 0.85;
+}
+
+/* Model reasoning ("thoughts") - collapsed by default, click to open */
+.thoughts-expander {
+    margin: 2px 0 4px 0;
+    font-size: 15px;
+    color: #9b9894;
+}
+.thoughts-expander > title {
+    color: #9b9894;
+    opacity: 0.9;
+}
+.thoughts-text {
+    color: #aba9a6;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 15px;
+    background: rgba(142, 140, 136, 0.08);
+    border-left: 2px solid rgba(142, 140, 136, 0.35);
+    padding: 8px 10px;
+    border-radius: 4px;
+}
+
+.msg-system-notice {
+    color: #8e8c88;
+    font-style: italic;
+    font-size: 18px;
+    padding: 8px 16px;
+    margin: 4px 16px;
+}
+
+/* Avatar dots */
+.avatar {
+    border-radius: 6px;
+    min-width: 52px;
+    min-height: 52px;
+    background-color: #171716;
+    font-weight: bold;
+    font-size: 22px;
+    color: #dfdedb;
+}
+.avatar-user {
+    background-color: #232120;
+    color: #dfdedb;
+}
+.avatar-basilisk {
+    background: linear-gradient(135deg, #4a4945, #9c9b95);
+    color: #0a090a;
+    border: 1px solid #afaeaa;
+    box-shadow: 0 0 10px rgba(156, 155, 149, 0.12);
+}
+
+.role-label {
+    color: #8e8c88;
+    font-weight: 700;
+    font-size: 17px;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    margin: 0 0 5px 0;
+}
+.role-label.user { color: #d97757; }
+.role-label.basilisk { color: #cfcecc; }
+
+/* ===== Code blocks ===== */
+
+.code-block {
+    background-color: #0d0d0c;
+    border: 1px solid #232120;
+    border-radius: 6px;
+    padding: 0;
+    margin: 8px 4px;
+}
+.image-block {
+    margin: 8px 4px;
+}
+.chat-image {
+    border: 1px solid #232120;
+    border-radius: 8px;
+    background-color: #0d0d0c;
+}
+.image-caption {
+    color: #8e8c88;
+    font-size: 11px;
+    margin: 2px 2px;
+}
+.code-block-header {
+    background-color: #11100f;
+    color: #8e8c88;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    padding: 6px 12px;
+    border-bottom: 1px solid #232120;
+    border-radius: 6px 6px 0 0;
+}
+.code-block textview {
+    background-color: transparent;
+    color: #d6ffdf;
+    font-family: 'JetBrains Mono', 'Fira Code', 'DejaVu Sans Mono', monospace;
+    font-size: 22px;
+    padding: 16px 18px;
+}
+
+/* ===== Status pills ===== */
+
+.status-pill {
+    background-color: #171716;
+    color: #8e8c88;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 16px;
+    font-weight: bold;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.5px;
+}
+.status-pill.online   { background-color: #2ecc71; color: #0a090a; }
+.status-pill.offline  { background-color: #232120; color: #dfdedb; }
+.status-pill.error    { background-color: #e5484d; color: #ffffff; }
+.status-pill.groq     { background: linear-gradient(135deg, #a94f34, #d97757);
+                        color: #ffffff; }
+
+/* ===== Settings ===== */
+
+.settings-section-title {
+    color: #d97757;
+    font-weight: bold;
+    font-size: 17px;
+    font-family: 'JetBrains Mono', monospace;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin: 16px 4px 6px 4px;
+}
+
+/* ===== Confirm dialog ===== */
+
+.confirm-cmd {
+    background-color: #0d0d0c;
+    color: #d97757;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 20px;
+    padding: 16px;
+    border-radius: 6px;
+    border: 1px solid #232120;
+    margin: 10px 0;
+}
+
+/* ===== Scrollbar -- wider for touch ===== */
+
+scrollbar slider {
+    background-color: #3c3937;
+    border-radius: 8px;
+    min-width: 16px;
+    min-height: 50px;
+}
+scrollbar slider:hover { background-color: #4c4a46; }
+scrollbar slider:active { background-color: #a94f34; }
+
+/* ===== Entry ===== */
+
+entry {
+    background-color: #171716;
+    color: #dfdedb;
+    border-radius: 6px;
+    padding: 12px 16px;
+    border: 1px solid #232120;
+    font-size: 20px;
+}
+entry:focus-within { outline: 2px solid #a94f34; border-color: #a94f34; }
+
+passwordentry {
+    background-color: #171716;
+    color: #dfdedb;
+    border-radius: 6px;
+    padding: 12px 16px;
+    border: 1px solid #232120;
+    font-size: 20px;
+}
+
+/* ===== Quick-action chips in empty state ===== */
+
+.quick-chip {
+    background-color: #171716;
+    color: #dfdedb;
+    border: 1px solid #232120;
+    border-radius: 6px;
+    padding: 14px 24px;
+    font-size: 19px;
+    min-height: 40px;
+}
+.quick-chip:hover {
+    background-color: #2a2927;
+    color: #d97757;
+    border-color: #a94f34;
+}
+
+/* ===== Terminal log panel ===== */
+
+.terminal-panel {
+    background-color: #090809;
+    border-top: 2px solid #232120;
+}
+
+.terminal-panel-header {
+    background-color: #0d0d0c;
+    border-bottom: 1px solid #232120;
+    padding: 6px 12px;
+    min-height: 40px;
+}
+
+.terminal-panel-title {
+    color: #d97757;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    font-weight: bold;
+    letter-spacing: 1px;
+}
+
+.terminal-log-view {
+    background-color: transparent;
+    color: #8fc99a;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 20px;
+    padding: 8px 12px;
+}
+
+.media-panel {
+    background-color: #090809;
+    border-top: 2px solid #232120;
+    min-height: 260px;
+}
+.media-body {
+    background-color: #070606;
+    padding: 6px;
+}
+.media-caption {
+    color: #d1434f;
+    font-size: 12px;
+    margin-right: 8px;
+}
+.media-placeholder {
+    color: #5c5a57;
+    font-size: 13px;
+    font-style: italic;
+    padding: 40px 12px;
+}
+
+.terminal-toggle-btn {
+    background-color: #11100f;
+    color: #8e8c88;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+    min-height: 32px;
+}
+.status-pill {
+    background-color: #0d0d0c;
+    border: 1px solid #201f1e;
+    border-radius: 10px;
+    padding: 3px 10px;
+    margin-left: 4px;
+    min-height: 26px;
+}
+.status-pill-label {
+    color: #7b7875;
+    font-size: 12px;
+    font-style: italic;
+}
+.status-pill.busy {
+    border-color: #d97757;
+    background-color: #11100e;
+}
+.status-pill.busy .status-pill-label {
+    color: #d1434f;
+    font-style: normal;
+}
+.status-pill-spinner {
+    min-width: 12px;
+    min-height: 12px;
+    color: #d97757;
+}
+.terminal-toggle-btn:hover {
+    background-color: #171716;
+    color: #d97757;
+}
+.terminal-toggle-btn.active {
+    background-color: #0d0d0c;
+    color: #d97757;
+    border: 1px solid #a94f34;
+}
+
+/* ===== Banner for watcher events ===== */
+
+.watcher-banner {
+    background-color: #0d0d0c;
+    border-left: 4px solid #f0a500;
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin: 8px 16px;
+    color: #f0a500;
+    font-size: 17px;
+}
+
+.working-row {
+    background-color: rgba(217, 119, 87, 0.15);
+    border-radius: 8px;
+    padding: 10px 22px;
+}
+.working-label {
+    color: #d97757;
+    font-size: 18px;
+    font-style: italic;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+}
+.working-spinner {
+    color: #d97757;
+    min-width: 24px;
+    min-height: 24px;
+}
+
+/* ===== Proposed-command card (advisory flow) ===== */
+
+.cmd-card {
+    background-color: #11100f;
+    border: 1px solid #232120;
+    border-left: 4px solid #a94f34;
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin: 8px 0;
+}
+.cmd-card-header {
+    margin-bottom: 8px;
+}
+.cmd-card-title {
+    color: #d97757;
+    font-weight: bold;
+    font-size: 15px;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.5px;
+}
+.risk-badge {
+    border-radius: 4px;
+    padding: 2px 12px;
+    font-size: 13px;
+    font-weight: bold;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.5px;
+}
+.risk-badge.low    { background-color: #2ecc71; color: #0a090a; }
+.risk-badge.medium { background-color: #f0a500; color: #0a090a; }
+.risk-badge.high   { background-color: #e5484d; color: #ffffff; }
+.cmd-text {
+    background-color: #0d0d0c;
+    color: #d97757;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 18px;
+    padding: 12px 14px;
+    border-radius: 6px;
+    border: 1px solid #232120;
+    margin-bottom: 8px;
+}
+.cmd-explain {
+    color: #bdbbb7;
+    font-size: 16px;
+    margin-bottom: 12px;
+}
+.card-warn {
+    background-color: rgba(229, 72, 77, 0.10);
+    border: 1px solid rgba(229, 72, 77, 0.45);
+    border-radius: 8px;
+    color: #d5d4d1;
+    font-size: 15px;
+    padding: 10px 14px;
+    margin: 6px 0;
+}
+.cmd-run-btn {
+    background: linear-gradient(135deg, #a94f34, #d97757);
+    color: #ffffff;
+    border-radius: 6px;
+    padding: 10px 22px;
+    font-weight: bold;
+    font-size: 16px;
+}
+.cmd-run-btn:hover { background: linear-gradient(135deg, #d97757, #a94f34); }
+.cmd-run-btn:disabled { background: #232120; color: #696762; }
+.cmd-copy-btn {
+    background-color: #171716;
+    color: #dfdedb;
+    border-radius: 6px;
+    padding: 10px 18px;
+    font-size: 16px;
+    border: 1px solid #232120;
+}
+.cmd-copy-btn:hover { background-color: #2a2927; border-color: #a94f34; }
+
+/* ===== libadwaita rows / settings / dialogs =====
+   Force the Basilisk surfaces on the built-in widgets so Settings and
+   dialogs match the rest of the app instead of showing stock Adwaita
+   grey. */
+
+preferencespage, preferencesgroup {
+    background-color: #0a090a;
+}
+row, .row, list.boxed-list > row {
+    background-color: #11100f;
+    color: #dfdedb;
+}
+list.boxed-list {
+    background-color: #11100f;
+    border: 1px solid #232120;
+    border-radius: 8px;
+}
+row:hover { background-color: #171716; }
+row > box { background-color: transparent; }
+
+/* Switches: blue when on, dark track when off */
+switch {
+    background-color: #232120;
+    border-radius: 14px;
+}
+switch:checked {
+    background-color: #a94f34;
+}
+switch > slider {
+    background-color: #dfdedb;
+    border-radius: 50%;
+}
+
+/* SpinRow / spinbuttons */
+spinbutton, spinbutton entry {
+    background-color: #171716;
+    color: #dfdedb;
+    border-radius: 6px;
+}
+spinbutton button {
+    background-color: #171716;
+    color: #d97757;
+}
+spinbutton button:hover { background-color: #232120; }
+
+/* ComboRow dropdown */
+comborow, dropdown {
+    background-color: #171716;
+    color: #dfdedb;
+}
+dropdown > button {
+    background-color: #171716;
+    color: #dfdedb;
+    border-radius: 6px;
+}
+popover > contents, popover > arrow {
+    background-color: #11100f;
+    color: #dfdedb;
+    border: 1px solid #232120;
+}
+popover row:selected, dropdown listview > row:selected {
+    background-color: #a94f34;
+    color: #ffffff;
+}
+
+/* Dialogs (AlertDialog / PreferencesDialog) */
+window.dialog, dialog, .messagedialog, .dialog-content {
+    background-color: #11100f;
+    color: #dfdedb;
+}
+.messagedialog .response-area button {
+    background-color: #171716;
+    color: #dfdedb;
+    border-radius: 6px;
+    margin: 4px;
+}
+.messagedialog .response-area button.suggested-action {
+    background: linear-gradient(135deg, #a94f34, #d97757);
+    color: #ffffff;
+}
+.messagedialog .response-area button.destructive-action {
+    background-color: #e5484d;
+    color: #ffffff;
+}
+
+/* Search entry in the sidebar */
+.sidebar-search, searchentry, searchentry text {
+    background-color: #171716;
+    color: #dfdedb;
+    border-radius: 6px;
+    border: 1px solid #232120;
+}
+searchentry:focus-within { border-color: #a94f34; }
+
+/* Menu button / popover menu */
+menubutton > button, .menu-button {
+    color: #dfdedb;
+}
+.popover-menu, menu, .menu {
+    background-color: #11100f;
+    color: #dfdedb;
+}
+
+/* Generic buttons inherit the dark surface unless given a role class */
+button {
+    background-color: #171716;
+    color: #dfdedb;
+    border: 1px solid #232120;
+    border-radius: 11px;
+}
+button:hover { background-color: #2a2927; border-color: #a94f34; }
+button.flat { background-color: transparent; border: none; }
+button.flat:hover { background-color: #171716; }
+button.suggested-action {
+    background: linear-gradient(135deg, #a94f34, #d97757);
+    color: #ffffff;
+    border: none;
+}
+
+/* Dragon avatar tile in chat */
+.avatar-dragon {
+    border-radius: 8px;
+    background-color: #000000;
+    box-shadow: 0 0 10px rgba(156, 155, 149, 0.12), 0 0 4px rgba(217, 119, 87, 0.114);
+}
+.avatar-cross {
+    border-radius: 8px;
+    background-color: #0d0d0b;
+    box-shadow: 0 0 8px rgba(217, 119, 87, 0.1);
+}
+.avatar-priest {
+    border-radius: 10px;
+    background-color: #0d0d0b;
+    box-shadow: 0 0 10px rgba(64, 20, 96, 0.12), 0 0 4px rgba(64, 20, 96, 0.1);
+}
+/* let the penguin watermark show through the chat */
+.chat-scroll,
+.chat-scroll > viewport,
+.chat-scroll viewport {
+    background-color: transparent;
+    background: transparent;
+}
+.chat-watermark { background: transparent; }
+/* Backdrop behind the dragon watermark -- a neutral scrim over the ember
+   gradient. Lowered from 0.62 to 0.40 so the background image reads brighter
+   while text over it stays legible. */
+.chat-scrim { background-color: rgba(0, 0, 0, 0.40); }
+
+/* Tao Te Ching line under the chat list (sidebar) - quiet, muted, out of the way */
+.tao-quote {
+    color: #ababa6;
+    font-size: 19px;
+    font-style: italic;
+    line-height: 1.5;
+}
+
+/* Links (e.g. 'Get an API key') in Basilisk blue */
+link, button.link, *:link { color: #d97757; }
+
+/* Voice: mic button + active recording state */
+.mic-button {
+    background-color: #171716;
+    color: #dfdedb;
+    border: 1px solid #232120;
+    border-radius: 11px;
+}
+.mic-button:hover { background-color: #2a2927; border-color: #a94f34; }
+.mic-recording {
+    background: linear-gradient(135deg, #e5484d, #b3b1ad);
+    color: #ffffff;
+    border: 1px solid #b3b1ad;
+    box-shadow: 0 0 10px rgba(229, 72, 77, 0.12);
+}
+.mic-recording:hover {
+    background: linear-gradient(135deg, #b3b1ad, #bcbbb6);
+    border-color: #bcbbb6;
+}
+
+/* Per-message read-aloud button - sits under the reply, clearly tappable */
+.msg-footer { margin-top: 6px; }
+.msg-speak-btn {
+    padding: 5px 14px;
+    margin: 2px 0 0 2px;
+    color: #969490;
+    background-color: rgba(18, 18, 17, 0.72);
+    border: 1px solid rgba(94, 93, 89, 0.34);
+    border-radius: 11px;
+    /* 12px against 30px body copy was a speck. This is a control the
+       operator has to be able to hit on a phone. */
+    font-size: 17px;
+    font-weight: 500;
+    opacity: 0.72;
+}
+.msg-speak-btn:hover { opacity: 1.0; }
+.msg-speak-btn:hover {
+    background-color: #242321;
+    color: #d97757;
+    border-color: #a94f34;
+}
+.msg-speak-btn.speaking {
+    color: #d97757;
+    border-color: #a94f34;
+    background-color: rgba(217, 119, 87, 0.12);
+}
+
+/* Composer action icons (attach, audit, scan, mic) - subtle + rounded */
+/* ===== Arcane "summoned" buttons: carved obsidian lit by an ember sigil,
+   not flat gray squares. Hover awakens the ember; press sinks it into the
+   stone. ASCII-only (this is a bytes-literal stylesheet). ===== */
+.icon-button {
+    background-color: #0a0909;
+    background-image:
+        radial-gradient(ellipse at 50% 118%, rgba(100, 99, 95, 0.30), rgba(100, 99, 95, 0) 70%),
+        linear-gradient(180deg, rgba(43, 42, 39, 0.28), rgba(9, 8, 8, 0) 62%);
+    border: 1px solid rgba(217, 119, 87, 0.48);
+    border-radius: 12px;
+    color: #c2c1bc;
+    padding: 7px;
+    box-shadow: inset 0 1px 0 rgba(134, 135, 129, 0.10),
+                inset 0 -6px 12px rgba(72, 71, 66, 0.16),
+                0 0 8px rgba(217, 119, 87, 0.063);
+    transition: all 160ms ease;
+}
+.notif-badge {
+    background-color: #e5484d;
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 700;
+    border-radius: 9px;
+    padding: 0px 5px;
+    margin-top: -2px;
+    margin-right: -2px;
+    min-width: 14px;
+}
+.bell-glyph {
+    font-size: 15px;
+    color: #cfcecc;
+}
+.notif-title { font-weight: 700; color: #f3f2f1; font-size: 14px; }
+.notif-body { color: #cfcecc; font-size: 13px; }
+.notif-time { color: #7a7873; font-size: 11px; }
+.icon-button:hover {
+    background-image:
+        radial-gradient(ellipse at 50% 118%, rgba(131, 131, 125, 0.44), rgba(131, 131, 125, 0) 72%),
+        linear-gradient(180deg, rgba(60, 59, 56, 0.36), rgba(9, 8, 8, 0) 60%);
+    color: #e1e1df;
+    border-color: rgba(124, 124, 118, 0.90);
+    box-shadow: inset 0 1px 0 rgba(166, 165, 160, 0.16),
+                inset 0 -7px 14px rgba(109, 109, 103, 0.24),
+                0 0 17px rgba(122, 122, 116, 0.12);
+}
+.icon-button:active {
+    background-color: #070606;
+    box-shadow: inset 0 3px 10px rgba(0, 0, 0, 0.62),
+                inset 0 0 12px rgba(98, 97, 92, 0.091),
+                0 0 7px rgba(217, 119, 87, 0.074);
+}
+.icon-button.toggled {
+    color: #d7d6d3;
+    border-color: rgba(133, 134, 128, 0.95);
+    background-image:
+        radial-gradient(ellipse at 50% 118%, rgba(128, 129, 123, 0.50), rgba(128, 129, 123, 0) 74%),
+        linear-gradient(180deg, rgba(65, 65, 60, 0.40), rgba(9, 8, 8, 0) 60%);
+    box-shadow: inset 0 -7px 14px rgba(112, 111, 105, 0.30),
+                0 0 16px rgba(124, 125, 119, 0.12);
+}
+/* Send button - blends into the background; only the silver dragon pops.
+   Glows softly while working; still acts as Stop when pressed. */
+.send-button {
+    background-color: #0a090a;
+    border: none;
+    border-radius: 14px;
+    min-width: 0;
+    padding: 3px;
+    margin: 0;
+    box-shadow: none;
+}
+.send-button:hover {
+    background-color: #0a090a;
+    box-shadow: 0 0 14px rgba(122, 122, 116, 0.12);
+}
+.send-button:active {
+    background-color: #0d0d0c;
+    box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+.send-button.working {
+    /* superseded by sendFire further down; kept as a no-op so the keyframe
+       block below stays referenced rather than becoming dead CSS */
+    animation: none;
+}
+@keyframes sendglow {
+    0%   { box-shadow: 0 0 6px rgba(212, 210, 207, 0.072); border-color: #363432; }
+    50%  { box-shadow: 0 0 20px rgba(234, 233, 232, 0.12); border-color: #d4d2cf; }
+    100% { box-shadow: 0 0 6px rgba(212, 210, 207, 0.072); border-color: #363432; }
+}
+/* Header buttons (sidebar toggle, new chat) - blend into the header, with a
+   quiet dragon-green accent only on hover so they don't draw the eye. */
+.wordmark-btn {
+    background: transparent;
+    background-image: none;
+    border: none;
+    box-shadow: none;
+    padding: 0 4px;
+    min-height: 0;
+    min-width: 0;
+}
+.wordmark-btn:hover {
+    background-color: rgba(217, 119, 87, 0.16);
+    box-shadow: none;
+}
+.logo-toggle { padding: 3px; }
+/* Custom dragon-forged art buttons (settings, bell, terminal, minimise, close):
+   the emblem art carries its own carved-stone frame, so the button is
+   transparent -- just a soft ember glow on hover, to match the rest. */
+.art-button {
+    /* Frosted Aero glass: a see-through fill with a glossy top-lit sheen and a
+       bright bevel on the upper edge, so the button reads as a pane of red
+       glass rather than carved stone. Kept translucent (low alphas) so the
+       ember backdrop shows through. */
+    background-color: rgba(25, 24, 23, 0.28);
+    background-image: linear-gradient(180deg,
+                      rgba(230, 229, 227, 0.16) 0%,
+                      rgba(100, 99, 95, 0.12) 46%,
+                      rgba(17, 16, 14, 0.10) 54%,
+                      rgba(49, 47, 44, 0.14) 100%);
+    border: 1px solid rgba(192, 191, 187, 0.28);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.30),
+                inset 0 -1px 0 rgba(0, 0, 0, 0.30),
+                0 0 8px rgba(217, 119, 87, 0.063);
+    padding: 3px;
+    border-radius: 12px;
+    transition: all 150ms ease;
+}
+.art-button:hover {
+    background-color: rgba(100, 99, 95, 0.30);
+    background-image: linear-gradient(180deg,
+                      rgba(234, 234, 232, 0.24) 0%,
+                      rgba(125, 125, 120, 0.18) 46%,
+                      rgba(41, 40, 37, 0.14) 54%,
+                      rgba(78, 77, 72, 0.20) 100%);
+    border-color: rgba(197, 196, 191, 0.55);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.40),
+                0 0 16px rgba(140, 140, 135, 0.12);
+}
+.art-button:active {
+    background-color: rgba(59, 57, 55, 0.40);
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.45),
+                inset 0 1px 0 rgba(255, 255, 255, 0.10),
+                0 0 8px rgba(122, 122, 116, 0.114);
+}
+/* UNLEASH -- the big red dragon. A quiet ember when idle, a hot red glow when
+   armed so it's unmistakable that Basilisk is off the leash. */
+.unleash-button {
+    background: transparent;
+    background-image: none;
+    border: none;
+    border-radius: 999px;
+    box-shadow: 0 0 6px rgba(122, 122, 116, 0.08);
+}
+.unleash-button:hover {
+    box-shadow: 0 0 16px rgba(135, 136, 130, 0.12);
+}
+.unleash-button.toggled {
+    background-color: rgba(90, 89, 85, 0.30);
+    box-shadow: 0 0 22px rgba(138, 138, 132, 0.12), inset 0 0 9px rgba(163, 163, 156, 0.12);
+}
+.unleash-button.toggled:hover {
+    box-shadow: 0 0 30px rgba(153, 153, 147, 0.12), inset 0 0 11px rgba(172, 171, 167, 0.12);
+}
+
+/* Reasoning-effort pill: a compact Low/Med/High segmented control. Ember
+   tint on the active segment, no animation (the guiwiring audit forbids an
+   always-on one). ASCII bytes only. */
+.effort-pill {
+    border-radius: 999px;
+    margin: 0 2px;
+}
+.effort-seg {
+    background: transparent;
+    background-image: none;
+    color: rgba(216, 215, 211, 0.75);
+    padding: 2px 9px;
+    min-height: 22px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(138, 139, 132, 0.28);
+}
+.effort-seg:hover {
+    color: rgba(239, 239, 237, 0.95);
+    background-color: rgba(128, 129, 122, 0.14);
+}
+.effort-seg:checked {
+    color: #121211;
+    background-image: linear-gradient(160deg, rgba(160, 161, 154, 0.95), rgba(121, 121, 114, 0.95));
+    border-color: rgba(156, 156, 149, 0.7);
+}
+/* A Gtk.MenuButton (settings, notifications) wraps its child in an inner
+   > button that keeps GTK's default flat-grey styling -- that's the grey box
+   around those two.  .art-button only clears the OUTER menubutton, so clear the
+   inner button too: fully transparent, no border/shadow, ember glow on hover to
+   match the plain art buttons. */
+menubutton.art-button > button {
+    background-color: rgba(25, 24, 23, 0.28);
+    background-image: linear-gradient(180deg,
+                      rgba(230, 229, 227, 0.16) 0%,
+                      rgba(100, 99, 95, 0.12) 46%,
+                      rgba(17, 16, 14, 0.10) 54%,
+                      rgba(49, 47, 44, 0.14) 100%);
+    border: 1px solid rgba(192, 191, 187, 0.28);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.30),
+                inset 0 -1px 0 rgba(0, 0, 0, 0.30),
+                0 0 8px rgba(217, 119, 87, 0.063);
+    padding: 3px;
+    min-width: 0;
+    min-height: 0;
+    border-radius: 12px;
+}
+menubutton.art-button > button:hover {
+    background-color: rgba(100, 99, 95, 0.30);
+    border-color: rgba(197, 196, 191, 0.55);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.40),
+                0 0 16px rgba(140, 140, 135, 0.12);
+}
+menubutton.art-button > button:active {
+    background-color: rgba(59, 57, 55, 0.40);
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.45),
+                inset 0 1px 0 rgba(255, 255, 255, 0.10),
+                0 0 8px rgba(122, 122, 116, 0.114);
+}
+/* Startup splash window -- dark backdrop behind the igniting-dragon animation
+   (the DrawingArea paints over this; it just avoids a white flash on the very
+   first frame). */
+.splash-window {
+    background-color: #121110;
+}
+.header-icon-button {
+    background-color: transparent;
+    background-image: none;
+    border: none;
+    box-shadow: none;
+    color: #6c6a66;
+    border-radius: 10px;
+    padding: 6px;
+}
+.header-icon-button:hover {
+    background-color: rgba(217, 119, 87, 0.10);
+    color: #d97757;
+    box-shadow: none;
+}
+.header-icon-button:active {
+    background-color: rgba(217, 119, 87, 0.16);
+}
+/* Model / provider switcher in the composer */
+.model-switch-btn {
+    background-color: #0a0909;
+    background-image:
+        radial-gradient(ellipse at 50% 130%, rgba(100, 99, 95, 0.22), rgba(100, 99, 95, 0) 72%),
+        linear-gradient(180deg, rgba(43, 42, 39, 0.22), rgba(9, 8, 8, 0) 62%);
+    border: 1px solid rgba(217, 119, 87, 0.42);
+    border-radius: 11px;
+    color: #bcbcb7;
+    padding: 5px 12px;
+    font-size: 10.5px;
+    font-weight: 600;
+    box-shadow: inset 0 -5px 10px rgba(72, 71, 66, 0.14),
+                0 0 7px rgba(217, 119, 87, 0.052);
+    transition: all 160ms ease;
+}
+.model-switch-btn:hover {
+    color: #e1e1df;
+    border-color: rgba(124, 124, 118, 0.85);
+    box-shadow: inset 0 -6px 12px rgba(109, 109, 103, 0.22),
+                0 0 14px rgba(122, 122, 116, 0.12);
+}
+/* Window controls (close / minimise): the same summoned-stone look, and the
+   close sigil flares blood-red when you reach for it. */
+windowcontrols > button,
+.titlebutton {
+    background-color: #0a0909;
+    background-image: radial-gradient(ellipse at 50% 120%, rgba(89, 88, 84, 0.24), rgba(89, 88, 84, 0) 72%);
+    border: 1px solid rgba(217, 119, 87, 0.40);
+    border-radius: 10px;
+    color: #b5b4af;
+    box-shadow: inset 0 -5px 10px rgba(72, 71, 66, 0.14),
+                0 0 6px rgba(217, 119, 87, 0.052);
+    transition: all 150ms ease;
+}
+windowcontrols > button:hover,
+.titlebutton:hover {
+    color: #e1e1df;
+    border-color: rgba(124, 124, 118, 0.85);
+    box-shadow: inset 0 -6px 12px rgba(109, 109, 103, 0.22),
+                0 0 14px rgba(122, 122, 116, 0.12);
+}
+windowcontrols > button.close:hover,
+.titlebutton.close:hover {
+    background-image: radial-gradient(ellipse at 50% 120%, rgba(229, 72, 77, 0.50), rgba(229, 72, 77, 0) 74%);
+    border-color: rgba(229, 72, 77, 0.95);
+    color: #ffffff;
+    box-shadow: 0 0 16px rgba(229, 72, 77, 0.12);
+}
+.model-group-header {
+    color: #a2a19b;
+    font-size: 15px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    margin-top: 10px;
+    margin-bottom: 4px;
+    padding-left: 4px;
+}
+.model-pick-row {
+    background-color: transparent;
+    border: none;
+    border-radius: 8px;
+    color: #edeceb;
+    padding: 11px 14px;
+    font-size: 17px;
+    font-weight: 500;
+}
+.model-pick-row:hover {
+    background-color: rgba(217, 119, 87, 0.10);
+    color: #d97757;
+}
+.model-pick-active {
+    background-color: rgba(217, 119, 87, 0.16);
+    color: #d97757;
+    font-weight: 700;
+}
+
+/* =====================================================================
+   POLISH LAYER  --  product-grade finish.  Appended last so it refines
+   the base theme above (later rules win): real depth, smooth state
+   transitions, tactile buttons, premium surfaces.  Tuned to read like a
+   shipped commercial tool, not a script with a window.
+   ===================================================================== */
+
+/* Motion: subtle, fast, everywhere it counts. */
+button, .quick-chip, .chat-row, entry, .mic-button, switch, row,
+.cmd-run-btn, .cmd-copy-btn, .terminal-toggle-btn {
+    transition: background-color 130ms ease,
+                border-color 130ms ease,
+                box-shadow 160ms ease,
+                color 130ms ease;
+}
+
+/* Header: lift it off the content with a hairline + soft shadow. */
+headerbar {
+    box-shadow: 0 1px 0 rgba(255, 255, 255,0.02),
+                0 2px 8px rgba(0, 0, 0,0.35);
+}
+
+/* ---- Buttons: depth, gradient sheen, a real pressed state ---- */
+button {
+    background-image: linear-gradient(180deg,
+                      rgba(255, 255, 255,0.03), rgba(255, 255, 255,0.0));
+    box-shadow: 0 1px 2px rgba(0, 0, 0,0.25),
+                inset 0 1px 0 rgba(255, 255, 255,0.03);
+    padding: 8px 16px;
+    font-weight: 500;
+}
+button:hover {
+    box-shadow: 0 2px 6px rgba(0, 0, 0,0.30),
+                inset 0 1px 0 rgba(255, 255, 255,0.05);
+}
+button:active {
+    background-image: none;
+    box-shadow: inset 0 2px 5px rgba(0, 0, 0,0.40);
+}
+button:disabled {
+    box-shadow: none;
+    background-image: none;
+    opacity: 0.55;
+}
+button:focus-visible {
+    outline: 2px solid rgba(217, 119, 87, 0.65);
+    outline-offset: 1px;
+}
+button.suggested-action {
+    box-shadow: 0 2px 8px rgba(217, 119, 87, 0.35),
+                inset 0 1px 0 rgba(255, 255, 255,0.15);
+}
+button.suggested-action:hover {
+    box-shadow: 0 3px 14px rgba(217, 119, 87, 0.45),
+                inset 0 1px 0 rgba(255, 255, 255,0.20);
+}
+
+/* ---- Primary action buttons (Run / Apply) ---- */
+.cmd-run-btn {
+    box-shadow: 0 2px 10px rgba(217, 119, 87, 0.40),
+                inset 0 1px 0 rgba(255, 255, 255,0.18);
+    padding: 11px 26px;
+    letter-spacing: 0.2px;
+}
+.cmd-run-btn:hover {
+    box-shadow: 0 4px 16px rgba(217, 119, 87, 0.50),
+                inset 0 1px 0 rgba(255, 255, 255,0.22);
+}
+.cmd-run-btn:active {
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0,0.35);
+}
+.cmd-copy-btn { padding: 11px 20px; }
+
+/* ---- Command / edit cards: lift them onto a surface ---- */
+.cmd-card {
+    background-image: linear-gradient(180deg, #1d1c1b, #171615);
+    box-shadow: 0 4px 18px rgba(0, 0, 0,0.40),
+                inset 0 1px 0 rgba(255, 255, 255,0.03);
+    border: 1px solid #363533;
+    padding: 16px 18px;
+}
+.cmd-card-title { letter-spacing: 0.4px; }
+.risk-badge {
+    box-shadow: 0 1px 3px rgba(0, 0, 0,0.30);
+    letter-spacing: 0.3px;
+    font-weight: 700;
+}
+
+/* ---- Composer entry: inset depth + a focus glow ---- */
+entry {
+    background-image: linear-gradient(180deg,
+                      rgba(0, 0, 0,0.18), rgba(0, 0, 0,0.0));
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0,0.35);
+}
+entry:focus-within {
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0,0.35),
+                0 0 0 3px rgba(217, 119, 87, 0.063);
+}
+
+/* ---- Message bubbles: quiet depth so they sit above the canvas ---- */
+.msg-user {
+    box-shadow: 0 2px 10px rgba(217, 119, 87, 0.18);
+}
+.msg-assistant {
+    box-shadow: 0 2px 10px rgba(0, 0, 0,0.28);
+}
+
+/* ---- Sidebar chat rows: fire accent handled in the base block above ---- */
+.chat-row {
+    border-left: 3px solid transparent;
+}
+
+/* ---- Quick chips: pill polish ---- */
+.quick-chip {
+    background-image: linear-gradient(180deg,
+                      rgba(255, 255, 255,0.03), rgba(255, 255, 255,0.0));
+    box-shadow: 0 1px 2px rgba(0, 0, 0,0.20);
+    padding: 7px 15px;
+}
+.quick-chip:hover {
+    box-shadow: 0 2px 8px rgba(217, 119, 87, 0.25);
+}
+
+/* ---- Mic recording: gentle pulse-ready glow already set; deepen it ---- */
+.mic-recording {
+    box-shadow: 0 0 0 3px rgba(229,72,77,0.25),
+                0 0 14px rgba(229,72,77,0.55);
+}
+
+/* ---- Working row: a soft active surface ---- */
+.working-row {
+    background-image: linear-gradient(90deg,
+                      rgba(217, 119, 87, 0.10), rgba(217, 119, 87, 0.0));
+    box-shadow: inset 0 0 0 1px rgba(217, 119, 87, 0.043);
+}
+
+/* ---- Slim, themed scrollbars ---- */
+scrollbar { background-color: transparent; border: none; }
+scrollbar slider {
+    background-color: #363533;
+    border-radius: 10px;
+    min-width: 7px;
+    min-height: 7px;
+}
+scrollbar slider:hover { background-color: #4a4744; }
+scrollbar slider:active { background-color: #d97757; }
+
+/* ---- Boxed settings lists: a touch of depth ---- */
+list.boxed-list {
+    box-shadow: 0 2px 12px rgba(0, 0, 0,0.30);
+}
+
+/* ---- Auto-run note: when Basilisk runs a command without a card ---- */
+.autorun-note {
+    color: #817f7b;
+    font-size: 13px;
+    font-family: 'JetBrains Mono', monospace;
+    margin: 2px 0 6px 0;
+}
+
+/* =====================================================================
+   HELLFIRE THEME OVERLAY  (v1 - pure CSS, no Cairo)
+   Appended last so these rules win the cascade over the base theme.
+   Burns the flat-dark surfaces down to charcoal, wraps the chat bubbles
+   in a breathing ember glow, and rebuilds the "working" status line as a
+   burning bar with real upward-scrolling fire that sits just above the
+   Send button.  ASCII-only (the CSS is an ASCII bytes literal).
+   ===================================================================== */
+
+/* ---- App-wide burned charcoal: char lumps + ember cracks + heat rising
+        from the bottom edge.  If a radial-gradient is skipped by the CSS
+        engine the base color still lands, so panels never fall back to a
+        flat slab. ---- */
+window, .background {
+    background-color: #070606;
+    background-image:
+        radial-gradient(circle at 15% 12%, rgba(47, 46, 42, 0.55), rgba(47, 46, 42, 0.0) 40%),
+        radial-gradient(circle at 82% 20%, rgba(34, 33, 31, 0.55), rgba(34, 33, 31, 0.0) 42%),
+        radial-gradient(circle at 42% 66%, rgba(27, 26, 24, 0.60), rgba(27, 26, 24, 0.0) 46%),
+        radial-gradient(circle at 90% 84%, rgba(89, 88, 84, 0.06), rgba(89, 88, 84, 0.0) 40%),
+        radial-gradient(circle at 8% 88%, rgba(106, 106, 99, 0.05), rgba(106, 106, 99, 0.0) 38%),
+        linear-gradient(0deg, rgba(71, 70, 65, 0.07) 0%, rgba(9, 8, 8, 0.0) 28%),
+        linear-gradient(180deg, #0a0909, #070606 55%, #040404);
+}
+
+/* ---- Structural panels: same charred base, a hair lighter than the
+        window so depth still reads, with a low ember bloom baked in. ---- */
+headerbar {
+    background-color: #090909;
+    background-image:
+        radial-gradient(circle at 20% 40%, rgba(41, 41, 37, 0.30), rgba(41, 41, 37, 0.0) 55%),
+        radial-gradient(circle at 85% 60%, rgba(30, 29, 28, 0.35), rgba(30, 29, 28, 0.0) 55%),
+        linear-gradient(180deg, #0d0e0c, #090808);
+    border-bottom: 1px solid #201f1e;
+    box-shadow: inset 0 -6px 14px rgba(71, 70, 65, 0.10);
+}
+.sidebar {
+    background-color: #070707;
+    background-image:
+        radial-gradient(circle at 30% 20%, rgba(43, 43, 39, 0.40), rgba(43, 43, 39, 0.0) 45%),
+        radial-gradient(circle at 60% 80%, rgba(54, 54, 51, 0.10), rgba(54, 54, 51, 0.0) 45%),
+        linear-gradient(180deg, #0a0a0a, #070606);
+    border-right: 1px solid #1c1b1a;
+}
+.input-frame {
+    background-color: #0b0a0a;
+    background-image: linear-gradient(180deg, rgba(41, 41, 37, 0.16), rgba(11, 10, 10, 0.0) 60%);
+    border: 1px solid #2b2b27;
+    box-shadow: inset 0 -5px 14px rgba(83, 82, 77, 0.10);
+}
+.input-frame:focus-within {
+    border-color: #777770;
+    background-color: #11100e;
+    box-shadow: inset 0 -6px 16px rgba(116, 116, 109, 0.22), 0 0 14px rgba(116, 116, 109, 0.052);
+}
+
+/* ---- Chat bubbles: charred body plus a breathing ember halo.  User and
+        assistant flicker on different clocks so they never pulse in sync. ---- */
+.msg-user, .msg-assistant {
+    transition: box-shadow 240ms ease, border-color 240ms ease;
+}
+.msg-user {
+    color: #ebebea;
+    border-radius: 16px 16px 4px 16px;
+    background-color: #0a0a0a;
+    background-image:
+        radial-gradient(ellipse at 92% -12%, rgba(135, 136, 130, 0.16), rgba(135, 136, 130, 0) 48%),
+        radial-gradient(ellipse at 4% 126%, rgba(88, 86, 81, 0.20), rgba(88, 86, 81, 0) 56%),
+        linear-gradient(0deg, rgba(89, 87, 82, 0.12), rgba(37, 36, 33, 0.05) 42%, rgba(0, 0, 0, 0.0) 74%);
+    border: 1px solid rgba(119, 119, 112, 0.54);
+    box-shadow:
+        inset 0 1px 0 rgba(170, 170, 165, 0.12),
+        inset 0 0 26px rgba(89, 88, 84, 0.046),
+        inset 0 -7px 18px rgba(98, 97, 93, 0.18),
+        0 0 0 1px rgba(0, 0, 0, 0.40),
+        0 8px 22px rgba(0, 0, 0, 0.50),
+        0 0 14px rgba(122, 123, 117, 0.086);
+    text-shadow: 0 0 9px rgba(132, 133, 127, 0.033), 0 1px 1px rgba(0, 0, 0, 0.55);
+}
+.msg-assistant {
+    color: #eae9e8;
+    border-radius: 4px 16px 16px 16px;
+    background-color: #090909;
+    background-image:
+        radial-gradient(ellipse at 6% -12%, rgba(122, 123, 117, 0.16), rgba(122, 123, 117, 0) 46%),
+        radial-gradient(ellipse at 104% 128%, rgba(82, 81, 76, 0.20), rgba(82, 81, 76, 0) 56%),
+        linear-gradient(0deg, rgba(98, 97, 93, 0.11), rgba(42, 42, 38, 0.05) 42%, rgba(0, 0, 0, 0.0) 74%);
+    border: 1px solid rgba(112, 111, 105, 0.52);
+    box-shadow:
+        inset 0 1px 0 rgba(161, 162, 155, 0.11),
+        inset 0 0 28px rgba(91, 90, 86, 0.046),
+        inset 0 -7px 18px rgba(93, 92, 87, 0.17),
+        0 0 0 1px rgba(0, 0, 0, 0.40),
+        0 8px 22px rgba(0, 0, 0, 0.50),
+        0 0 14px rgba(117, 117, 110, 0.08);
+    text-shadow: 0 0 9px rgba(123, 124, 118, 0.032), 0 1px 1px rgba(0, 0, 0, 0.55);
+}
+.msg-user:hover {
+    border-color: rgba(138, 139, 133, 0.72);
+    box-shadow:
+        inset 0 1px 0 rgba(170, 170, 165, 0.14),
+        inset 0 0 30px rgba(95, 94, 90, 0.057),
+        inset 0 -7px 18px rgba(104, 104, 98, 0.20),
+        0 0 0 1px rgba(0, 0, 0, 0.40),
+        0 10px 26px rgba(0, 0, 0, 0.52),
+        0 0 24px rgba(133, 134, 128, 0.12);
+}
+.msg-assistant:hover {
+    border-color: rgba(127, 128, 122, 0.72);
+    box-shadow:
+        inset 0 1px 0 rgba(161, 162, 155, 0.13),
+        inset 0 0 32px rgba(97, 96, 92, 0.057),
+        inset 0 -7px 18px rgba(99, 98, 94, 0.19),
+        0 0 0 1px rgba(0, 0, 0, 0.40),
+        0 10px 26px rgba(0, 0, 0, 0.52),
+        0 0 24px rgba(126, 127, 121, 0.12);
+}
+
+/* ---- The status line, reborn as a burning bar.  A flame gradient taller
+        than the row is scrolled upward every frame (real fire motion) while
+        the same keyframes flicker the glow.  Placed just above the Send
+        button by the layout change in _build_input_area. ---- */
+.working-row {
+    background-color: #080808;
+    background-image: linear-gradient(0deg,
+        rgba(163, 164, 156, 0.0) 0%,
+        rgba(148, 149, 142, 0.34) 18%,
+        rgba(120, 120, 113, 0.46) 44%,
+        rgba(69, 69, 64, 0.32) 68%,
+        rgba(13, 14, 12, 0.0) 100%);
+    background-size: 100% 280%;
+    background-position: 0% 100%;
+    border: 1px solid rgba(123, 124, 118, 0.50);
+    border-radius: 10px;
+    padding: 10px 22px;
+    animation: fireScroll 1.15s linear infinite;
+}
+@keyframes fireScroll {
+    0%   { background-position: 0% 100%; box-shadow: 0 0 12px rgba(125, 126, 120, 0.086), inset 0 -6px 16px rgba(148, 149, 142, 0.20); }
+    50%  { background-position: 0% 40%;  box-shadow: 0 0 24px rgba(148, 149, 142, 0.12), inset 0 -9px 22px rgba(155, 156, 149, 0.36); }
+    100% { background-position: 0% 0%;   box-shadow: 0 0 12px rgba(125, 126, 120, 0.086), inset 0 -6px 16px rgba(148, 149, 142, 0.20); }
+}
+.working-label {
+    color: #c2c1bb;
+    font-size: 18px;
+    font-style: normal;
+    font-weight: 800;
+    letter-spacing: 0.6px;
+    text-shadow: 0 0 8px rgba(155, 156, 149, 0.054), 0 0 16px rgba(144, 144, 138, 0.054);
+    animation: emberText 0.85s ease-in-out infinite;
+}
+@keyframes emberText {
+    0%   { color: #ffcf6e; text-shadow: 0 0 6px rgba(155, 156, 149, 0.054), 0 0 14px rgba(144, 144, 138, 0.054); }
+    50%  { color: #fff1c6; text-shadow: 0 0 13px rgba(165, 165, 159, 0.054), 0 0 24px rgba(148, 149, 142, 0.054); }
+    100% { color: #ffcf6e; text-shadow: 0 0 6px rgba(155, 156, 149, 0.054), 0 0 14px rgba(144, 144, 138, 0.054); }
+}
+.working-spinner {
+    color: #9d9e97;
+    min-width: 24px;
+    min-height: 24px;
+}
+
+/* ---- Send button: match the fire while working instead of the silver glow ---- */
+.send-button.working {
+    animation: sendFire 1.2s ease-in-out infinite;
+}
+@keyframes sendFire {
+    0%   { box-shadow: 0 0 6px rgba(148, 149, 142, 0.086); border-color: #2b2b27; }
+    50%  { box-shadow: 0 0 22px rgba(148, 149, 142, 0.12); border-color: #9a9a94; }
+    100% { box-shadow: 0 0 6px rgba(148, 149, 142, 0.086); border-color: #2b2b27; }
+}
+
+/* =====================================================================
+   LIVE ACTIVITY FEED  (ActivityFeedWidget)
+
+   One panel per operator turn.  Header always readable; body is the live
+   stream while working and folds to the header alone once the turn settles.
+
+   Everything here is ASCII-only, like the rest of this stylesheet: the CSS
+   is a bytes literal and a stray smart-quote or arrow becomes a decode
+   error at startup, which is a black window with a traceback rather than a
+   cosmetic bug.  Glyphs belong in the Python labels, not in here.
+   ===================================================================== */
+
+.activity-feed {
+    margin: 6px 60px 10px 12px;
+    border-radius: 14px;
+    background-color: #090909;
+    background-image: linear-gradient(180deg,
+        rgba(163, 164, 156, 0.055) 0%,
+        rgba(153, 153, 147, 0.018) 34%,
+        rgba(0, 0, 0, 0.0) 100%);
+    border: 1px solid rgba(91, 90, 86, 0.34);
+    box-shadow:
+        inset 0 1px 0 rgba(187, 187, 182, 0.07),
+        0 0 0 1px rgba(0, 0, 0, 0.40),
+        0 8px 22px rgba(0, 0, 0, 0.46);
+}
+
+/* Working: a hot rail down the left edge, breathing.  This is the single
+   animated element in the panel -- a per-row animation would be dozens of
+   clocks running at once during a mission, for no extra information. */
+.activity-feed.live {
+    border-color: rgba(135, 136, 130, 0.50);
+    border-left: 3px solid #868780;
+    animation: activityRail 1.6s ease-in-out infinite;
+}
+@keyframes activityRail {
+    0%   { border-left-color: #53524d; box-shadow: inset 0 1px 0 rgba(187, 187, 182, 0.07), 0 0 0 1px rgba(0, 0, 0,0.40), 0 8px 22px rgba(0, 0, 0,0.46), -1px 0 12px rgba(135, 136, 130, 0.20); }
+    50%  { border-left-color: #a7a6a1; box-shadow: inset 0 1px 0 rgba(187, 187, 182, 0.10), 0 0 0 1px rgba(0, 0, 0,0.40), 0 8px 22px rgba(0, 0, 0,0.46), -1px 0 22px rgba(158, 159, 152, 0.55); }
+    100% { border-left-color: #53524d; box-shadow: inset 0 1px 0 rgba(187, 187, 182, 0.07), 0 0 0 1px rgba(0, 0, 0,0.40), 0 8px 22px rgba(0, 0, 0,0.46), -1px 0 12px rgba(135, 136, 130, 0.20); }
+}
+.activity-feed.done {
+    border-left: 3px solid rgba(75, 74, 69, 0.55);
+}
+.activity-feed.collapsed {
+    background-image: none;
+}
+
+/* ---- Header: the line that is always true ---- */
+.activity-header {
+    background: none;
+    background-image: none;
+    border: none;
+    box-shadow: none;
+    min-height: 0;
+    padding: 11px 16px;
+    border-radius: 14px;
+}
+.activity-header:hover {
+    background-color: rgba(163, 163, 156, 0.06);
+}
+.activity-header:active {
+    background-color: rgba(163, 163, 156, 0.10);
+}
+
+.activity-spinner {
+    color: #a7a6a1;
+    min-width: 18px;
+    min-height: 18px;
+}
+.activity-verdict {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 18px;
+    font-weight: 800;
+    min-width: 18px;
+    color: #8e8c88;
+}
+.activity-verdict.ok   { color: #35c46f; text-shadow: 0 0 10px rgba(46, 204, 113, 0.054); }
+.activity-verdict.fail { color: #e5484d; text-shadow: 0 0 10px rgba(229, 72, 77, 0.054); }
+
+.activity-title {
+    color: #cbcac6;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 19px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    text-shadow: 0 0 9px rgba(163, 164, 156, 0.039);
+}
+.activity-feed.done .activity-title {
+    color: #c6c5c1;
+    text-shadow: none;
+}
+.activity-meta {
+    color: #9a9793;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 15px;
+    letter-spacing: 0.2px;
+}
+.activity-chevron {
+    color: #7f7d7a;
+    font-size: 17px;
+    font-weight: 700;
+    min-width: 14px;
+}
+.activity-header:hover .activity-chevron { color: #b4b3ae; }
+
+/* ---- Body: the stream ---- */
+.activity-body {
+    padding: 2px 14px 10px 14px;
+}
+
+.activity-step {
+    padding: 5px 6px 5px 4px;
+    border-radius: 7px;
+}
+.activity-step.run {
+    background-color: rgba(158, 159, 152, 0.055);
+}
+
+.activity-glyph {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 15px;
+    font-weight: 800;
+    min-width: 15px;
+    color: #7f7d7a;
+}
+.activity-step.run  .activity-glyph { color: #a7a6a1; }
+.activity-step.ok   .activity-glyph { color: #35c46f; }
+.activity-step.fail .activity-glyph { color: #e5484d; }
+.activity-step.stop .activity-glyph { color: #7a7c75; }
+.activity-step.gate .activity-glyph { color: #e5484d; }
+
+.activity-step-name {
+    color: #e8e6e5;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+}
+.activity-step.run .activity-step-name { color: #dcdcd9; }
+.activity-step.note .activity-step-name,
+.activity-step.gate .activity-step-name {
+    font-weight: 500;
+    color: #aaa8a5;
+}
+.activity-step.gate .activity-step-name { color: #c9c7c5; }
+
+.activity-step-detail {
+    color: #94918d;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 16px;
+}
+.activity-step-time {
+    color: #797773;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 0.3px;
+}
+.activity-step.run .activity-step-time { color: #8c8d86; }
+
+.activity-step.past {
+    padding: 4px 6px 4px 4px;
+}
+.activity-step.past .activity-glyph { color: #6d6b67; }
+.activity-step.past .activity-step-name {
+    font-weight: 500;
+    color: #b9b7b3;
+}
+
+/* ---- Links inside a reply.  The base rule paints them #d97757, which is
+        the deep accent -- fine on a light chrome surface, but inside a
+        charred bubble it is barely separable from the body text, and a
+        citation the operator cannot SEE is a citation he will not click.
+        ANSWER MODE makes one of these the last line of nearly every leashed
+        reply, so it earns a colour that reads. ---- */
+.msg-assistant link,
+.msg-assistant *:link,
+.msg-user link,
+.msg-user *:link {
+    color: #a7a6a1;
+    text-decoration-color: rgba(167, 166, 161, 0.45);
+}
+.msg-assistant *:link:hover,
+.msg-user *:link:hover {
+    color: #c2c1bb;
+    text-decoration-color: rgba(194, 193, 187, 0.85);
+}
+.msg-assistant *:visited,
+.msg-user *:visited {
+    color: #979790;
+}
+
+.activity-preview-box {
+    padding: 0 6px 6px 27px;
+}
+.activity-preview {
+    color: #8f8d89;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 15px;
+    line-height: 1.35;
+}
+
+/* =====================================================================
+   STRUCTURED MARKDOWN -- tables, headings, quotes, rules, lists.
+
+   A comparison answer arrives as a table, and a report answer arrives as
+   headings and bullets. Rendered as literal pipe characters in a
+   proportional font, neither one lines up, so the most structured thing
+   the model can say was the least readable thing on screen. These give
+   each shape its own compartment, the way a web chat UI does.
+   ===================================================================== */
+
+.md-table {
+    margin: 10px 0 12px 0;
+    border-radius: 10px;
+    background-color: #0c0c0b;
+    border: 1px solid rgba(95, 94, 90, 0.36);
+    box-shadow: 0 3px 12px rgba(0, 0, 0, 0.34);
+}
+.md-table scrolledwindow { border-radius: 10px; }
+.md-table-grid { background-color: transparent; }
+
+.md-th {
+    padding: 10px 14px;
+    background-color: #12110f;
+    border-bottom: 2px solid rgba(123, 124, 118, 0.55);
+    border-right: 1px solid rgba(86, 84, 79, 0.24);
+}
+.md-th.lastcol { border-right: none; }
+.md-th label {
+    color: #d1d1cd;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 21px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+}
+
+.md-td {
+    padding: 9px 14px;
+    border-top: 1px solid rgba(90, 89, 85, 0.16);
+    border-right: 1px solid rgba(86, 84, 79, 0.16);
+}
+.md-td.lastcol { border-right: none; }
+.md-td.odd { background-color: rgba(180, 180, 174, 0.055); }
+.md-td label {
+    color: #e9e8e7;
+    font-size: 26px;
+    line-height: 1.35;
+}
+.md-table-more {
+    padding: 8px 14px;
+    color: #868780;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 19px;
+    border-top: 1px solid rgba(90, 89, 85, 0.20);
+}
+
+/* ---- Blockquote: an accent rail and an inset panel ---- */
+.md-quote {
+    margin: 9px 0;
+    border-radius: 8px;
+    background-color: rgba(168, 167, 162, 0.045);
+}
+.md-quote-rail {
+    min-width: 3px;
+    background-color: #777771;
+    border-radius: 3px;
+}
+.md-quote-body {
+    padding: 10px 16px;
+    color: #d8d7d5;
+    font-size: 28px;
+    font-style: italic;
+    line-height: 1.45;
+}
+
+/* ---- Headings: sections you can scan ---- */
+.md-heading { margin: 14px 0 6px 0; }
+.md-heading:first-child { margin-top: 2px; }
+.md-heading-text {
+    color: #d8d8d4;
+    font-weight: 800;
+    letter-spacing: 0.3px;
+}
+.md-heading.h1 .md-heading-text { font-size: 40px; }
+.md-heading.h2 .md-heading-text { font-size: 35px; }
+.md-heading.h3 .md-heading-text { font-size: 31px; color: #cccbc7; }
+.md-heading.h4 .md-heading-text,
+.md-heading.h5 .md-heading-text,
+.md-heading.h6 .md-heading-text {
+    font-size: 28px;
+    color: #c2c2bd;
+    letter-spacing: 0.6px;
+}
+.md-heading-rule {
+    min-height: 1px;
+    margin-top: 5px;
+    background-color: rgba(123, 124, 118, 0.34);
+}
+
+.md-rule {
+    min-height: 1px;
+    margin: 13px 6px;
+    background-color: rgba(111, 111, 104, 0.32);
+}
+
+/* ---- Lists: a real hanging indent ---- */
+.md-list {
+    margin: 5px 0 7px 0;
+}
+.md-list-marker {
+    color: #92928b;
+    font-weight: 800;
+    font-size: 26px;
+    padding: 2px 11px 2px 4px;
+    min-width: 22px;
+}
+.md-list-text {
+    color: #ececeb;
+    font-size: 30px;
+    line-height: 1.45;
+    padding-bottom: 6px;
+}
+
+/* ---- The docked activity feed. Pinned above the action buttons, so it
+        cannot scroll away after a few more messages the way it did when it
+        lived inside the message list. Slightly tighter than the inline
+        version: this is a status strip, not a chat row. ---- */
+.activity-dock {
+    margin: 2px 4px 0 4px;
+}
+.activity-dock .activity-feed {
+    margin: 0;
+    border-radius: 12px;
+}
+.activity-dock .activity-header {
+    padding: 8px 14px;
+    border-radius: 12px;
+}
+.activity-dock .activity-body {
+    padding: 0 12px 8px 12px;
+}
+.activity-dock .activity-step { padding: 4px 6px 4px 4px; }
+
+/* =====================================================================
+   ATTACHMENT TRAY -- staged files, ABOVE the composer.
+
+   Reads as part of the composer rather than as chat content: same charred
+   surface, one step brighter, so it is obviously "about to be sent" and not
+   "already sent".
+   ===================================================================== */
+
+.attach-tray {
+    padding: 4px 4px 2px 4px;
+}
+
+.attach-chip {
+    padding: 6px 8px 6px 10px;
+    margin: 2px 3px;
+    border-radius: 11px;
+    background-color: #0f0f0d;
+    background-image: linear-gradient(180deg,
+        rgba(163, 164, 156, 0.07), rgba(153, 153, 147, 0.015));
+    border: 1px solid rgba(109, 109, 102, 0.46);
+    box-shadow:
+        inset 0 1px 0 rgba(192, 192, 187, 0.09),
+        0 2px 8px rgba(0, 0, 0, 0.40);
+}
+.attach-chip:hover {
+    border-color: rgba(138, 139, 133, 0.72);
+    box-shadow:
+        inset 0 1px 0 rgba(192, 192, 187, 0.12),
+        0 3px 12px rgba(0, 0, 0, 0.46),
+        0 0 14px rgba(133, 134, 128, 0.074);
+}
+
+.attach-chip-kind {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    padding: 2px 6px;
+    border-radius: 5px;
+    color: #080808;
+    background-color: #888982;
+}
+.attach-chip.image .attach-chip-kind { background-color: #7e7f79; }
+.attach-chip.file  .attach-chip-kind { background-color: #979491; }
+
+.attach-chip-name {
+    color: #dededb;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 16px;
+    font-weight: 600;
+}
+.attach-chip-size {
+    color: #868780;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+}
+.attach-chip-remove {
+    color: #979891;
+    font-size: 17px;
+    font-weight: 800;
+    min-width: 22px;
+    min-height: 22px;
+    padding: 0;
+    border-radius: 6px;
+    background: none;
+    background-image: none;
+    border: none;
+    box-shadow: none;
+}
+.attach-chip-remove:hover {
+    color: #ffffff;
+    background-color: #b3373b;
+}
+
+/* =====================================================================
+   BUBBLES -- last layer, so it wins.
+
+   CALM, NOT DIM. The previous pass stacked six shadows per bubble: two
+   inner glows, an outer ring, a drop shadow and a coloured halo, on top of
+   two radial gradients and a linear one. Every element was individually
+   defensible and the sum was a screen where nothing sat still and long text
+   had a permanent orange haze behind it.
+
+   What actually separates a bubble from the background is ONE clear edge
+   and ONE soft drop shadow. That is what is left here. The ember identity
+   moves to where it costs nothing to read: a tinted border, a barely-there
+   top highlight, and a hover state that lifts. No halo behind body text, no
+   text-shadow smearing 30px glyphs, no gradient competing with the words.
+   ===================================================================== */
+
+.msg-row {
+    padding: 3px 0;
+}
+
+.msg-user, .msg-assistant {
+    padding: 16px 20px;
+    background-image: none;
+    text-shadow: none;
+    transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.msg-user {
+    color: #eeeeec;
+    margin: 7px 12px 7px 64px;
+    line-height: 1.45;
+    border-radius: 16px 16px 5px 16px;
+    background-color: #131311;
+    border: 1px solid rgba(114, 114, 107, 0.42);
+    box-shadow:
+        inset 0 1px 0 rgba(202, 201, 197, 0.06),
+        0 2px 10px rgba(0, 0, 0, 0.42);
+}
+.msg-assistant {
+    color: #efeeed;
+    margin: 7px 64px 7px 12px;
+    line-height: 1.5;
+    border-radius: 5px 16px 16px 16px;
+    background-color: #141312;
+    border: 1px solid rgba(94, 93, 89, 0.38);
+    box-shadow:
+        inset 0 1px 0 rgba(199, 199, 194, 0.05),
+        0 2px 10px rgba(0, 0, 0, 0.42);
+}
+
+.msg-user:hover {
+    border-color: rgba(134, 135, 129, 0.62);
+    box-shadow:
+        inset 0 1px 0 rgba(202, 201, 197, 0.08),
+        0 4px 16px rgba(0, 0, 0, 0.48);
+}
+.msg-assistant:hover {
+    border-color: rgba(122, 122, 115, 0.58);
+    box-shadow:
+        inset 0 1px 0 rgba(199, 199, 194, 0.07),
+        0 4px 16px rgba(0, 0, 0, 0.48);
+}
+
+/* ---- Role labels: quieter, so the eye lands on the message ---- */
+.role-label {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 1.4px;
+    opacity: 0.62;
+    margin: 0 4px 4px 4px;
+}
+.role-label.user     { color: #83847d; }
+.role-label.basilisk { color: #a8a7a2; }
+
+/* The seal is atmosphere, not information -- at full strength it sat behind
+   the last line of every reply. */
+.msg-sigil { opacity: 0.16; }
+
+/* ---- Inline tool indicator from reloaded history: present, not loud ---- */
+.msg-tool-indicator {
+    padding: 4px 14px 4px 70px;
+    margin: 1px 12px;
+}
+.tool-indicator-label {
+    color: #7d7b77;
+    font-size: 16px;
+    opacity: 0.78;
+}
+
+/* ---- Links inside a reply. The base rule paints them #d97757, which is
+        nearly inseparable from body text inside a dark bubble -- and ANSWER
+        MODE makes one of these the last line of nearly every leashed reply,
+        so it earns a colour that reads. ---- */
+.msg-assistant link,
+.msg-assistant *:link,
+.msg-user link,
+.msg-user *:link {
+    color: #a0a19a;
+    text-decoration-color: rgba(160, 161, 154, 0.42);
+}
+.msg-assistant *:link:hover,
+.msg-user *:link:hover {
+    color: #c0bfba;
+    text-decoration-color: rgba(192, 191, 186, 0.85);
+}
+.msg-assistant *:visited,
+.msg-user *:visited { color: #95958e; }
+
+/* =====================================================================
+   AERO GLASS LAYER  --  Windows 7 "Aero" styling laid OVER the base
+   theme.  Appended last so these rules win by cascade order without
+   deleting any base rule (revert = delete this block).  The look:
+   glossy top-lit gradients, a bright 1px inner highlight on the upper
+   edge (the Aero bevel), soft rounded corners, and outer glow.  The
+   accent stays RED (#d97757 / #4a4945 / #9c9b95), not Aero's stock
+   blue -- the "red shine" is kept, just made glassy.
+   ASCII only, per the CSS invariant.
+   ===================================================================== */
+
+/* Header + sidebar + composer: brushed translucent glass with a lit top
+   edge.  A vertical gradient from a lighter top to a darker bottom is the
+   core Aero surface; the inset white-ish highlight is the bevel. */
+headerbar {
+    background: linear-gradient(180deg,
+                rgba(72, 70, 66, 0.55) 0%,
+                rgba(30, 29, 28, 0.65) 48%,
+                rgba(17, 16, 15, 0.85) 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.20),
+                inset 0 -1px 0 rgba(0, 0, 0, 0.55);
+    border-bottom: 1px solid rgba(217, 119, 87, 0.45);
+}
+.sidebar {
+    background: linear-gradient(180deg,
+                rgba(26, 25, 24, 0.72) 0%,
+                rgba(13, 13, 12, 0.88) 100%);
+    box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.05);
+}
+.input-frame {
+    background: linear-gradient(180deg,
+                rgba(48, 46, 43, 0.75) 0%,
+                rgba(20, 20, 19, 0.92) 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18),
+                inset 0 0 0 1px rgba(0, 0, 0, 0.30);
+    border: 1px solid rgba(217, 119, 87, 0.40);
+    border-radius: 18px;
+}
+.input-frame:focus-within {
+    border-color: #9c9b95;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28),
+                0 0 12px rgba(156, 155, 149, 0.12);
+}
+
+/* Buttons: the signature Aero glass pill -- top-lit gradient, bright
+   upper bevel, rounded, with a red-tinted rim and a soft glow on hover. */
+button {
+    background: linear-gradient(180deg,
+                rgba(84, 82, 78, 0.55) 0%,
+                rgba(49, 47, 45, 0.60) 45%,
+                rgba(26, 25, 24, 0.75) 55%,
+                rgba(37, 36, 34, 0.70) 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22),
+                inset 0 -1px 0 rgba(0, 0, 0, 0.45);
+    border: 1px solid rgba(157, 155, 150, 0.22);
+    border-radius: 9px;
+    color: #ededec;
+    text-shadow: 0 1px 1px rgba(0, 0, 0, 0.6);
+    transition: box-shadow 140ms ease, background 140ms ease;
+}
+button:hover {
+    background: linear-gradient(180deg,
+                rgba(100, 99, 95, 0.60) 0%,
+                rgba(71, 69, 65, 0.66) 48%,
+                rgba(44, 43, 40, 0.80) 55%,
+                rgba(61, 59, 56, 0.72) 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.30),
+                inset 0 -1px 0 rgba(0, 0, 0, 0.50),
+                0 0 12px rgba(156, 155, 149, 0.12);
+    border-color: rgba(175, 174, 170, 0.55);
+}
+button:active {
+    background: linear-gradient(180deg,
+                rgba(49, 47, 45, 0.85) 0%,
+                rgba(26, 25, 24, 0.90) 100%);
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.60),
+                inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* The primary red actions (send, run) get a deeper glossy-red glass so
+   they still read as the accent, now with the Aero sheen. */
+.cmd-run-btn, .send-button, .primary-action {
+    background: linear-gradient(180deg,
+                #83827d 0%, #61605c 46%, #494844 54%, #5d5c58 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35),
+                inset 0 -1px 0 rgba(0, 0, 0, 0.40),
+                0 0 10px rgba(229, 40, 58, 0.114);
+    border: 1px solid rgba(178, 176, 172, 0.60);
+    color: #fff;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+}
+.cmd-run-btn:hover, .send-button:hover, .primary-action:hover {
+    background: linear-gradient(180deg,
+                #9f9e99 0%, #74736d 46%, #565450 54%, #6c6b66 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45),
+                0 0 16px rgba(156, 155, 149, 0.12);
+}
+
+/* Chat bubbles: a light glass sheen on top, so they look like Aero panes
+   floating over the (now brighter) backdrop.  Base colours are inherited
+   from the theme -- only the gloss + bevel + rounding are added here. */
+.msg-assistant {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10),
+                0 2px 8px rgba(0, 0, 0, 0.45);
+    border: 1px solid rgba(176, 174, 171, 0.14);
+}
+.msg-user {
+    background: linear-gradient(180deg,
+                rgba(100, 99, 95, 0.30) 0%,
+                rgba(59, 57, 55, 0.22) 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16),
+                0 2px 8px rgba(0, 0, 0, 0.45);
+    border: 1px solid rgba(175, 174, 170, 0.28);
+}
+
+/* Selected chat row: an Aero-blue-style wash, kept red, with a lit edge. */
+.chat-row.selected, .chat-row:selected {
+    background: linear-gradient(180deg,
+                rgba(100, 99, 95, 0.34) 0%,
+                rgba(58, 56, 54, 0.20) 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    border-left: 3px solid #9c9b95;
+}
+
+/* Status pills + cards: glass sheen so chrome matches the new surfaces. */
+.status-pill, .card, .code-block {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* ---- The WINDOW itself: an Aero glass frame all around the edge. ----
+   Rounded corners, a bright inner bevel ring so the whole window looks like a
+   pane of glass, an outer red glow, and a faint top-lit sheen bleeding down
+   from the title area. The window keeps its ember background underneath; this
+   only adds the frame + edge lighting. Applied to the toplevel and the adw
+   window content so both the client-side-decoration corners and the inner
+   surface pick it up. */
+window {
+    border-radius: 14px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14),
+                inset 0 0 0 1px rgba(192, 191, 187, 0.029),
+                0 0 22px rgba(217, 119, 87, 0.086);
+}
+window > contents,
+window.csd,
+.background {
+    border-radius: 14px;
+}
+/* A frosted highlight strip along the very top of the window, the classic
+   Aero "light source above" cue, sitting under the header. */
+window > contents > box {
+    background-image: linear-gradient(180deg,
+                      rgba(243, 244, 242, 0.05) 0%,
+                      rgba(243, 244, 242, 0.0) 90px);
+}
+/* The header's bottom edge gets a thin lit line so the glass panels below it
+   read as separate sheets of glass, not one flat wall. */
+headerbar {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22),
+                inset 0 -1px 0 rgba(0, 0, 0, 0.55),
+                0 2px 6px rgba(0, 0, 0, 0.35);
+}
+/* The message scroller floats on the backdrop; give its viewport a faint
+   inner top highlight so the chat area reads as another glass sheet. */
+.chat-scroll {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+/* Sidebar gets a matching lit inner edge on the right so it looks beveled
+   against the chat, completing the "panes of glass" framing. */
+.sidebar {
+    box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.06),
+                inset 1px 0 0 rgba(255, 255, 255, 0.04);
+}
+
+/* ---- Image-free "hacker" glyph buttons (attach, sound, terminal). A
+   monospace mark on the same frosted glass frame as the art-buttons, so the
+   toolbar/header reads as one glass set without any PNG plaques. Red ember
+   text with a faint glow; brighter on hover; lit when toggled/active. ---- */
+.glyph-btn, menubutton.glyph-btn > button {
+    background-color: rgba(25, 24, 23, 0.30);
+    background-image: linear-gradient(180deg,
+                      rgba(230, 229, 227, 0.14) 0%,
+                      rgba(100, 99, 95, 0.10) 46%,
+                      rgba(17, 16, 14, 0.08) 54%,
+                      rgba(49, 47, 44, 0.12) 100%);
+    border: 1px solid rgba(192, 191, 187, 0.26);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.26),
+                inset 0 -1px 0 rgba(0, 0, 0, 0.28),
+                0 0 7px rgba(217, 119, 87, 0.057);
+    border-radius: 11px;
+    min-width: 42px;
+    min-height: 38px;
+    padding: 3px 11px;
+    transition: all 140ms ease;
+}
+menubutton.glyph-btn { padding: 0; min-width: 0; min-height: 0; }
+menubutton.glyph-btn > button { min-width: 42px; min-height: 38px; }
+.glyph-btn-label {
+    font-family: 'JetBrains Mono', 'Fira Code', 'DejaVu Sans Mono', monospace;
+    font-size: 19px;
+    font-weight: 700;
+    color: #b2b0ac;
+    text-shadow: 0 0 6px rgba(229, 40, 58, 0.054), 0 1px 1px rgba(0, 0, 0,0.7);
+}
+.glyph-btn:hover, menubutton.glyph-btn > button:hover {
+    background-color: rgba(100, 99, 95, 0.32);
+    border-color: rgba(197, 196, 191, 0.55);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.36),
+                0 0 14px rgba(140, 140, 135, 0.12);
+}
+.glyph-btn:active, menubutton.glyph-btn > button:active {
+    background-color: rgba(59, 57, 55, 0.42);
+    box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.45),
+                inset 0 1px 0 rgba(255, 255, 255, 0.10);
+}
+.glyph-btn.toggled, .glyph-btn.active {
+    background-color: rgba(106, 105, 99, 0.45);
+    border-color: rgba(178, 176, 172, 0.70);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.30),
+                0 0 14px rgba(156, 155, 149, 0.12);
+}
+.glyph-btn.toggled .glyph-btn-label,
+.glyph-btn.active .glyph-btn-label {
+    color: #e6e5e3;
+    text-shadow: 0 0 9px rgba(172, 171, 167, 0.054);
+}
+.term-glyph .glyph-btn-label { font-size: 20px; letter-spacing: 1px; }
+/* close button leans red on hover; minimise/expand stay neutral-red */
+.winctl-close:hover { border-color: rgba(172, 171, 167, 0.85); }
+.winctl-close:hover .glyph-btn-label { color: #c2c0bb; }
+
+/* =====================================================================
+   OBSIDIAN GLASS  -  Aero-over-obsidian theme overlay
+   =====================================================================
+   Appended LAST so every rule here wins the cascade over the base theme
+   and over the HELLFIRE ember overlay above it.  ASCII-only, like the
+   rest of this bytes literal.
+
+   The idea: the app is a sheet of dark glass laid over the dragon-ring
+   artwork.  The WINDOW is opaque (nothing punches through to the
+   desktop); everything INSIDE it - bubbles, sidebar, header, composer,
+   cards, tables, popovers - is translucent, so the same backdrop shows
+   through all of them and they read as one pane of glass instead of a
+   stack of separate slabs.
+
+   Every glass surface is built from the same four layers, in this order,
+   which is what keeps them looking like the same material:
+
+     1. background-color : rgba tint  - the smoke in the glass
+     2. background-image : a top-down gloss ramp  - the Aero highlight,
+        bright at the top edge, dead flat by the 52% line, faintly dark
+        below it.  This is the single most recognisable Windows 7 cue
+        and it is why these panels read as glass rather than as flat
+        transparency.
+     3. border          : a hairline of warm near-white at low alpha  -
+        the polished edge that catches light
+     4. box-shadow      : inset white top line (the bevel), an inset
+        ambient darkening, then OUTER shadow + a red bloom picked from
+        the artwork's neon.
+
+   Do not "simplify" a panel by dropping layer 2 or 4: without the gloss
+   the surface goes muddy, and without the bloom it detaches from the
+   backdrop and floats.
+
+   EVERY TINT IS WARM ON PURPOSE.  The first cut of this theme used a
+   neutral steel rgba(235, 236, 237) for the highlights and a blue-black
+   rgba(20, 20, 21) for the smoke, and the result read GREY - the glass
+   went the colour of a stainless-steel appliance and fought the red art
+   behind it.  The whites here are pushed towards #f8f8f8 and the smoke
+   towards a red-black #11100e, so the glass takes its colour FROM the
+   backdrop instead of arguing with it.  If a surface ever looks grey,
+   that is the bug, and the fix is to warm its tint - not to darken it.
+
+   Palette lifted off the backdrop art:
+     neon red   #95948e / #7d7d78      deep blood  #3e3c3a
+     smoke      rgba(22, 11, 14, a)    lit edge    rgba(255, 238, 240, a)
+     text       #f3f3f1   dim #b7b6b2  code #f3f2f0
+   ===================================================================== */
+
+/* ---- Base plate ------------------------------------------------------
+   Sits UNDER the backdrop picture, so it is what the artwork's own dark
+   areas resolve to.  Near-black, with red pools so the corners of the
+   window never go dead flat where the art has fallen off.
+   ---------------------------------------------------------------------- */
+window, .background {
+    background-color: #080406;
+    background-image:
+        radial-gradient(circle at 50% 38%, rgba(87, 84, 80, 0.14), rgba(87, 84, 80, 0.0) 58%),
+        linear-gradient(180deg, #080707, #080406 60%, #040205);
+    color: #f3f3f1;
+}
+
+/* ---- Let the artwork reach every corner -----------------------------
+   libadwaita paints AdwOverlaySplitView's two halves itself:
+       .sidebar-pane { background-color: @sidebar_bg_color; }
+       .content-pane { background-color: @secondary_sidebar_bg_color; }
+   Those are OPAQUE, and they sit above the backdrop overlay, which is
+   why the first pass of this theme showed the art in the chat pane and
+   nowhere else - the sidebar was a black slab with a translucent box
+   painted on top of it.  Knocking both panes out to transparent is what
+   makes the glass work at all; the visible tint comes from .sidebar and
+   the panels themselves.  Do not put a colour back on these.
+   ---------------------------------------------------------------------- */
+.sidebar-pane, .content-pane, toastoverlay, overlay {
+    background-color: transparent;
+    background-image: none;
+}
+
+/* The scrim is the brightness control's surface: _apply_backdrop_brightness
+   rewrites its background-COLOR alpha live, so only ever give it an IMAGE
+   here.  These pools are what stop a low brightness setting from flattening
+   the whole app into black - they re-light it in the artwork's own red. */
+.chat-scrim {
+    background-image:
+        radial-gradient(circle at 50% 42%, rgba(93, 92, 88, 0.16), rgba(93, 92, 88, 0.0) 62%),
+        linear-gradient(180deg, rgba(0, 0, 0, 0.22) 0%, rgba(0, 0, 0, 0.0) 22%,
+                        rgba(0, 0, 0, 0.0) 76%, rgba(0, 0, 0, 0.30) 100%);
+}
+.chat-watermark { background: transparent; }
+
+/* ---- Header: a glass rail with a lit bottom edge --------------------- */
+headerbar {
+    background-color: rgba(18, 17, 15, 0.46);
+    background-image:
+        linear-gradient(180deg,
+            rgba(248, 248, 248, 0.16) 0%,
+            rgba(248, 248, 248, 0.05) 46%,
+            rgba(248, 248, 248, 0.0) 52%,
+            rgba(0, 0, 0, 0.18) 100%);
+    border-bottom: 1px solid rgba(157, 156, 150, 0.42);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.22),
+        inset 0 -16px 28px rgba(102, 102, 96, 0.16),
+        0 6px 20px rgba(0, 0, 0, 0.45);
+}
+
+/* ---- Sidebar: the same glass, one shade smokier so depth still reads - */
+.sidebar {
+    background-color: rgba(12, 12, 11, 0.44);
+    background-image:
+        linear-gradient(180deg,
+            rgba(248, 248, 248, 0.10) 0%,
+            rgba(248, 248, 248, 0.03) 42%,
+            rgba(248, 248, 248, 0.0) 52%,
+            rgba(0, 0, 0, 0.22) 100%);
+    border-right: 1px solid rgba(157, 156, 150, 0.32);
+    box-shadow:
+        inset -1px 0 0 rgba(255, 255, 255, 0.07),
+        6px 0 22px rgba(0, 0, 0, 0.40);
+}
+.sidebar headerbar {
+    background-color: rgba(18, 17, 15, 0.34);
+    border-bottom: 1px solid rgba(157, 156, 150, 0.26);
+}
+
+/* ---- Sidebar chat rows: glass chips ---------------------------------- */
+.chat-row {
+    border-radius: 14px;
+    border-left: 3px solid transparent;
+    background-color: rgba(27, 26, 25, 0.26);
+    background-image:
+        linear-gradient(180deg,
+            rgba(248, 248, 248, 0.10) 0%,
+            rgba(248, 248, 248, 0.02) 48%,
+            rgba(248, 248, 248, 0.0) 52%,
+            rgba(0, 0, 0, 0.10) 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.11);
+}
+.chat-row:hover {
+    background-color: rgba(45, 44, 41, 0.40);
+    border-left-color: rgba(163, 162, 156, 0.60);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.18),
+        0 0 16px rgba(130, 130, 125, 0.069);
+}
+.chat-row.selected, .chat-row:selected {
+    background-color: rgba(81, 79, 75, 0.34);
+    background-image:
+        linear-gradient(180deg,
+            rgba(246, 245, 245, 0.20) 0%,
+            rgba(192, 191, 187, 0.07) 48%,
+            rgba(163, 162, 156, 0.0) 52%,
+            rgba(0, 0, 0, 0.16) 100%);
+    border-left: 3px solid #9d9c96;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.30),
+        inset 0 0 26px rgba(153, 152, 147, 0.046),
+        0 0 22px rgba(130, 130, 125, 0.103);
+}
+.chat-row .title-line { color: #f9f8f8; }
+.chat-row .meta-line  { color: #acaaa6; }
+
+/* ---- MESSAGE BUBBLES  -  the point of the whole theme ----------------
+   Real glass: you can see the artwork through both of them.  The user's
+   bubble is red-tinted glass (it belongs to the operator, and red is the
+   backdrop's own light); the assistant's is smoked obsidian with a lit
+   warm edge, so the two are told apart by MATERIAL and not just by which
+   side of the pane they sit on.  Neither is grey.
+
+   Alpha budget: the tint stays at or below 0.36 or the glass turns into
+   paint, and at or above 0.26 or the artwork's bright neon lines start
+   cutting through the text on top of it.  Both sit inside that band, and
+   the text-shadow underneath every line is what buys the lower end.
+   ---------------------------------------------------------------------- */
+.msg-user, .msg-assistant {
+    transition: box-shadow 200ms ease, border-color 200ms ease,
+                background-color 200ms ease;
+}
+.msg-user {
+    color: #f9f8f8;
+    border-radius: 18px 18px 6px 18px;
+    padding: 18px 22px;
+    margin: 8px 12px;
+    background-color: rgba(74, 72, 68, 0.32);
+    background-image:
+        linear-gradient(180deg,
+            rgba(246, 246, 246, 0.22) 0%,
+            rgba(206, 205, 202, 0.08) 46%,
+            rgba(163, 162, 156, 0.0) 52%,
+            rgba(23, 23, 22, 0.22) 100%);
+    border: 1px solid rgba(184, 183, 179, 0.58);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.38),
+        inset 0 0 30px rgba(153, 152, 147, 0.04),
+        inset 0 -18px 30px rgba(54, 52, 50, 0.22),
+        0 10px 26px rgba(0, 0, 0, 0.46),
+        0 0 24px rgba(130, 130, 125, 0.086);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
+}
+.msg-assistant {
+    color: #f7f6f6;
+    border-radius: 6px 18px 18px 18px;
+    padding: 16px 20px;
+    margin: 8px 12px;
+    background-color: rgba(20, 20, 19, 0.34);
+    background-image:
+        linear-gradient(180deg,
+            rgba(247, 247, 247, 0.18) 0%,
+            rgba(230, 229, 227, 0.05) 46%,
+            rgba(230, 229, 227, 0.0) 52%,
+            rgba(0, 0, 0, 0.24) 100%);
+    border: 1px solid rgba(236, 236, 234, 0.34);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.34),
+        inset 0 0 30px rgba(178, 176, 172, 0.02),
+        inset 0 -18px 30px rgba(0, 0, 0, 0.24),
+        0 10px 26px rgba(0, 0, 0, 0.48),
+        0 0 22px rgba(130, 130, 125, 0.057);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.72);
+}
+.msg-user:hover {
+    background-color: rgba(82, 80, 76, 0.36);
+    border-color: rgba(198, 197, 192, 0.76);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.44),
+        inset 0 0 34px rgba(158, 157, 152, 0.052),
+        inset 0 -18px 30px rgba(54, 52, 50, 0.24),
+        0 12px 30px rgba(0, 0, 0, 0.48),
+        0 0 32px rgba(153, 152, 147, 0.12);
+}
+.msg-assistant:hover {
+    background-color: rgba(27, 25, 24, 0.38);
+    border-color: rgba(242, 242, 240, 0.50);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.40),
+        inset 0 0 34px rgba(187, 186, 182, 0.029),
+        inset 0 -18px 30px rgba(0, 0, 0, 0.26),
+        0 12px 30px rgba(0, 0, 0, 0.50),
+        0 0 30px rgba(130, 130, 125, 0.091);
+}
+.msg-system-notice {
+    background-color: rgba(20, 20, 19, 0.32);
+    background-image:
+        linear-gradient(180deg, rgba(248, 248, 248, 0.10) 0%,
+                        rgba(248, 248, 248, 0.0) 52%,
+                        rgba(0, 0, 0, 0.14) 100%);
+    border: 1px solid rgba(236, 236, 234, 0.24);
+    border-radius: 12px;
+    color: #d8d8d5;
+}
+.role-label            { color: #a5a3a0; }
+.role-label.user       { color: #b6b5b1; }
+.role-label.basilisk   { color: #ebebe9; }
+.msg-footer            { margin-top: 6px; }
+.avatar {
+    border-radius: 10px;
+    background-color: rgba(27, 26, 25, 0.36);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18),
+                0 0 14px rgba(130, 130, 125, 0.069);
+}
+
+/* ---- Links inside bubbles: readable on glass ------------------------- */
+.msg-assistant *:link, .msg-user *:link, link, *:link {
+    color: #d0cfcc;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.72);
+}
+.msg-assistant *:link:hover, .msg-user *:link:hover {
+    color: #e6e5e3;
+}
+
+/* ---- Code: dark glass with a red-lit edge.  The TEXTVIEW itself stays
+        transparent so the artwork carries on through the code, and the
+        monospace metrics are untouched - only colour changes here. ----- */
+.code-block {
+    background-color: rgba(13, 5, 9, 0.62);
+    background-image:
+        linear-gradient(180deg, rgba(248, 248, 248, 0.09) 0%,
+                        rgba(248, 248, 248, 0.0) 52%,
+                        rgba(0, 0, 0, 0.20) 100%);
+    border: 1px solid rgba(163, 162, 156, 0.36);
+    border-radius: 12px;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.16),
+        0 6px 18px rgba(0, 0, 0, 0.42);
+}
+.code-block-header {
+    background-color: rgba(81, 79, 75, 0.30);
+    color: #e3e2e0;
+    border-bottom: 1px solid rgba(163, 162, 156, 0.34);
+    border-radius: 12px 12px 0 0;
+}
+.code-block textview       { background-color: transparent; color: #f3f2f0; }
+.code-block textview text  { background-color: transparent; color: #f3f2f0; }
+.cmd-text {
+    background-color: rgba(13, 5, 9, 0.48);
+    border: 1px solid rgba(163, 162, 156, 0.36);
+    border-radius: 8px;
+    color: #d0cfcc;
+}
+.confirm-cmd {
+    background-color: rgba(13, 5, 9, 0.48);
+    border: 1px solid rgba(163, 162, 156, 0.36);
+    border-radius: 8px;
+    color: #e3e2e0;
+}
+
+/* ---- Markdown blocks -------------------------------------------------
+   Colour only.  Every padding, margin, min-width and font-size that the
+   table/heading/list builders depend on is left exactly as the base
+   stylesheet set it, because those numbers are what the width and
+   height-for-width measurements are tuned against - restyling a table by
+   changing its padding here is how you get text drawn outside its own
+   background again. ---------------------------------------------------- */
+.md-heading-text {
+    color: #f2f3f1;
+    text-shadow: 0 0 12px rgba(153, 152, 147, 0.051), 0 1px 2px rgba(0, 0, 0, 0.72);
+}
+.md-heading-rule { background-color: rgba(163, 162, 156, 0.40); }
+.md-rule         { background-color: rgba(236, 236, 234, 0.18); }
+.md-list-marker  { color: #b6b5b1; }
+.md-list-text    { color: #efefee; }
+.md-quote {
+    background-color: rgba(26, 25, 24, 0.32);
+    background-image:
+        linear-gradient(180deg, rgba(248, 248, 248, 0.09) 0%,
+                        rgba(248, 248, 248, 0.0) 52%,
+                        rgba(0, 0, 0, 0.14) 100%);
+    border: 1px solid rgba(236, 236, 234, 0.22);
+    border-radius: 10px;
+}
+.md-quote-rail { background-color: #9d9c96; }
+.md-quote-body { color: #dfdfdc; }
+
+/* Tables: sheet glass, header strip lit like the ring in the artwork */
+.md-table {
+    background-color: rgba(16, 15, 14, 0.42);
+    background-image:
+        linear-gradient(180deg, rgba(248, 248, 248, 0.10) 0%,
+                        rgba(248, 248, 248, 0.0) 52%,
+                        rgba(0, 0, 0, 0.18) 100%);
+    border: 1px solid rgba(236, 236, 234, 0.28);
+    border-radius: 12px;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.18),
+        0 6px 18px rgba(0, 0, 0, 0.40);
+}
+.md-table scrolledwindow { background-color: transparent; }
+.md-table-grid           { background-color: transparent; }
+.md-th {
+    background-color: rgba(81, 79, 75, 0.40);
+    border-bottom: 2px solid rgba(163, 162, 156, 0.52);
+    border-right: 1px solid rgba(236, 236, 234, 0.16);
+}
+.md-th label { color: #f2f3f1; }
+.md-td {
+    border-top: 1px solid rgba(236, 236, 234, 0.12);
+    border-right: 1px solid rgba(236, 236, 234, 0.09);
+}
+.md-td.odd   { background-color: rgba(236, 236, 234, 0.05); }
+.md-td label { color: #efefee; }
+.md-table-more { color: #acaaa6; }
+
+/* ---- Composer -------------------------------------------------------- */
+.input-frame {
+    background-color: rgba(19, 18, 17, 0.46);
+    background-image:
+        linear-gradient(180deg,
+            rgba(248, 248, 248, 0.18) 0%,
+            rgba(248, 248, 248, 0.05) 46%,
+            rgba(248, 248, 248, 0.0) 52%,
+            rgba(0, 0, 0, 0.22) 100%);
+    border: 1px solid rgba(236, 236, 234, 0.32);
+    border-radius: 22px;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.30),
+        0 8px 22px rgba(0, 0, 0, 0.44),
+        0 0 18px rgba(130, 130, 125, 0.052);
+}
+.input-frame:focus-within {
+    background-color: rgba(27, 26, 25, 0.52);
+    border-color: rgba(168, 166, 162, 0.76);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.36),
+        0 8px 24px rgba(0, 0, 0, 0.46),
+        0 0 28px rgba(153, 152, 147, 0.12);
+}
+
+/* ---- Cards, chips, badges ------------------------------------------- */
+.card, .cmd-card {
+    background-color: rgba(19, 18, 17, 0.42);
+    background-image:
+        linear-gradient(180deg, rgba(248, 248, 248, 0.11) 0%,
+                        rgba(248, 248, 248, 0.0) 52%,
+                        rgba(0, 0, 0, 0.20) 100%);
+    border: 1px solid rgba(236, 236, 234, 0.28);
+    border-left: 4px solid rgba(157, 156, 150, 0.85);
+    border-radius: 14px;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.20),
+        0 8px 22px rgba(0, 0, 0, 0.44);
+}
+.cmd-card-title { color: #c9c7c5; }
+.cmd-explain    { color: #d8d8d5; }
+.card-warn {
+    background-color: rgba(229, 72, 77, 0.16);
+    background-image:
+        linear-gradient(180deg, rgba(248, 248, 248, 0.12) 0%,
+                        rgba(248, 248, 248, 0.0) 52%,
+                        rgba(0, 0, 0, 0.14) 100%);
+    border: 1px solid rgba(180, 179, 175, 0.56);
+    border-radius: 12px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+.quick-chip, .attach-chip, .effort-pill, .status-pill, .risk-badge,
+.notif-badge, .autorun-note, .watcher-banner, .media-panel,
+.media-placeholder, .attach-tray, .model-pick-row, .model-group-header {
+    background-image:
+        linear-gradient(180deg, rgba(248, 248, 248, 0.15) 0%,
+                        rgba(248, 248, 248, 0.0) 52%,
+                        rgba(0, 0, 0, 0.16) 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.20);
+}
+.quick-chip, .attach-chip {
+    background-color: rgba(27, 26, 25, 0.40);
+    border: 1px solid rgba(236, 236, 234, 0.28);
+    border-radius: 999px;
+}
+.quick-chip:hover, .attach-chip:hover {
+    background-color: rgba(81, 79, 75, 0.36);
+    border-color: rgba(172, 171, 167, 0.60);
+}
+.effort-pill {
+    background-color: rgba(27, 26, 25, 0.40);
+    border: 1px solid rgba(236, 236, 234, 0.26);
+    border-radius: 999px;
+}
+.effort-seg:checked {
+    background-color: rgba(97, 96, 92, 0.56);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.30),
+                0 0 14px rgba(153, 152, 147, 0.109);
+}
+.media-panel, .media-placeholder, .attach-tray {
+    background-color: rgba(19, 18, 17, 0.40);
+    border: 1px solid rgba(236, 236, 234, 0.24);
+    border-radius: 14px;
+}
+
+/* ---- The activity feed / dock --------------------------------------- */
+.activity-feed, .activity-dock {
+    background-color: rgba(18, 17, 15, 0.42);
+    background-image:
+        linear-gradient(180deg, rgba(248, 248, 248, 0.11) 0%,
+                        rgba(248, 248, 248, 0.0) 52%,
+                        rgba(0, 0, 0, 0.20) 100%);
+    border: 1px solid rgba(236, 236, 234, 0.28);
+    border-radius: 16px;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.20),
+        0 8px 22px rgba(0, 0, 0, 0.44),
+        0 0 16px rgba(130, 130, 125, 0.046);
+}
+.activity-title   { color: #f9f8f8; }
+.activity-meta    { color: #acaaa6; }
+.activity-preview-box {
+    background-color: rgba(13, 5, 9, 0.46);
+    border: 1px solid rgba(236, 236, 234, 0.18);
+    border-radius: 10px;
+}
+
+/* ---- Terminal panel -------------------------------------------------- */
+/* The log panel is the one glass surface that has to carry dense
+   monospace machine output, and shell output has no text-shadow to lean
+   on - so it is deliberately the thickest in-window tint of the set.
+   Any lower and stderr becomes unreadable over the artwork's neon. */
+.terminal-panel {
+    background-color: rgba(8, 7, 7, 0.80);
+    border-top: 1px solid rgba(163, 162, 156, 0.40);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.11);
+}
+.terminal-panel-header {
+    background-color: rgba(81, 79, 75, 0.28);
+    background-image:
+        linear-gradient(180deg, rgba(248, 248, 248, 0.13) 0%,
+                        rgba(248, 248, 248, 0.0) 52%,
+                        rgba(0, 0, 0, 0.16) 100%);
+    border-bottom: 1px solid rgba(163, 162, 156, 0.34);
+}
+.terminal-panel-title { color: #c9c7c5; }
+.terminal-log-view, .terminal-log-view text {
+    background-color: transparent;
+    color: #eae9e7;
+}
+
+/* ---- Buttons: small panes of the same glass -------------------------- */
+button, .icon-button, .header-icon-button, .glyph-btn,
+menubutton.glyph-btn > button, .model-switch-btn, .terminal-toggle-btn,
+.menu-button, .wordmark-btn, .msg-speak-btn, .cmd-copy-btn, .mic-button {
+    background-color: rgba(30, 29, 28, 0.42);
+    background-image:
+        linear-gradient(180deg,
+            rgba(248, 248, 248, 0.18) 0%,
+            rgba(248, 248, 248, 0.05) 46%,
+            rgba(248, 248, 248, 0.0) 52%,
+            rgba(0, 0, 0, 0.22) 100%);
+    border: 1px solid rgba(236, 236, 234, 0.30);
+    color: #f5f5f5;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24);
+}
+button:hover, .icon-button:hover, .header-icon-button:hover,
+.glyph-btn:hover, menubutton.glyph-btn > button:hover,
+.model-switch-btn:hover, .terminal-toggle-btn:hover,
+.msg-speak-btn:hover, .cmd-copy-btn:hover, .mic-button:hover {
+    background-color: rgba(92, 90, 87, 0.46);
+    border-color: rgba(172, 171, 167, 0.68);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.34),
+        0 0 18px rgba(153, 152, 147, 0.109);
+}
+button:active, .glyph-btn:active, .icon-button:active {
+    background-color: rgba(60, 58, 56, 0.56);
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.50);
+}
+button:disabled {
+    background-color: rgba(30, 29, 28, 0.22);
+    border-color: rgba(236, 236, 234, 0.14);
+    color: #84837e;
+}
+button.flat {
+    background-color: transparent;
+    background-image: none;
+    border-color: transparent;
+    box-shadow: none;
+}
+button.flat:hover {
+    background-color: rgba(92, 90, 87, 0.36);
+    border-color: rgba(172, 171, 167, 0.50);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24);
+}
+button.suggested-action, .primary-action, .cmd-run-btn {
+    background-color: rgba(103, 103, 97, 0.64);
+    background-image:
+        linear-gradient(180deg,
+            rgba(246, 246, 246, 0.32) 0%,
+            rgba(192, 191, 187, 0.11) 46%,
+            rgba(163, 162, 156, 0.0) 52%,
+            rgba(29, 28, 27, 0.28) 100%);
+    border: 1px solid rgba(190, 189, 185, 0.78);
+    color: #fbfafa;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.46),
+        0 0 20px rgba(153, 152, 147, 0.109);
+}
+button.suggested-action:hover, .primary-action:hover, .cmd-run-btn:hover {
+    background-color: rgba(120, 119, 113, 0.72);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.54),
+        0 0 28px rgba(153, 152, 147, 0.12);
+}
+/* The send button is pure PNG art - give it a lit glass pad, never a
+   fill that would box the artwork in. */
+.send-button {
+    background-color: rgba(81, 79, 75, 0.28);
+    background-image:
+        linear-gradient(180deg, rgba(246, 246, 246, 0.22) 0%,
+                        rgba(163, 162, 156, 0.0) 52%,
+                        rgba(0, 0, 0, 0.16) 100%);
+    border: 1px solid rgba(178, 176, 172, 0.50);
+    border-radius: 16px;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.30),
+        0 0 16px rgba(130, 130, 125, 0.086);
+}
+.send-button:hover {
+    background-color: rgba(103, 103, 97, 0.42);
+    border-color: rgba(192, 191, 187, 0.76);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.40),
+        0 0 26px rgba(153, 152, 147, 0.12);
+}
+.unleash-button {
+    background-color: rgba(27, 26, 25, 0.36);
+    border: 1px solid rgba(236, 236, 234, 0.26);
+    border-radius: 999px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+.unleash-button.toggled {
+    background-color: rgba(109, 108, 102, 0.54);
+    border-color: rgba(190, 189, 185, 0.84);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.40),
+        0 0 24px rgba(153, 152, 147, 0.12);
+}
+
+/* ---- Entries, search, switches -------------------------------------- */
+entry, searchentry, searchentry text, .sidebar-search, passwordentry,
+spinbutton entry {
+    background-color: rgba(14, 14, 12, 0.46);
+    background-image:
+        linear-gradient(180deg, rgba(0, 0, 0, 0.24) 0%,
+                        rgba(0, 0, 0, 0.0) 40%);
+    border: 1px solid rgba(236, 236, 234, 0.28);
+    border-radius: 12px;
+    color: #f3f3f1;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.42);
+}
+entry:focus-within, searchentry:focus-within, .sidebar-search:focus-within {
+    border-color: rgba(168, 166, 162, 0.74);
+    box-shadow:
+        inset 0 1px 3px rgba(0, 0, 0, 0.42),
+        0 0 18px rgba(153, 152, 147, 0.103);
+}
+switch {
+    background-color: rgba(27, 26, 25, 0.52);
+    border: 1px solid rgba(236, 236, 234, 0.28);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.42);
+}
+switch:checked {
+    background-color: rgba(109, 108, 102, 0.68);
+    border-color: rgba(190, 189, 185, 0.76);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28),
+                0 0 14px rgba(153, 152, 147, 0.114);
+}
+switch > slider {
+    background-image: linear-gradient(180deg, #ffffff, #dcdbd8);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.50);
+}
+
+/* ---- Popovers, menus, dialogs, preference rows -----------------------
+   These float ABOVE the window on their own surfaces, so they get a much
+   higher alpha than the in-window panels: at 0.42 a dropdown was
+   unreadable over the artwork.  Still glass, just thicker glass. ------- */
+popover > contents, popover > arrow, .popover-menu, menu, .menu {
+    background-color: rgba(16, 15, 14, 0.90);
+    background-image:
+        linear-gradient(180deg, rgba(248, 248, 248, 0.13) 0%,
+                        rgba(248, 248, 248, 0.0) 52%,
+                        rgba(0, 0, 0, 0.22) 100%);
+    border: 1px solid rgba(236, 236, 234, 0.30);
+    border-radius: 14px;
+    color: #f3f3f1;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.22),
+        0 14px 34px rgba(0, 0, 0, 0.58);
+}
+popover row:selected, dropdown listview > row:selected,
+.model-pick-active {
+    background-color: rgba(109, 108, 102, 0.58);
+    color: #ffffff;
+}
+/* A dialog sits over the conversation, not over the artwork, so it gets
+   the thickest glass in the theme: enough to read a settings page through,
+   with the gloss and the lit rim kept so it still belongs to the set. */
+window.dialog, dialog, .messagedialog, .dialog-content, .splash-window {
+    background-color: rgba(12, 12, 11, 0.90);
+    background-image:
+        linear-gradient(180deg, rgba(248, 248, 248, 0.10) 0%,
+                        rgba(248, 248, 248, 0.0) 52%,
+                        rgba(0, 0, 0, 0.20) 100%);
+    border: 1px solid rgba(236, 236, 234, 0.26);
+    border-radius: 18px;
+    color: #f3f3f1;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.20),
+        0 18px 44px rgba(0, 0, 0, 0.62);
+}
+preferencespage, preferencesgroup {
+    background-color: transparent;
+    background-image: none;
+    color: #f3f3f1;
+}
+list.boxed-list, list.boxed-list > row, row, comborow, .row {
+    background-color: rgba(30, 29, 28, 0.40);
+    color: #f3f3f1;
+}
+list.boxed-list {
+    border: 1px solid rgba(236, 236, 234, 0.24);
+    border-radius: 14px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+}
+row:hover { background-color: rgba(92, 90, 87, 0.30); }
+.settings-section-title { color: #c9c7c5; }
+dropdown > button {
+    background-color: rgba(30, 29, 28, 0.44);
+    border: 1px solid rgba(236, 236, 234, 0.28);
+    border-radius: 10px;
+}
+
+/* ---- Scrollbars: slivers of red glass -------------------------------- */
+scrollbar { background-color: transparent; }
+scrollbar slider {
+    background-color: rgba(236, 236, 234, 0.28);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 999px;
+}
+scrollbar slider:hover  { background-color: rgba(172, 171, 167, 0.56); }
+scrollbar slider:active { background-color: rgba(157, 156, 150, 0.80); }
+
+/* ---- Type: keep it legible on top of a photograph -------------------- */
+.chat-title, .app-title    { color: #f9f8f8; }
+.chat-subtitle, .app-subtitle, .empty-state-body, .tool-indicator-label {
+    color: #b7b6b2;
+}
+.empty-state-title { color: #f9f8f8; }
+.tao-quote         { color: #acaaa6; }
+.thoughts-text     { color: #d7d5d2; }
+.working-label     { color: #ebebe9; }
+.online-dot.online { color: #9d9c96; text-shadow: 0 0 9px rgba(153, 152, 147, 0.054); }
+
+/* ---- Text views: the last opaque rectangles ---------------------------
+   A Gtk.TextView paints its own `text` node with the theme's view colour,
+   which is OPAQUE. The composer, the code blocks and the terminal log are
+   all TextViews, so until these knock the node out they sit inside a
+   translucent frame as solid black cut-outs - the one detail that made the
+   glass look like a sticker album. Colour and transparency only: no
+   margins, no font metrics, nothing the wrap/measure code reads. -------- */
+.input-frame textview,
+.input-frame textview text,
+.input-frame scrolledwindow,
+.input-frame viewport {
+    background-color: transparent;
+    background-image: none;
+    color: #f4f5f3;
+}
+.input-frame textview text selection {
+    background-color: rgba(116, 115, 109, 0.55);
+    color: #ffffff;
+}
+.code-block scrolledwindow,
+.code-block viewport,
+.terminal-panel scrolledwindow,
+.terminal-panel viewport,
+.chat-scroll,
+.chat-scroll viewport,
+.thoughts-expander,
+.thoughts-expander > title {
+    background-color: transparent;
+    background-image: none;
+}
+textview.terminal-log-view text { background-color: transparent; }
+
+/* ---- Table strip contrast -------------------------------------------
+   On a busy photograph a 0.05 zebra stripe is invisible and the header row
+   stops reading as a header. Nudged up until the grid survives the art
+   behind it. Colour only - the cell padding stays exactly where the width
+   measurement expects it. ---------------------------------------------- */
+.md-th     { background-color: rgba(88, 85, 81, 0.52); }
+.md-td.odd { background-color: rgba(242, 242, 240, 0.08); }
+
+/* ---- The burning status bar, cooled into the same glass -------------- */
+.working-row {
+    background-color: rgba(60, 58, 56, 0.36);
+    border: 1px solid rgba(172, 171, 167, 0.44);
+    border-radius: 12px;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.24),
+        0 0 18px rgba(153, 152, 147, 0.091);
+}
+
+/* =====================================================================
+   OBSIDIAN GLASS - PASS 2: the nameplate, the pill, the cut edges
+   =====================================================================
+   Appended after pass 1 so it wins where the two overlap.  ASCII only.
+
+   Pass 1 made every surface translucent.  This pass gives the set its
+   SHAPE.  Two rules carry it:
+
+     - a CUT EDGE.  The reference look is armour plate, not a soft app
+       card: the frame is a bright hairline with the corner radius kept
+       small and uneven (a big radius on one corner, a small one on the
+       next) so a panel reads as something machined rather than something
+       rounded off.  GTK CSS has no clip-path, so the chamfer is faked
+       with an asymmetric border-radius plus a second, brighter inset
+       ring drawn 1px inside the first - which is what actually sells the
+       bevel at a glance.
+
+     - a LIT RIM.  Every framed panel carries a red bloom whose strength
+       tracks how important the panel is: the hero card and an armed
+       Unleash burn, an inactive button barely glows.  Nothing here is
+       an animation - the app must stay perfectly still while idle.
+   ===================================================================== */
+
+/* ---- The nameplate a new chat opens on ------------------------------- */
+.hero-card {
+    padding: 34px 44px 30px 44px;
+    margin: 0 12px;
+    border-radius: 26px 6px 26px 6px;
+    background-color: rgba(16, 15, 14, 0.44);
+    background-image:
+        linear-gradient(180deg,
+            rgba(248, 248, 248, 0.16) 0%,
+            rgba(248, 248, 248, 0.04) 46%,
+            rgba(248, 248, 248, 0.0) 52%,
+            rgba(0, 0, 0, 0.26) 100%);
+    border: 1px solid rgba(236, 236, 234, 0.34);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.34),
+        inset 0 0 0 1px rgba(178, 176, 172, 0.034),
+        inset 0 -30px 50px rgba(0, 0, 0, 0.28),
+        0 18px 44px rgba(0, 0, 0, 0.56),
+        0 0 34px rgba(130, 130, 125, 0.074);
+}
+.hero-emblem { margin-bottom: 12px; }
+.hero-eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 6px;
+    color: #cac8c6;
+    margin-bottom: 2px;
+}
+.hero-title {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 46px;
+    font-weight: 900;
+    letter-spacing: 8px;
+    color: #f9f9f9;
+    text-shadow:
+        0 0 26px rgba(153, 152, 147, 0.054),
+        0 0 60px rgba(143, 142, 137, 0.039),
+        0 2px 3px rgba(0, 0, 0, 0.86);
+}
+/* The hairline under the wordmark. A Gtk.Box with no child has no natural
+   height, so it needs both, or the rule silently does not draw. */
+.hero-rule {
+    /* WHY THIS IS NOT A 1px LINE WITH A GRADIENT.
+       That is what it was, and on a 0.70 UI scale over a photographic
+       backdrop it drew about four barely-tinted pixels and read as
+       nothing at all. A divider either separates two things or it is
+       noise. Three real pixels, a bright core, transparent ends (so NO
+       background-color - a flat colour underneath would defeat the fade),
+       and a glow that does most of the actual work of being seen. */
+    min-height: 3px;
+    min-width: 260px;
+    margin: 15px 0 13px 0;
+    background-image: linear-gradient(90deg,
+        rgba(163, 162, 156, 0.0) 0%,
+        rgba(180, 179, 175, 0.70) 26%,
+        rgba(242, 242, 240, 0.95) 50%,
+        rgba(180, 179, 175, 0.70) 74%,
+        rgba(163, 162, 156, 0.0) 100%);
+    box-shadow: 0 0 14px rgba(157, 156, 150, 0.12);
+}
+.hero-subtitle {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 4px;
+    color: #b7b6b2;
+    margin-bottom: 18px;
+}
+.hero-chip {
+    padding: 8px 20px;
+    border-radius: 999px;
+    background-color: rgba(81, 79, 75, 0.36);
+    background-image:
+        linear-gradient(180deg, rgba(246, 246, 246, 0.24) 0%,
+                        rgba(163, 162, 156, 0.0) 52%,
+                        rgba(0, 0, 0, 0.18) 100%);
+    border: 1px solid rgba(184, 183, 179, 0.60);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.34),
+        0 0 20px rgba(153, 152, 147, 0.097);
+    margin-bottom: 20px;
+}
+.hero-chip-dot {
+    font-size: 13px;
+    color: #9d9c96;
+    text-shadow: 0 0 10px rgba(153, 152, 147, 0.054);
+}
+.hero-chip-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    color: #f9f9f9;
+}
+.hero-specs { margin-bottom: 18px; }
+.hero-spec-key {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 15px;
+    letter-spacing: 1.4px;
+    color: #a09f9a;
+}
+.hero-spec-val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 15px;
+    font-weight: 700;
+    color: #ececeb;
+}
+.hero-hint {
+    font-size: 14px;
+    color: #8e8c88;
+    font-style: italic;
+}
+
+/* ---- UNLEASH: a labelled pill, built from the same parts as the rest --
+   Disarmed it is one more glass control and does not shout.  Armed it is
+   the loudest thing in the window, because what it turns on is an agent
+   that will keep running without asking. ------------------------------- */
+.unleash-button {
+    padding: 7px 18px 7px 14px;
+    border-radius: 999px;
+    min-height: 0;
+    background-color: rgba(30, 29, 28, 0.44);
+    background-image:
+        linear-gradient(180deg,
+            rgba(248, 248, 248, 0.18) 0%,
+            rgba(248, 248, 248, 0.05) 46%,
+            rgba(248, 248, 248, 0.0) 52%,
+            rgba(0, 0, 0, 0.22) 100%);
+    border: 1px solid rgba(236, 236, 234, 0.32);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24);
+}
+.unleash-button:hover {
+    background-color: rgba(92, 90, 87, 0.44);
+    border-color: rgba(180, 179, 175, 0.68);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.32),
+        0 0 20px rgba(153, 152, 147, 0.114);
+}
+.unleash-button.toggled {
+    background-color: rgba(112, 111, 105, 0.62);
+    background-image:
+        linear-gradient(180deg,
+            rgba(248, 248, 248, 0.38) 0%,
+            rgba(197, 196, 191, 0.12) 46%,
+            rgba(163, 162, 156, 0.0) 52%,
+            rgba(31, 30, 29, 0.30) 100%);
+    border-color: rgba(206, 205, 202, 0.90);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.56),
+        inset 0 -10px 20px rgba(64, 63, 59, 0.34),
+        0 0 30px rgba(153, 152, 147, 0.12);
+}
+.unleash-button.toggled:hover {
+    background-color: rgba(126, 126, 121, 0.70);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.64),
+        0 0 40px rgba(153, 152, 147, 0.12);
+}
+.unleash-glyph { font-size: 19px; }
+.unleash-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    font-weight: 800;
+    letter-spacing: 2.2px;
+    color: #dadad7;
+}
+.unleash-button:hover .unleash-label { color: #f8f8f8; }
+.unleash-button.toggled .unleash-label {
+    color: #ffffff;
+    text-shadow: 0 0 12px rgba(225, 224, 222, 0.054);
+}
+
+/* ---- Cut edges on the big surfaces ----------------------------------
+   Same trick everywhere: uneven radius + a second inset ring 1px inside
+   the border.  Applied only to panels big enough to read as plate; on a
+   small chip it just looks like a mistake. -------------------------- */
+.msg-assistant {
+    border-radius: 4px 20px 20px 20px;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.34),
+        inset 0 0 0 1px rgba(236, 236, 234, 0.026),
+        inset 0 0 30px rgba(178, 176, 172, 0.02),
+        inset 0 -18px 30px rgba(0, 0, 0, 0.24),
+        0 10px 26px rgba(0, 0, 0, 0.48),
+        0 0 22px rgba(130, 130, 125, 0.057);
+}
+.msg-user {
+    border-radius: 20px 20px 4px 20px;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.38),
+        inset 0 0 0 1px rgba(225, 224, 222, 0.04),
+        inset 0 0 30px rgba(153, 152, 147, 0.04),
+        inset 0 -18px 30px rgba(54, 52, 50, 0.22),
+        0 10px 26px rgba(0, 0, 0, 0.46),
+        0 0 24px rgba(130, 130, 125, 0.086);
+}
+.input-frame {
+    border-radius: 24px 8px 24px 8px;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.30),
+        inset 0 0 0 1px rgba(236, 236, 234, 0.029),
+        0 8px 22px rgba(0, 0, 0, 0.44),
+        0 0 18px rgba(130, 130, 125, 0.052);
+}
+.code-block, .md-table, .activity-feed, .activity-dock,
+.card, .cmd-card, .md-quote {
+    border-radius: 14px 4px 14px 4px;
+}
+.chat-row {
+    border-radius: 14px 4px 14px 4px;
+}
+window.dialog, dialog, .messagedialog, .dialog-content {
+    border-radius: 22px 8px 22px 8px;
+}
+
+/* ---- Sidebar type ---------------------------------------------------- */
+.chat-row .title-line {
+    font-weight: 700;
+    letter-spacing: 0.2px;
+}
+.tao-quote {
+    font-size: 15px;
+    line-height: 1.5;
+    color: #a09f9a;
+}
+
+/* =====================================================================
+   COMPOSURE PASS - appended LAST, so it wins the cascade over every
+   block above it.  ASCII-only, like the rest of this bytes literal.
+
+   Everything here is about the difference between a UI that is DARK and
+   one that looks EXPENSIVE.  Three things separate them, and the glass
+   recipe above already gets the hard one (material) right:
+
+     1. ONE LIT EDGE PER SURFACE, not a rim all the way round.  A closed
+        loop of bright colour is a gaming bezel; light falls from one
+        direction, so the bevel goes on the TOP edge and the rest of the
+        outline stays a low-alpha hairline.  The outer accent blooms were
+        damped for the same reason.
+     2. CHROME RECEDES, CONTENT DOES NOT.  Labels, counters, timings and
+        rules step back to the dim end of the ramp; the model's words,
+        tables and code keep full contrast.  Before this, a step count
+        and a finding were painted at the same weight.
+     3. NO NESTED BOXES.  A card inside a card inside a panel is the
+        single most common way a dense UI turns to mush - each border is
+        another line competing with the text.  Depth is carried by tint
+        and by one hairline rule instead.
+   ===================================================================== */
+
+/* ---- The live feed: a chip on the tray, a popover for the detail -----
+   It was a full-width panel in a dock of its own between the last message
+   and the composer, with a margin above AND below it - so there was a gap
+   sitting there whether anything was running or not, and the controls
+   read as three separate slabs stacked with air between them.
+
+   It is a STATUS INDICATOR, so it is now the size of the other controls
+   and lives on the same bar as them.  The detail opens over the
+   conversation instead of reserving layout forever, which means the tray
+   never changes height and there is no hole left behind when it closes.
+   -------------------------------------------------------------------- */
+.activity-dock {
+    margin: 0 6px 0 0;
+}
+.activity-feed, .activity-dock {
+    background-color: transparent;
+    background-image: none;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    padding: 0;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+/* The chip itself carries the glass, at button scale. */
+.activity-header,
+.activity-dock .activity-header {
+    padding: 6px 12px;
+    border-radius: 999px;
+    min-height: 0;
+    background-color: rgba(22, 22, 21, 0.52);
+    background-image:
+        linear-gradient(180deg, rgba(248, 248, 248, 0.13) 0%,
+                        rgba(248, 248, 248, 0.0) 52%,
+                        rgba(0, 0, 0, 0.20) 100%);
+    border: 1px solid rgba(236, 236, 234, 0.16);
+    border-top-color: rgba(242, 243, 241, 0.28);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.13);
+}
+.activity-header:hover,
+.activity-dock .activity-header:hover {
+    background-color: rgba(33, 31, 30, 0.60);
+    border-color: rgba(236, 236, 234, 0.26);
+}
+.activity-feed.live .activity-header {
+    border-color: rgba(185, 183, 179, 0.30);
+    border-top-color: rgba(215, 214, 211, 0.44);
+}
+.activity-title  {
+    color: #eaeae8;
+    font-weight: 600;
+    font-size: 14px;
+    letter-spacing: 0.2px;
+}
+.activity-meta   { color: #888682; font-size: 13px; letter-spacing: 0.3px; }
+.activity-chevron{ color: #7d7b77; font-size: 13px; }
+.activity-spinner { min-width: 13px; min-height: 13px; }
+.activity-verdict { font-size: 13px; }
+
+/* The floating step panel - an overlay INSIDE the window, not a popover.
+   A popover is its own native surface and cannot be translucent on X11
+   without a compositor, which would have made this the one surface in the
+   app that breaks when the rest still works. */
+/* In the transcript it is a plain collapsible block, not a floating card:
+   no drop shadow to lift it off a surface it is already part of. */
+.activity-panel-inline {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10);
+    background-color: rgba(18, 17, 15, 0.52);
+}
+.activity-panel {
+    /* NEARLY OPAQUE, and that is not a style choice. Every other glass
+       surface in this app sits over ARTWORK; this one floats over the
+       model's own words. At the 0.4-0.6 tint the rest of the theme uses,
+       the sentence underneath reads straight through the step list and
+       both become unreadable. A panel you can see through is only glass
+       when there is nothing behind it that matters. */
+    background-color: rgba(13, 13, 11, 0.965);
+    background-image:
+        linear-gradient(180deg, rgba(248, 248, 248, 0.12) 0%,
+                        rgba(248, 248, 248, 0.0) 44%,
+                        rgba(0, 0, 0, 0.24) 100%);
+    border: 1px solid rgba(236, 236, 234, 0.16);
+    border-top-color: rgba(242, 243, 241, 0.30);
+    border-radius: 14px;
+    padding: 6px 8px;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.14),
+        0 12px 32px rgba(0, 0, 0, 0.52);
+}
+.activity-body {
+    border-top: none;
+    padding: 2px 0;
+}
+.activity-step        { padding: 4px 6px 4px 4px; }
+.activity-step-name   { letter-spacing: 0.2px; }
+.activity-step-detail { color: #979591; }
+.activity-step-time   { color: #7a7873; font-size: 13px; }
+
+/* THE NESTED BOX, REMOVED.  A tool result preview was drawn inside its own
+   bordered, tinted, rounded panel INSIDE the feed panel INSIDE the docked
+   surface - three outlines deep for one line of dim monospace.  It is a
+   continuation of the row above it, so it is now indented under that row
+   against a single hairline rule and nothing else. */
+.activity-preview-box {
+    background-color: transparent;
+    background-image: none;
+    border: none;
+    border-left: 1px solid rgba(236, 236, 234, 0.16);
+    border-radius: 0;
+    margin: 0 0 2px 16px;
+    padding: 0 0 2px 10px;
+}
+.activity-preview {
+    color: #898884;
+    font-size: 14px;
+}
+
+/* ---- Composer: calm at rest, lit on focus ---------------------------
+   The composer holds focus from the moment the app opens, so whatever the
+   focus state looks like IS what the app looks like.  A 0.76-alpha accent
+   outline plus a 28px bloom on all four sides made "ready for input" the
+   loudest thing on screen.  Focus now reads as the top edge catching
+   light and a soft lift - present, once you look for it.
+   -------------------------------------------------------------------- */
+.input-frame {
+    border-color: rgba(236, 236, 234, 0.18);
+    border-top-color: rgba(242, 243, 241, 0.30);
+}
+.input-frame:focus-within {
+    border-color: rgba(189, 188, 184, 0.34);
+    border-top-color: rgba(215, 214, 211, 0.52);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.26),
+        0 8px 24px rgba(0, 0, 0, 0.46),
+        0 0 22px rgba(153, 152, 147, 0.077);
+}
+
+/* ---- Sidebar rows --------------------------------------------------- */
+/* The agent marker takes the palette because it is a geometric glyph, not
+   an emoji - see the comment at its construction site. */
+.chat-row .pin-icon   { color: #918f8a; font-size: 12px; }
+.chat-row .agent-icon { color: #a8a7a3; }
+.chat-row .meta-line  { color: #7b7a76; }
+
+/* ---- The hero nameplate ---------------------------------------------- */
+.hero-subtitle { margin-bottom: 6px; }
+/* The model chip is a fact, not a feature. It was the one saturated block
+   left on the card once the glows came down, which made "DeepSeek-V4-Flash"
+   the second most prominent thing after the wordmark. */
+.hero-chip {
+    background-color: rgba(33, 31, 30, 0.52);
+    border: 1px solid rgba(236, 236, 234, 0.18);
+    border-top-color: rgba(242, 243, 241, 0.30);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+.hero-chip-label { color: #dddcda; }
+.hero-chip-dot   { color: #a09f9a; }
+.hero-armline {
+    font-size: 14px;
+    color: #8c8b87;
+    letter-spacing: 0.2px;
+    margin-bottom: 16px;
+}
+
+/* ---- The two speakers ------------------------------------------------
+   The operator's bubble was the most saturated object in the window - a
+   0.32 tint of accent blue behind a 0.58-alpha accent border - so the
+   loudest thing on any screen was a sentence the operator had already
+   read.  Attention should fall on the ANSWER.
+
+   The two are still unmistakably different, just not by volume: the
+   operator's side is the LIGHTER, cooler pane (light falls on it) and
+   Basilisk's is smoked obsidian.  Same material, two depths - which is
+   also how the asymmetric corners already distinguish them.
+   -------------------------------------------------------------------- */
+.msg-user {
+    background-color: rgba(48, 47, 44, 0.34);
+    background-image:
+        linear-gradient(180deg,
+            rgba(246, 246, 246, 0.16) 0%,
+            rgba(216, 215, 212, 0.05) 46%,
+            rgba(163, 162, 156, 0.0) 52%,
+            rgba(13, 14, 12, 0.24) 100%);
+    border: 1px solid rgba(236, 236, 234, 0.20);
+    border-top-color: rgba(244, 245, 243, 0.34);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.24),
+        inset 0 -18px 30px rgba(19, 19, 18, 0.20),
+        0 8px 22px rgba(0, 0, 0, 0.42);
+}
+.msg-user:hover {
+    background-color: rgba(55, 54, 51, 0.38);
+    border-color: rgba(236, 236, 234, 0.28);
+    border-top-color: rgba(244, 245, 243, 0.42);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.28),
+        inset 0 -18px 30px rgba(19, 19, 18, 0.22),
+        0 10px 26px rgba(0, 0, 0, 0.44);
+}
+.msg-assistant {
+    border-color: rgba(236, 236, 234, 0.16);
+    border-top-color: rgba(242, 243, 241, 0.26);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.16),
+        inset 0 -18px 30px rgba(0, 0, 0, 0.24),
+        0 8px 22px rgba(0, 0, 0, 0.44);
+}
+
+/* ---- Type ramp ------------------------------------------------------
+   Machine chrome sits one step dimmer than prose everywhere, in one
+   place, so a later rule cannot quietly promote a label to the weight of
+   an answer. */
+.chat-subtitle, .app-subtitle, .md-table-more, .code-lang {
+    color: #898783;
+    letter-spacing: 0.4px;
+}
+
+/* =====================================================================
+   THE QUIET PASS - appended after COMPOSURE, so it wins over everything.
+   ASCII-only, like the rest of this bytes literal.
+
+   The brief was "darker, more minimal, more professional".  The composure
+   pass got the structure right; what was left is VOLUME.  Three specific
+   things were still shouting, and none of them is the content:
+
+     1. THE GROUND WAS NOT DARK, IT WAS DIM.  Surfaces sat around 4-6%
+        lightness ABOVE the window, so every panel read as a lighter
+        rectangle pasted onto the backdrop.  Dark UIs look expensive when
+        the panels are DARKER than the frame and the only light in the
+        room comes from the text.  So the grounds drop and the separation
+        is carried by one hairline instead of by a lift.
+     2. TINT WAS DOING WORK THAT CONTRAST SHOULD DO.  A blue-tinted panel
+        next to a blue-tinted panel needs saturation to tell them apart,
+        and saturation is the thing that reads as cheap.  Chrome goes
+        near-neutral here; the cool band stays where it earns its place,
+        on the lit edge and on live/active state.
+     3. EVERY SURFACE HAD A DROP SHADOW.  A shadow means "this floats
+        above that".  When everything floats, nothing does, and the whole
+        window gets a soft halo that looks like a screenshot of a UI
+        rather than a UI.  Shadows are kept ONLY where something really
+        does float over content: the popover, the dialogs.
+
+   WHAT IS DELIBERATELY NOT TOUCHED, because quiet is not the same as
+   washed out: prose, code, tables and links keep their full contrast -
+   they are the reason the window exists.  The semantic colours (error
+   red, warning amber) are untouched, because dimming a danger signal to
+   match a mood is how a warning stops working.
+   ===================================================================== */
+
+/* ---- 1. the ground drops ------------------------------------------- */
+.activity-panel-frame,
+.activity-dock .activity-panel-frame {
+    background-color: rgba(8, 7, 8, 0.975);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.10),
+        0 14px 40px rgba(0, 0, 0, 0.60);
+    border: 1px solid rgba(226, 225, 224, 0.11);
+    border-top-color: rgba(237, 237, 236, 0.20);
+}
+.activity-header,
+.activity-dock .activity-header {
+    background-color: rgba(14, 14, 13, 0.60);
+    border: 1px solid rgba(226, 225, 224, 0.11);
+    border-top-color: rgba(237, 237, 236, 0.19);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.activity-header:hover,
+.activity-dock .activity-header:hover {
+    background-color: rgba(25, 24, 23, 0.70);
+    border-color: rgba(226, 225, 224, 0.17);
+}
+
+/* ---- 2. chrome goes neutral ---------------------------------------- */
+.activity-title    { color: #b8b6b2; letter-spacing: 0.2px; }
+.activity-meta     { color: #72706b; font-size: 13px; }
+.activity-chevron  { color: #6a6964; }
+.activity-step-detail { color: #898884; }
+.activity-step-time   { color: #716f6a; }
+.activity-preview     { color: #7c7b77; }
+.activity-preview-box { border-left-color: rgba(226, 225, 224, 0.12); }
+
+/* ---- 3. shadows only where something floats ------------------------ */
+.msg-user, .msg-assistant {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10);
+}
+.msg-user {
+    /* The operator's own words were the most saturated object on screen.
+       Depth, not volume: a hair lighter than the assistant pane, with the
+       same near-neutral hairline. */
+    background-color: rgba(37, 36, 34, 0.42);
+    border-color: rgba(226, 225, 224, 0.14);
+    border-top-color: rgba(237, 237, 236, 0.24);
+}
+.msg-user:hover {
+    background-color: rgba(43, 42, 40, 0.48);
+    border-color: rgba(226, 225, 224, 0.20);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.13);
+}
+.msg-assistant {
+    border-color: rgba(226, 225, 224, 0.10);
+    border-top-color: rgba(237, 237, 236, 0.18);
+}
+
+/* ---- 4. two things the quiet pass got wrong, corrected after looking
+   at a real screenshot rather than at the stylesheet ------------------
+
+   THE SELECTED CHAT ROW was the loudest object in the window: a saturated
+   blue fill, a 3px accent bar, a white top bevel AND an outer bloom, all
+   on a list row whose job is to say "you are here".  Chrome receding is
+   the rule, and a navigation row is chrome.  It keeps ONE signal - the
+   left accent bar, which is the cheapest unambiguous "here" there is -
+   and gives up the fill, the bevel and the glow.
+
+   THE COMPOSER went too far the other way and nearly vanished: a dark
+   rounded box on a dark ground with a 0.11-alpha hairline reads as
+   nothing at all, and the one control the operator needs to find without
+   looking should not be the hardest to see.  It gets a visible edge
+   back - still quiet, still no bloom, but legibly an input.  Its FOCUS
+   state stays understated, because the composer holds focus from the
+   moment the app opens: a loud focus ring means the app's resting
+   appearance is "something is shouting at you".
+   -------------------------------------------------------------------- */
+.chat-row.selected, .chat-row:selected {
+    background-color: rgba(37, 36, 34, 0.44);
+    background-image: none;
+    border-left: 3px solid #878681;
+    box-shadow: none;
+}
+.chat-row.selected .title-line, .chat-row:selected .title-line {
+    color: #efefed;
+}
+.input-frame {
+    background-color: rgba(18, 17, 15, 0.62);
+    background-image:
+        linear-gradient(180deg, rgba(248, 248, 248, 0.07) 0%,
+                        rgba(248, 248, 248, 0.0) 50%,
+                        rgba(0, 0, 0, 0.18) 100%);
+    border: 1px solid rgba(226, 225, 224, 0.24);
+    border-top-color: rgba(237, 237, 236, 0.30);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09);
+}
+.input-frame:focus-within {
+    background-color: rgba(22, 22, 21, 0.70);
+    border-color: rgba(172, 171, 167, 0.44);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+/* =====================================================================
+   THE CHECKLIST - the plan, ticking off, above the step rows.
+
+   It is a READING surface, not a control: no box, no tint, no border of
+   its own.  One hairline under the header separates it from the steps
+   and that is the entire chrome budget, because a bordered card inside
+   the popover would be the nested box the composure pass exists to
+   forbid.
+
+   The four states are told apart by WEIGHT AND OPACITY, not by four
+   colours.  A five-item plan painted in five hues is a traffic light,
+   and the operator is reading it at a glance to answer one question:
+   how much is left.
+   ===================================================================== */
+.activity-plan {
+    padding: 2px 6px 6px 4px;
+    margin: 0 0 4px 0;
+    border-bottom: 1px solid rgba(226, 225, 224, 0.10);
+    background-color: transparent;
+    background-image: none;
+    border-radius: 0;
+    box-shadow: none;
+}
+.activity-plan-head {
+    padding: 2px 2px 4px 2px;
+}
+.activity-plan-title {
+    color: #7c7b77;
+    font-size: 12px;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+}
+.activity-plan-count {
+    color: #7c7b77;
+    font-size: 12px;
+}
+.activity-plan-row {
+    padding: 3px 2px 3px 2px;
+}
+.activity-plan-glyph {
+    font-size: 12px;
+    min-width: 14px;
+    color: #6e6c67;
+}
+.activity-plan-name {
+    color: #a7a5a2;
+    letter-spacing: 0.2px;
+}
+.activity-plan-note {
+    color: #7c7b77;
+    font-size: 13px;
+}
+/* OPEN: present, not yet earning attention. */
+.activity-plan-row.plan-open .activity-plan-name  { color: #9a9894; }
+/* DOING: the one line worth looking at, so it is the only lit one. */
+.activity-plan-row.plan-doing .activity-plan-glyph { color: #b8b8b3; }
+.activity-plan-row.plan-doing .activity-plan-name  {
+    color: #e8e7e6;
+    font-weight: 600;
+}
+/* DONE: keeps its tick and steps back.  Finished work should be
+   countable at a glance and should not compete with what is live. */
+.activity-plan-row.plan-done .activity-plan-glyph { color: #6e6c67; }
+.activity-plan-row.plan-done .activity-plan-name  { color: #787671; }
+/* BLOCKED: the one place red belongs here - it is a real problem, and
+   red means danger and nothing else in this theme. */
+.activity-plan-row.plan-blocked .activity-plan-glyph { color: #e5484d; }
+.activity-plan-row.plan-blocked .activity-plan-name  { color: #c9a9ab; }
+/* DROPPED: deliberately not done.  Dim, not alarming. */
+.activity-plan-row.plan-dropped .activity-plan-glyph { color: #62605d; }
+.activity-plan-row.plan-dropped .activity-plan-name  { color: #6b6a65; }
+
+/* =====================================================================
+   THE COLOUR PASS - appended last, so it wins over every pass above.
+   ASCII-only, like the rest of this bytes literal.
+
+   The passes before this one all traded colour away for calm.  The quiet
+   pass, the last of them, deliberately made the chrome "near-neutral" and
+   dropped the grounds to near-black - handsome, but it reads on screen as
+   a black-and-white film: grey text on grey panels on a black ground with
+   the coral accent barely visible anywhere.  This pass puts the colour
+   back while keeping the structure and every contrast the calm passes got
+   right.  It is a re-tint, not a re-layout: the only thing that changes is
+   hue.
+
+   The palette is a deep indigo ground, indigo surfaces one step lighter,
+   coral as the primary accent and a violet secondary that actually reaches
+   the screen (selection, focus, the operator's own bubble).  Green, amber
+   and red stay semantic and stay where they were.
+   ===================================================================== */
+
+/* ---- structural re-tint for libadwaita's own named colours ---- */
+@define-color accent_color              #d97757;
+@define-color accent_bg_color           #c15f3c;
+@define-color accent_fg_color           #ffffff;
+@define-color window_bg_color           #0c0a16;
+@define-color window_fg_color           #eae7f7;
+@define-color view_bg_color             #151228;
+@define-color view_fg_color             #eae7f7;
+@define-color headerbar_bg_color        #151228;
+@define-color headerbar_fg_color        #eae7f7;
+@define-color headerbar_border_color    #2c2550;
+@define-color popover_bg_color          #1a1632;
+@define-color popover_fg_color          #eae7f7;
+@define-color dialog_bg_color           #1a1632;
+@define-color dialog_fg_color           #eae7f7;
+@define-color card_bg_color             #1c1836;
+@define-color card_fg_color             #eae7f7;
+@define-color sidebar_bg_color          #100e20;
+@define-color sidebar_fg_color          #eae7f7;
+@define-color borders                   #2c2550;
+
+/* ---- the ground: indigo, not black ---- */
+window, .background {
+    background-color: #0c0a16;
+    background-image: linear-gradient(to bottom, #12102a, #0a0814 62%);
+    color: #eae7f7;
+}
+headerbar {
+    background-color: #151228;
+    background-image: linear-gradient(to bottom, #201b40, #141126);
+    color: #eae7f7;
+    border-bottom: 1px solid rgba(217, 119, 87, 0.55);
+}
+.sidebar headerbar {
+    background-image: linear-gradient(to bottom, #1a1534, #120f24);
+}
+.sidebar {
+    background-color: #100e20;
+    background-image: linear-gradient(to bottom, #16122c, #0d0b1b);
+    border-right: 1px solid #2c2550;
+}
+
+/* ---- branding ---- */
+.app-title {
+    color: #f5f2ff;
+    text-shadow: 0 2px 3px rgba(0, 0, 0, 0.9),
+                 0 0 18px rgba(167, 139, 250, 0.38);
+}
+.app-subtitle  { color: #a49dc4; }
+.chat-title    { color: #eae7f7; }
+.chat-subtitle { color: #a49dc4; }
+.online-dot.online {
+    color: #d97757;
+    text-shadow: 0 0 9px rgba(217, 119, 87, 0.55);
+}
+.online-dot.offline { color: #6f6a8c; }
+
+/* ---- sidebar chat rows: violet is "here", coral is a pin ---- */
+.chat-row:hover {
+    background-color: rgba(167, 139, 250, 0.12);
+    border-left-color: rgba(167, 139, 250, 0.70);
+}
+.chat-row.selected, .chat-row:selected {
+    background-color: rgba(139, 92, 246, 0.20);
+    background-image: linear-gradient(90deg,
+        rgba(167, 139, 250, 0.32),
+        rgba(139, 92, 246, 0.07) 60%,
+        rgba(139, 92, 246, 0.0) 92%);
+    border-left: 3px solid #a78bfa;
+    box-shadow: none;
+}
+.chat-row .title-line { color: #f0edfb; }
+.chat-row.selected .title-line, .chat-row:selected .title-line { color: #ffffff; }
+.chat-row .meta-line  { color: #8d87ad; }
+.chat-row .pin-icon   { color: #d97757; }
+.chat-row .agent-icon { color: #a78bfa; }
+
+/* ---- empty state / hero ---- */
+.empty-state       { color: #7a7496; }
+.empty-state-title { color: #f6f3ff; text-shadow: 0 0 24px rgba(167, 139, 250, 0.28); }
+.empty-state-body  { color: #a49dc4; }
+.hero-chip {
+    background-color: rgba(124, 92, 240, 0.18);
+    border: 1px solid rgba(167, 139, 250, 0.45);
+    border-top-color: rgba(196, 181, 253, 0.60);
+}
+.hero-chip-label { color: #ddd7f6; }
+.hero-chip-dot   { color: #d97757; }
+.hero-armline    { color: #9a94bd; }
+
+/* ---- the two speakers: violet (operator) vs coral (Basilisk) ---- */
+.msg-user {
+    background-color: rgba(124, 92, 240, 0.16);
+    background-image: linear-gradient(180deg,
+        rgba(167, 139, 250, 0.20) 0%,
+        rgba(124, 92, 240, 0.07) 46%,
+        rgba(124, 92, 240, 0.0) 60%,
+        rgba(10, 8, 20, 0.26) 100%);
+    border: 1px solid rgba(167, 139, 250, 0.42);
+    border-top-color: rgba(196, 181, 253, 0.62);
+    color: #f4f1ff;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+}
+.msg-user:hover {
+    background-color: rgba(124, 92, 240, 0.22);
+    border-color: rgba(196, 181, 253, 0.55);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.20);
+}
+.msg-assistant {
+    background-color: rgba(217, 119, 87, 0.13);
+    background-image: linear-gradient(180deg,
+        rgba(217, 119, 87, 0.20) 0%,
+        rgba(217, 119, 87, 0.06) 50%,
+        rgba(217, 119, 87, 0.0) 66%,
+        rgba(20, 12, 10, 0.22) 100%);
+    border-color: rgba(217, 119, 87, 0.42);
+    border-top-color: rgba(240, 160, 120, 0.58);
+    color: #f5f1ee;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+.msg-assistant:hover { border-color: rgba(240, 160, 120, 0.58); }
+
+/* ---- role labels ---- */
+.role-label            { color: #9a94bd; }
+.role-label.user       { color: #a78bfa; }
+.role-label.basilisk   { color: #d97757; }
+
+/* ---- avatars ---- */
+.avatar {
+    background-color: #1c1836;
+    color: #eae7f7;
+}
+.avatar-user { background-color: #2a2250; color: #eae7f7; }
+.avatar-basilisk {
+    background: linear-gradient(135deg, #7c5cf0, #d97757);
+    color: #0c0a16;
+    border: 1px solid #a78bfa;
+    box-shadow: 0 0 12px rgba(167, 139, 250, 0.35);
+}
+.avatar-dragon, .avatar-cross, .avatar-priest { color: #c4b5fd; }
+
+/* ---- code ---- */
+.code-block {
+    background-color: #120f24;
+    border: 1px solid #2c2550;
+}
+.code-block-header {
+    background-color: #181430;
+    color: #a49dc4;
+    border-bottom: 1px solid #2c2550;
+}
+.code-block textview { color: #b6f3d4; }
+
+/* ---- composer ---- */
+.input-frame {
+    background-color: rgba(26, 22, 50, 0.78);
+    background-image: linear-gradient(180deg,
+        rgba(167, 139, 250, 0.10) 0%,
+        rgba(255, 255, 255, 0.0) 55%,
+        rgba(0, 0, 0, 0.16) 100%);
+    border: 1px solid rgba(167, 139, 250, 0.42);
+    border-top-color: rgba(196, 181, 253, 0.55);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10);
+}
+.input-frame:focus-within {
+    background-color: rgba(32, 27, 60, 0.86);
+    border-color: #a78bfa;
+    border-top-color: #c4b5fd;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14),
+                0 0 20px rgba(167, 139, 250, 0.22);
+}
+
+/* ---- status pills ---- */
+.status-pill            { background-color: #1c1836; color: #a49dc4; }
+.status-pill-label      { color: #a49dc4; }
+.status-pill.busy       { background-color: #2a2250; }
+.status-pill.busy .status-pill-label { color: #c4b5fd; }
+.status-pill.offline    { background-color: #241f3d; color: #eae7f7; }
+
+/* ---- tool indicators and thoughts ---- */
+.tool-indicator-label { color: #8d87ad; }
+.thoughts-expander       { color: #9a94bd; }
+.thoughts-expander > title { color: #9a94bd; }
+.thoughts-text {
+    color: #c0badd;
+    background: rgba(124, 92, 240, 0.10);
+    border-left: 2px solid rgba(167, 139, 250, 0.55);
+}
+.msg-system-notice { color: #9a94bd; }
+
+/* ---- the activity feed / dock, tinted to match ---- */
+.activity-title       { color: #cfc9ea; }
+.activity-meta        { color: #8d87ad; }
+.activity-chevron     { color: #7a7496; }
+.activity-step-detail { color: #9a94bd; }
+.activity-step-time   { color: #7a7496; }
+.activity-preview     { color: #8d87ad; }
+.activity-plan-title  { color: #8d87ad; }
+.activity-plan-count  { color: #8d87ad; }
+.activity-plan-name   { color: #b8b2d8; }
+.activity-plan-note   { color: #8d87ad; }
+.activity-plan-row.plan-open .activity-plan-name  { color: #a49dc4; }
+.activity-plan-row.plan-doing .activity-plan-glyph { color: #a78bfa; }
+.activity-plan-row.plan-doing .activity-plan-name  { color: #ece7ff; }
+.activity-plan-row.plan-done .activity-plan-glyph { color: #2ecc71; }
+.activity-plan-row.plan-done .activity-plan-name  { color: #8d87ad; }
+
+/* ---- quick-action chips in the empty state ---- */
+.quick-chip {
+    background-color: rgba(124, 92, 240, 0.16);
+    border: 1px solid rgba(167, 139, 250, 0.42);
+    color: #ddd7f6;
+}
+.quick-chip:hover {
+    background-color: rgba(139, 92, 246, 0.26);
+    border-color: rgba(196, 181, 253, 0.60);
+    color: #ffffff;
+}
+
+/* ---- cards and banners get the indigo surface too ---- */
+.card {
+    background-color: #1c1836;
+    border: 1px solid #2c2550;
+}
+.terminal-panel {
+    background-color: #0f0d1e;
+    border: 1px solid #2c2550;
+}
+"""
+
+
+# ═════════════════════════════════════════════════════════════════════
+# MARKDOWN-LITE RENDERING
+# ═════════════════════════════════════════════════════════════════════
+
+CODE_FENCE_RE  = re.compile(r"```([a-zA-Z0-9_+-]*)\n?(.*?)```", re.DOTALL)
+INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+BOLD_RE        = re.compile(r"\*\*([^*\n]+)\*\*")
+# ASTERISKS ONLY, deliberately — `_underscore_` italics are NOT supported and
+# must not be added.  Underscores are everywhere in the text this app renders
+# (web_read, tool_result, max_tokens, /etc/shadow), so enabling them would
+# italicise the middle of every other snake_case sentence.
+#
+# The consequence of that choice is a CONTRACT: anything this app emits for the
+# operator to read must use the syntax above.  It did not — every status
+# placeholder was written with UNDERSCORES (`_used web_read_`, `_(thinking…)_`,
+# `_(done)_`, `_(stopped)_`), so the renderer passed them straight through and
+# the operator saw the raw markdown in the chat.  Both sides are now held
+# together by tests/test_placeholders.py.
+ITALIC_RE      = re.compile(r"(?<!\*)\*([^*\n]+)\*(?!\*)")
+
+
+def _evidence_report(engagement=None):
+    """Evidence summary + integrity + a readable markdown ledger for review."""
+    led = get_ledger()
+    if led is None:
+        return {"error": "evidence ledger unavailable"}
+    return {
+        "engagement": engagement or led.engagement,
+        "summary": led.summary(engagement),
+        "integrity": led.verify(engagement),
+        "report_markdown": led.export_markdown(engagement),
+    }
+
+
+def _evidence_set_engagement(name):
+    """Switch the active engagement that future commands are recorded under."""
+    led = get_ledger()
+    if led is None:
+        return {"error": "evidence ledger unavailable"}
+    if not (name or "").strip():
+        return {"engagement": led.engagement, "note": "no name given; unchanged"}
+    new = led.set_engagement(name)
+    return {"engagement": new, "steps": led.summary()["steps"]}
+
+
+# Links, both `[text](url)` and a bare pasted URL. These matter more in this
+# app than in most: ANSWER MODE explicitly orders the model to "CITE what you
+# used: name the source or paste the link", so every leashed answer ends in one
+# — and until now every one of them rendered as literal `[kernel.org](https://
+# www.kernel.org/)` at the bottom of the reply.
+MD_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)")
+BARE_URL_RE = re.compile(r"(?<![\w@/])(https?://[^\s<>\"'`\])]+)")
+# Trailing punctuation belongs to the sentence, not to the URL.
+_URL_TAIL = ".,;:!?"
+
+# Private Use Area, so nothing a model can emit collides with it and none of
+# the three markdown regexes below can match it.
+_LINK_SENTINEL = "\ue000%d\ue001"
+_SENTINEL_RE = re.compile("\ue000" + r"(\d+)" + "\ue001")
+
+
+def _pango_escape(t: str) -> str:
+    return (t.replace("&", "&amp;")
+             .replace("<", "&lt;")
+             .replace(">", "&gt;"))
+
+
+_TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)(?:\s[^>]*)?(/?)>")
+
+
+def _markup_is_wellformed(markup: str) -> bool:
+    """Do this string's tags actually nest?
+
+    THE THREE INLINE PASSES CANNOT GUARANTEE THIS AND NEVER COULD.
+    BOLD_RE, ITALIC_RE and INLINE_CODE_RE each run over the whole string
+    independently, so on input with stray `*` and backticks they happily
+    produce `<i>a<span>b</i>c</span>` — overlapping, not nested. GTK does not
+    raise on that: it logs a warning and renders the RAW MARKUP, so the
+    operator sees `<span font_family=...>` in the middle of his answer. The
+    reply is not malformed; the renderer is.
+
+    Measured on 30,000 adversarial strings, the old renderer emitted 382 such
+    strings and the linkifying one 99 — different inputs, same class. Rather
+    than chase the pairing rules, the output is CHECKED and a bad one falls
+    back to something plainer that is guaranteed to nest.
+
+    Attribute values are skipped by the tag regex, so a `>` inside an href
+    cannot be mistaken for the end of a tag."""
+    stack: List[str] = []
+    for m in _TAG_RE.finditer(markup):
+        closing, name, selfclose = m.group(1), m.group(2), m.group(3)
+        if selfclose:
+            continue
+        if closing:
+            if not stack or stack[-1] != name:
+                return False
+            stack.pop()
+        else:
+            stack.append(name)
+    return not stack
+
+
+def _pango_inline(t: str) -> str:
+    """Bold / italic / inline-code, on text that carries no links."""
+    t = BOLD_RE.sub(r"<b>\1</b>", t)
+    t = ITALIC_RE.sub(r"<i>\1</i>", t)
+    # Inline code gets a GLASS chip, not a black one. Pango cannot take an
+    # rgba() colour, but background_alpha (0-65535) is exactly the knob for
+    # this: a near-opaque black rectangle inside a translucent bubble was the
+    # one element that still read as a sticker pasted onto the glass. ~0.62
+    # keeps the monospace legible while the artwork carries on behind it.
+    t = INLINE_CODE_RE.sub(
+        r'<span font_family="JetBrains Mono" '
+        r'background="#0c1c29" background_alpha="40000" '
+        r'foreground="#dbeffd"> \1 </span>',
+        t)
+    return t
+
+
+def text_to_pango(text: str) -> str:
+    """Markdown-ish to Pango markup.
+
+    LINKS ARE PULLED OUT FIRST, INTO SENTINELS, AND PUT BACK LAST.
+    The obvious implementation — add one more .sub() alongside bold and italic —
+    is wrong in both directions, and both directions fail LOUDLY:
+
+      · a URL is not prose. `*` and `` ` `` are legal in one, and ITALIC_RE or
+        INLINE_CODE_RE matching INSIDE an href injects a tag into an attribute
+        value, which makes set_markup raise and drops the whole message to
+        plain text — so one exotic link silently unstyles the entire reply;
+      · and in the other direction the href, once written, is a fat target for
+        the passes that follow it.
+
+    Sentinels sidestep both: the link text is escaped and inline-formatted on
+    its own, the URL is escaped as an ATTRIBUTE (quotes included, which the
+    body escape does not do), and neither is ever visible to the other passes.
+    The sentinel is Private Use Area, so no model output can forge one.
+    """
+    links: List[str] = []
+
+    def _stash(label: str, url: str, fmt: bool = True) -> str:
+        """fmt=False when the LABEL IS THE URL (a bare pasted link).
+
+        A URL is not prose, and running the inline passes over one is how the
+        first version of this regressed 8 inputs out of 30,000 that the old
+        renderer had handled: `https://host/a**b**c` had its own asterisks
+        turned into a <b> INSIDE the anchor text, and the resulting tag soup
+        was rejected, which drops the whole message to plain text. Markdown
+        link text is prose its author wrote and still gets formatted; the URL
+        itself only ever gets escaped."""
+        url = url.rstrip(_URL_TAIL)
+        href = (url.replace("&", "&amp;").replace("<", "&lt;")
+                   .replace(">", "&gt;").replace('"', "&quot;")
+                   .replace("'", "&apos;"))
+        shown = _pango_escape(label)
+        if fmt:
+            shown = _pango_inline(shown)
+        links.append('<a href="%s">%s</a>' % (href, shown))
+        return _LINK_SENTINEL % (len(links) - 1)
+
+    # Inline code wins over autolinking: a URL the operator wrote inside
+    # backticks is being shown as text, not offered as a destination.
+    #
+    # BISECT, NOT A LINEAR SCAN. The obvious `any(a <= pos < b for a, b in
+    # spans)` is O(spans) per candidate link and therefore O(n^2) in a reply
+    # that is dense in both — which is the ordinary shape of a cited answer,
+    # not an exotic one. This file has shipped a quadratic display path twice
+    # (_ALT_PARTIAL_RE at 25s, and the per-token re-strip); it is not worth
+    # writing a third one to save four lines.
+    _starts: List[int] = []
+    _ends: List[int] = []
+
+    def _index_code(src: str) -> None:
+        del _starts[:], _ends[:]
+        for _m in INLINE_CODE_RE.finditer(src):
+            _a, _b = _m.span()
+            _starts.append(_a)
+            _ends.append(_b)
+
+    def _in_code(pos: int) -> bool:
+        i = bisect.bisect_right(_starts, pos) - 1
+        return i >= 0 and pos < _ends[i]
+
+    _index_code(text)
+
+    out, last = [], 0
+    for m in MD_LINK_RE.finditer(text):
+        if _in_code(m.start()):
+            continue
+        out.append(text[last:m.start()])
+        out.append(_stash(m.group(1), m.group(2)))
+        last = m.end()
+    out.append(text[last:])
+    staged = "".join(out)
+
+    # Second pass for bare URLs. Runs on the STAGED text, so a URL already
+    # captured as a markdown target cannot be matched a second time — it is a
+    # sentinel by now.
+    _index_code(staged)
+    out, last = [], 0
+    for m in BARE_URL_RE.finditer(staged):
+        if _in_code(m.start()):
+            continue
+        url = m.group(1).rstrip(_URL_TAIL)
+        out.append(staged[last:m.start()])
+        out.append(_stash(url, url, fmt=False))
+        last = m.start() + len(url)
+    out.append(staged[last:])
+    staged = "".join(out)
+
+    def _restore(t: str) -> str:
+        return (_SENTINEL_RE.sub(lambda m: links[int(m.group(1))], t)
+                if links else t)
+
+    body = _restore(_pango_inline(_pango_escape(staged)))
+    if _markup_is_wellformed(body):
+        return body
+
+    # Tier 2: drop the emphasis passes, keep the links. The citation stays
+    # clickable, which is the part of a leashed answer that carries the proof.
+    body = _restore(_pango_escape(staged))
+    if _markup_is_wellformed(body):
+        return body
+
+    # Tier 3: plain escaped text. Same thing the caller's except-branch would
+    # have shown, but reached without a GTK warning and without the raw
+    # `<span font_family=...>` soup ever hitting the screen.
+    return _pango_escape(text)
+
+
+# ── STRUCTURED MARKDOWN BLOCKS ───────────────────────────────────────
+# A model answering a comparison question replies with a TABLE, and a model
+# writing a report replies with headings, bullets and quotes. All of it used to
+# land in one Gtk.Label as literal text — `| Agent | Score |` and a row of
+# dashes, rendered as prose. The pipes do not line up in a proportional font,
+# so the single most common shape of a structured answer was also the least
+# readable thing on the screen.
+#
+# These are parsed here, as pure functions over text, so the whole grammar is
+# testable without a display. The widgets that draw them are further down.
+
+# A table separator: |---|:--:|---:| — the row that makes a table a table.
+# ONE dash is a legal separator cell: `|:-:|` and `|-|` are both valid
+# markdown and both are things a model actually emits. Requiring two silently
+# rejected every centre-aligned table — caught by tests/test_richblocks.py,
+# not by reading. The "is this really a separator" judgement is finished in
+# _looks_like_table, which also demands a pipe (or a long dash run), so a
+# setext underline under a line of prose is not mistaken for one.
+_TBL_SEP_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_RULE_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
+_QUOTE_RE = re.compile(r"^\s*>\s?(.*)$")
+_ULI_RE = re.compile(r"^(\s*)[-*+]\s+(.*)$")
+_OLI_RE = re.compile(r"^(\s*)(\d{1,3})[.)]\s+(.*)$")
+
+
+def _split_table_row(line: str) -> List[str]:
+    """Split one markdown table row on unescaped pipes.
+
+    Hand-walked rather than `line.split("|")` because a cell may legitimately
+    contain an escaped pipe (`\\|`) — a shell pipeline in a cell is exactly the
+    kind of thing this app's answers are full of — and splitting naively cuts
+    the row in the wrong place and shifts every following column."""
+    cells, buf, i = [], [], 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\" and i + 1 < len(line) and line[i + 1] == "|":
+            buf.append("|")
+            i += 2
+            continue
+        if ch == "|":
+            cells.append("".join(buf).strip())
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    cells.append("".join(buf).strip())
+    # A row written with the conventional leading and trailing pipes produces
+    # an empty cell at each end. Drop those, but ONLY when they came from a
+    # border pipe — a genuinely empty first column would otherwise vanish.
+    if cells and not cells[0] and line.lstrip().startswith("|"):
+        cells.pop(0)
+    if cells and not cells[-1] and line.rstrip().endswith("|"):
+        cells.pop()
+    return cells
+
+
+def _table_alignments(sep_line: str, ncols: int) -> List[str]:
+    out = []
+    for c in _split_table_row(sep_line):
+        c = c.strip()
+        left, right = c.startswith(":"), c.endswith(":")
+        out.append("center" if left and right else
+                   "right" if right else "left")
+    while len(out) < ncols:
+        out.append("left")
+    return out[:ncols]
+
+
+def _looks_like_table(lines: List[str], i: int) -> bool:
+    """A header line followed by a separator line is the only reliable tell.
+
+    Requiring the separator is what stops ordinary prose containing a pipe —
+    `cat a | grep b`, or a sentence with a vertical bar — from being eaten as
+    a one-column table."""
+    if i + 1 >= len(lines) or "|" not in lines[i]:
+        return False
+    sep = lines[i + 1] or ""
+    if not _TBL_SEP_RE.match(sep):
+        return False
+    # Relaxing the dash count above means a bare `-` would qualify, so the
+    # separator must still look deliberate: either it has a column pipe, or
+    # it is a run of dashes long enough to be a rule rather than a stray.
+    if "|" not in sep and sep.strip().count("-") < 3:
+        return False
+    return len(_split_table_row(lines[i])) >= 1
+
+
+def parse_rich_blocks(text: str) -> List[Dict[str, Any]]:
+    """Split prose into structured blocks: table / heading / rule / quote /
+    list / text. Code fences and images are handled by the caller."""
+    lines = (text or "").split("\n")
+    blocks: List[Dict[str, Any]] = []
+    buf: List[str] = []
+
+    def flush_text():
+        if buf:
+            body = "\n".join(buf).strip("\n")
+            if body.strip():
+                blocks.append({"kind": "text", "content": body})
+            buf.clear()
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        if _looks_like_table(lines, i):
+            flush_text()
+            header = _split_table_row(line)
+            aligns = _table_alignments(lines[i + 1], len(header))
+            rows = []
+            j = i + 2
+            while j < len(lines) and "|" in lines[j] and lines[j].strip():
+                rows.append(_split_table_row(lines[j]))
+                j += 1
+            blocks.append({"kind": "table", "header": header,
+                           "aligns": aligns, "rows": rows})
+            i = j
+            continue
+
+        m = _HEADING_RE.match(line)
+        if m:
+            flush_text()
+            blocks.append({"kind": "heading", "level": len(m.group(1)),
+                           "content": m.group(2)})
+            i += 1
+            continue
+
+        # Checked AFTER the heading and table cases: a `---` directly under a
+        # line of text is a setext heading underline in some dialects and a
+        # table separator in others, and both of those are already claimed
+        # above by the time we get here.
+        if _RULE_RE.match(line):
+            flush_text()
+            blocks.append({"kind": "rule"})
+            i += 1
+            continue
+
+        if _QUOTE_RE.match(line):
+            flush_text()
+            q = []
+            while i < len(lines) and _QUOTE_RE.match(lines[i]):
+                q.append(_QUOTE_RE.match(lines[i]).group(1))
+                i += 1
+            blocks.append({"kind": "quote", "content": "\n".join(q).strip()})
+            continue
+
+        if _ULI_RE.match(line) or _OLI_RE.match(line):
+            flush_text()
+            items = []
+            while i < len(lines):
+                um, om = _ULI_RE.match(lines[i]), _OLI_RE.match(lines[i])
+                if um:
+                    items.append({"indent": len(um.group(1)) // 2,
+                                  "marker": "•", "content": um.group(2)})
+                elif om:
+                    items.append({"indent": len(om.group(1)) // 2,
+                                  "marker": om.group(2) + ".",
+                                  "content": om.group(3)})
+                elif (lines[i].strip() and lines[i].startswith((" ", "\t"))
+                      and items):
+                    # A wrapped continuation line belongs to the item above it,
+                    # not to a new paragraph.
+                    items[-1]["content"] += " " + lines[i].strip()
+                else:
+                    break
+                i += 1
+            blocks.append({"kind": "list", "items": items})
+            continue
+
+        buf.append(line)
+        i += 1
+
+    flush_text()
+    return blocks
+
+
+def split_message_into_blocks(text: str) -> List[Dict[str, Any]]:
+    blocks: List[Dict[str, str]] = []
+    last = 0
+    for m in CODE_FENCE_RE.finditer(text):
+        if m.start() > last:
+            pre = text[last:m.start()].strip("\n")
+            if pre:
+                blocks.extend(_split_rich(pre))
+        lang = m.group(1) or "text"
+        code = m.group(2).rstrip("\n")
+        blocks.append({"kind": "code", "lang": lang, "content": code})
+        last = m.end()
+    tail = text[last:].strip("\n")
+    if tail:
+        blocks.extend(_split_rich(tail))
+    if not blocks:
+        blocks.append({"kind": "text", "content": text})
+    return blocks
+
+
+# Markdown image syntax: ![alt](url) — optionally with a "title" after the URL.
+# This is how the model asks Basilisk to SHOW a picture inline (a web image-search
+# result, an OSINT profile photo, a screenshot it just took, …): it simply
+# writes the image in markdown and the renderer turns it into a real picture.
+IMAGE_MD_RE = re.compile(
+    r'!\[([^\]]*)\]\(\s*(<?)(https?://[^)\s]+?|file://[^)\s]+?|/[^)\s]+?)\2'
+    r'(?:\s+"[^"]*")?\s*\)')
+
+
+def _split_rich(text: str) -> List[Dict[str, Any]]:
+    """Structure first, then images inside whatever prose is left.
+
+    Order matters and is not arbitrary: an image sitting inside a table cell or
+    a list item must stay part of that structure, so the structural pass runs
+    first and the image pass only ever sees a plain-text run."""
+    out: List[Dict[str, Any]] = []
+    for blk in parse_rich_blocks(text):
+        if blk.get("kind") == "text":
+            out.extend(_split_text_and_images(blk["content"]))
+        else:
+            out.append(blk)
+    return out
+
+
+def _split_text_and_images(text: str) -> List[Dict[str, str]]:
+    """Split a plain-text segment into alternating text and image blocks, so an
+    inline ![alt](url) becomes its own rendered picture while the prose around
+    it stays prose."""
+    out: List[Dict[str, str]] = []
+    last = 0
+    for m in IMAGE_MD_RE.finditer(text):
+        if m.start() > last:
+            pre = text[last:m.start()].strip("\n")
+            if pre:
+                out.append({"kind": "text", "content": pre})
+        out.append({"kind": "image",
+                    "url": m.group(3).strip(),
+                    "alt": (m.group(1) or "").strip()})
+        last = m.end()
+    tail = text[last:].strip("\n") if last else text
+    if tail.strip():
+        out.append({"kind": "text", "content": tail})
+    elif not out:
+        out.append({"kind": "text", "content": text})
+    return out
+
+
+# ═════════════════════════════════════════════════════════════════════
+# WIDGETS
+# ═════════════════════════════════════════════════════════════════════
+
+class CodeBlockWidget(Gtk.Box):
+    def __init__(self, code: str, lang: str = ""):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.add_css_class("code-block")
+        self.code = code
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        header.add_css_class("code-block-header")
+        lbl = Gtk.Label(label=lang or "code", xalign=0.0, hexpand=True)
+        header.append(lbl)
+        copy_btn = Gtk.Button.new_from_icon_name("edit-copy-symbolic")
+        copy_btn.add_css_class("icon-button")
+        copy_btn.set_tooltip_text("Copy")
+        _track_connect(self, copy_btn, "clicked", self._on_copy)
+        header.append(copy_btn)
+        self.append(header)
+
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        sw.set_hexpand(True)
+        # Don't let a long code line force the whole window wider than the
+        # screen — the scroller absorbs the overflow instead.
+        sw.set_propagate_natural_width(False)
+        sw.set_min_content_width(0)
+        tv = Gtk.TextView()
+        tv.set_editable(False)
+        tv.set_cursor_visible(False)
+        tv.set_monospace(True)
+        tv.set_wrap_mode(Gtk.WrapMode.NONE)
+        tv.get_buffer().set_text(code)
+        sw.set_child(tv)
+        self.append(sw)
+
+    def _on_copy(self, _btn):
+        text = self.code
+        try:
+            value = GObject.Value()
+            value.init(GObject.TYPE_STRING)
+            value.set_string(text)
+            provider = Gdk.ContentProvider.new_for_value(value)
+            display = self.get_display() or Gdk.Display.get_default()
+            display.get_clipboard().set_content(provider)
+            # Also set primary clipboard for middle-click paste
+            try:
+                display.get_primary_clipboard().set_content(provider)
+            except Exception:
+                pass
+            # Visual feedback
+            self._show_copied()
+        except Exception as e:
+            log(f"clipboard copy failed: {e}")
+
+    def _show_copied(self):
+        """Brief 'Copied!' flash on the button."""
+        try:
+            header = self.get_first_child()
+            if header is None:
+                return
+            btn = header.get_last_child()
+            if btn is None:
+                return
+            btn.set_icon_name("emblem-ok-symbolic")
+            GLib.timeout_add(900,
+                lambda: (btn.set_icon_name("edit-copy-symbolic") or False))
+        except Exception:
+            pass
+
+
+# Whether to fetch & render remote images inline.  Default on; the app sets it
+# from settings at startup.  Off → image markdown is shown as a tappable link
+# instead, for operators who don't want the chat reaching out to image hosts.
+_RENDER_IMAGES = True
+
+# The live "what Basilisk is doing right now" phrase (e.g. "forging a JWT").
+# Empty when idle. Set by _set_working; read by the permanent status pill in
+# the button row and by the in-chat in-progress placeholder so both show the
+# action title instead of a generic "working".
+_CURRENT_ACTION = ""
+
+
+# ── TOOL ARGUMENT NORMALISATION ──────────────────────────────────────
+# The accepted argument names are parsed from the PERSONA SPECS — the very
+# text the model is shown — so the validator and the contract cannot drift
+# apart. A hand-maintained second list would be one more pair of tables to
+# keep in step, which is the failure mode half this file's comments are about.
+_SPEC_TOOL_RE = re.compile(r'<tool name="([a-z_0-9]+)">\s*(\{.*?\})\s*</tool>',
+                           re.S)
+_SPEC_KEY_RE = re.compile(r'"([a-z_0-9]+)"\s*:')
+
+# Synonyms a model reaches for. Mapped onto the real key ONLY when the real
+# key is absent, so a correct call is never rewritten.
+_ARG_ALIASES: Dict[str, Dict[str, str]] = {
+    "copy_path":   {"path": "src", "source": "src", "from": "src",
+                    "file": "src", "to": "dst", "dest": "dst",
+                    "destination": "dst", "target": "dst"},
+    "move_path":   {"path": "src", "source": "src", "from": "src",
+                    "file": "src", "to": "dst", "dest": "dst",
+                    "destination": "dst", "target": "dst"},
+    "scan_net":    {"target": "cidr", "network": "cidr", "subnet": "cidr",
+                    "range": "cidr", "host": "cidr", "ip": "cidr"},
+    "read_file":   {"file": "path", "filename": "path", "target": "path"},
+    "delete_path": {"file": "path", "filename": "path", "target": "path"},
+    "make_dir":    {"dir": "path", "directory": "path", "folder": "path"},
+    "web_read":    {"link": "url", "address": "url", "target": "url",
+                    "site": "url"},
+    "find_file":   {"query": "pattern", "name": "pattern", "term": "pattern"},
+    "run":         {"cmd": "command", "shell": "command"},
+    # cve_lookup searches NVD by KEYWORD, so its argument is a PRODUCT name.
+    # The operator's audit caught the model calling it with a CVE id, which
+    # arrived under no accepted key and produced "no product" — a message that
+    # reads like NVD had no data rather than like the argument never landed.
+    # A CVE id is a perfectly good NVD keyword, so route it to `product`
+    # rather than refusing the call.
+    "cve_lookup":  {"cve": "product", "id": "product", "cve_id": "product",
+                    "identifier": "product", "name": "product",
+                    "software": "product", "package": "product"},
+}
+
+# Arguments without which the tool cannot do anything but damage or nonsense.
+# Kept SHORT and obvious: only the ones where an empty value reaches a real
+# side-effecting call (a filesystem path, a URL, a command line). A tool that
+# has a sensible default for a missing argument does not belong here.
+_REQUIRED_ARGS: Dict[str, Tuple[str, ...]] = {
+    "copy_path":    ("src", "dst"),
+    "move_path":    ("src", "dst"),
+    "read_file":    ("path",),
+    "write_file":   ("path",),
+    "delete_path":  ("path",),
+    "make_dir":     ("path",),
+    "propose_edit": ("path",),
+    "web_read":     ("url",),
+    "run":          ("command",),
+    "cve_lookup":   ("product",),
+    "find_file":    ("pattern",),
+}
+
+_SPEC_ARGS_CACHE: Optional[Dict[str, set]] = None
+
+
+def _table_to_text(b: Dict[str, Any]) -> str:
+    """Last-resort plain rendering of a parsed table, used only if the widget
+    itself fails to build. Shows the content rather than an empty gap."""
+    try:
+        rows = [list(b.get("header") or [])] + [list(r) for r in
+                                                (b.get("rows") or [])]
+        return "\n".join("  ".join(str(c) for c in r) for r in rows if r)
+    except Exception:
+        return ""
+
+
+class TableWidget(Gtk.Box):
+    """A markdown table drawn as a real grid.
+
+    The old renderer put the raw pipes in a Gtk.Label, which is unreadable for
+    a reason that is not about taste: the body font is proportional, so the
+    columns do not line up, and a comparison table — the single most common
+    shape of a structured answer — became the least readable thing on screen.
+
+    Wide tables scroll INSIDE their own container. A table with eight columns
+    must never be able to push the chat bubble wider than the window; that is
+    the same rule the code blocks and the action chips already follow.
+    """
+
+    MAX_ROWS = 200        # display cap; the full text is still in the store
+    MAX_COLS = 24
+
+    def __init__(self, header: List[str], rows: List[List[str]],
+                 aligns: Optional[List[str]] = None):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.add_css_class("md-table")
+        ncols = min(max(len(header), 1), self.MAX_COLS)
+        aligns = (aligns or [])[:ncols]
+        while len(aligns) < ncols:
+            aligns.append("left")
+
+        grid = Gtk.Grid()
+        grid.add_css_class("md-table-grid")
+        grid.set_column_homogeneous(False)
+
+        for c in range(ncols):
+            grid.attach(self._cell(header[c] if c < len(header) else "",
+                                   aligns[c], header=True, col=c,
+                                   last=(c == ncols - 1)), c, 0, 1, 1)
+
+        shown = rows[:self.MAX_ROWS]
+        for r, row in enumerate(shown, start=1):
+            for c in range(ncols):
+                txt = row[c] if c < len(row) else ""
+                grid.attach(self._cell(txt, aligns[c], header=False, col=c,
+                                       odd=(r % 2 == 1),
+                                       last=(c == ncols - 1)), c, r, 1, 1)
+
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        sw.set_propagate_natural_width(True)
+        sw.set_propagate_natural_height(True)
+        sw.set_kinetic_scrolling(True)
+        # A ScrolledWindow EXPANDS TO FILL by default, and inside a vertical
+        # chat bubble that means the table claims every remaining pixel of
+        # height: the grid drew correctly and then several hundred pixels of
+        # empty bubble sat under it, pushing the rest of the reply off the
+        # screen. propagate_natural_height only sets the NATURAL size; it does
+        # not stop the widget accepting more. Both of these have to be off.
+        sw.set_vexpand(False)
+        sw.set_valign(Gtk.Align.START)
+        grid.set_vexpand(False)
+        grid.set_valign(Gtk.Align.START)
+        sw.set_child(grid)
+        self.set_vexpand(False)
+        self.set_valign(Gtk.Align.START)
+        self.append(sw)
+
+        if len(rows) > self.MAX_ROWS:
+            more = Gtk.Label(
+                label="+%d more rows" % (len(rows) - self.MAX_ROWS),
+                xalign=0.0)
+            more.add_css_class("md-table-more")
+            self.append(more)
+
+    @staticmethod
+    def _cell(text: str, align: str, header: bool, col: int,
+              odd: bool = False, last: bool = False) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        box.add_css_class("md-th" if header else "md-td")
+        if not header and odd:
+            box.add_css_class("odd")
+        if last:
+            box.add_css_class("lastcol")
+        lbl = Gtk.Label(
+            xalign=(1.0 if align == "right"
+                    else 0.5 if align == "center" else 0.0))
+        lbl.set_hexpand(True)
+        # Cells carry inline markdown of their own — a bold winner, a `code`
+        # flag, a link to the source. Rendered through the same one transform
+        # the prose uses, so a table cell cannot format differently from the
+        # sentence above it.
+        try:
+            lbl.set_markup(text_to_pango(text))
+        except Exception:
+            lbl.set_text(text)
+        # ── CELLS DO NOT WRAP, THE TABLE SCROLLS ──
+        # Wrapping cells inside a horizontally-scrolling container is a
+        # contradiction, and GTK resolves it badly: a ScrolledWindow asks its
+        # child for a minimum size at unbounded width, a wrapping Gtk.Label
+        # answers "two characters wide", and the height-for-width that follows
+        # is astronomical. Measured on a three-row table it asked for 2104px of
+        # height and printed
+        #   "reports a minimum width of 20, but minimum width for height of
+        #    1048576 is 33. Expect overlapping widgets."
+        # Single-line cells plus horizontal scroll is also simply what a web
+        # table does, so the fix and the intended look are the same thing.
+        lbl.set_wrap(False)
+        lbl.set_single_line_mode(False)   # keep full glyph height (descenders)
+        lbl.set_max_width_chars(64)
+        lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        if len(text) > 64:
+            # Ellipsis loses information, so the whole cell stays reachable.
+            try:
+                lbl.set_tooltip_text(re.sub(r"[*`_]", "", text))
+            except Exception:
+                pass
+        box.append(lbl)
+        return box
+
+
+class QuoteWidget(Gtk.Box):
+    """A blockquote: an accent rail and an inset panel, so an aside reads as
+    an aside instead of as another paragraph."""
+
+    def __init__(self, text: str):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self.add_css_class("md-quote")
+        rail = Gtk.Box()
+        rail.add_css_class("md-quote-rail")
+        self.append(rail)
+        body = _make_wrap_label()
+        body.add_css_class("md-quote-body")
+        try:
+            body.set_markup(text_to_pango(text))
+        except Exception:
+            body.set_text(text)
+        self.append(body)
+
+
+class HeadingWidget(Gtk.Box):
+    """A markdown heading. Levels 1-2 get a hairline under them, which is what
+    turns a long answer into sections you can scan rather than one wall."""
+
+    def __init__(self, text: str, level: int = 2):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.add_css_class("md-heading")
+        self.add_css_class("h%d" % max(1, min(level, 6)))
+        lbl = _make_wrap_label()
+        lbl.add_css_class("md-heading-text")
+        try:
+            lbl.set_markup(text_to_pango(text))
+        except Exception:
+            lbl.set_text(text)
+        self.append(lbl)
+        if level <= 2:
+            rule = Gtk.Box()
+            rule.add_css_class("md-heading-rule")
+            self.append(rule)
+
+
+class RuleWidget(Gtk.Box):
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self.add_css_class("md-rule")
+
+
+class ListWidget(Gtk.Box):
+    """A bullet/number list with a real hanging indent.
+
+    WHY A BOX OF ROWS, NOT A GRID.  This was a Gtk.Grid, and a Grid reports a
+    cramped natural WIDTH for a wrapping cell — it asks the body label its
+    minimum ("one word") and offers little more.  A bulleted reply therefore
+    made the whole chat bubble hug to ~419px even on a wide window, and GTK
+    then computed the list's HEIGHT at that narrow width, so every bullet
+    wrapped to two lines and the bubble drew hundreds of px of empty
+    background past its text — the "five screens tall" bubble.
+
+    A vertical box of horizontal rows settles each row's WIDTH first (that is
+    what a horizontal box does) and only then asks the label for its height,
+    so the height is measured at the width the bullet is actually shown at.
+    Same visual result — a marker column, text hanging under itself — with an
+    honest height.  Measured: the identical three-bullet reply went from a
+    419x102 bubble to 654x55.
+    """
+
+    MAX_ITEMS = 300
+
+    def __init__(self, items: List[Dict[str, Any]]):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.add_css_class("md-list")
+        for it in items[:self.MAX_ITEMS]:
+            indent = max(0, min(int(it.get("indent", 0)), 6))
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            mk = Gtk.Label(label=str(it.get("marker", "•")), xalign=1.0)
+            mk.add_css_class("md-list-marker")
+            mk.set_valign(Gtk.Align.START)
+            mk.set_margin_start(indent * 18)
+            row.append(mk)
+            body = _make_wrap_label()
+            body.add_css_class("md-list-text")
+            # Fill the rest of the row and wrap within it — the wrap label's
+            # own max-width-chars cap (from _make_wrap_label) still bounds how
+            # wide it will grow, so the bubble shrink-wraps its text.
+            body.set_hexpand(True)
+            body.set_valign(Gtk.Align.START)
+            txt = str(it.get("content", ""))
+            try:
+                body.set_markup(text_to_pango(txt))
+            except Exception:
+                body.set_text(txt)
+            row.append(body)
+            self.append(row)
+
+
+def _spec_arg_names() -> Dict[str, set]:
+    """{tool: {accepted argument names}} lifted from the persona contract."""
+    global _SPEC_ARGS_CACHE
+    if _SPEC_ARGS_CACHE is not None:
+        return _SPEC_ARGS_CACHE
+    out: Dict[str, set] = {}
+    try:
+        import basilisk_persona as _bp
+        src = io.open(_bp.__file__, encoding="utf-8").read()
+        for name, body in _SPEC_TOOL_RE.findall(src):
+            try:
+                keys = set(json.loads(body).keys())
+            except Exception:
+                keys = set(_SPEC_KEY_RE.findall(body))
+            if keys:
+                out.setdefault(name, set()).update(keys)
+    except Exception as e:
+        log(f"tool-arg spec parse failed (validation disabled): {e}")
+        out = {}
+    _SPEC_ARGS_CACHE = out
+    return out
+
+
+def _normalise_tool_args(name: str, args: Any) -> Tuple[Dict[str, Any], str]:
+    """(normalised args, error).  A non-empty error means DO NOT RUN.
+
+    Fails only on the unambiguous case — the model supplied arguments and NOT
+    ONE of them is a name this tool accepts. A call that got at least one key
+    right still runs exactly as before, so this cannot break a working tool.
+    """
+    if not isinstance(args, dict):
+        return ({}, "")
+    # ── THE {"_raw": …} CALL — the reply was cut off or the body was junk ──
+    # parse_tool_calls falls back to {"_raw": <body>} when it cannot decode a
+    # call's arguments AT ALL. The single biggest cause in practice: the model
+    # tried to write a whole file inside a `run` heredoc (`cat > f << EOF …`),
+    # the reply hit the response-token cap mid-file, and the JSON string was
+    # left unterminated. The old message ("missing required argument
+    # ['command'] — you supplied ['_raw']") sent the model to re-issue the
+    # SAME giant heredoc, which truncated again. Say what actually happened and
+    # point at the tool that cannot truncate: write_file, in append chunks.
+    if list(args.keys()) == ["_raw"]:
+        _hint = ("that tool call could not be decoded — most often the reply "
+                 "was CUT OFF at the token cap partway through a long "
+                 "argument. ")
+        if name == "run":
+            _hint += (
+                "You were almost certainly writing a file with a `cat > … << "
+                "EOF` heredoc; DON'T. To create or write a file at any path, "
+                "use write_file — and for anything longer than a screen, write "
+                "it in SECTIONS: first section with mode default, then "
+                "write_file {\"path\": \"…\", \"content\": \"…next part…\", "
+                "\"mode\": \"append\"} for each following section. That path "
+                "cannot truncate the way a single giant call does.")
+        else:
+            _hint += ("Re-issue it with a shorter argument, or — if it is a "
+                      "file — use write_file in append-mode sections.")
+        return ({}, _hint)
+    # ── A JSON `null` IS NOT A VALUE, IT IS AN OMISSION ──────────────
+    # Every dispatch entry reads its arguments as `a.get("key", default)`, and
+    # that default fires only when the key is ABSENT. A model that supplies the
+    # key with a null — ordinary, near-universal behaviour for an optional
+    # argument — hands None straight past the default and into the tool.
+    #
+    # Not theoretical. A blind fuzz of the 88 side-effect-free tool entry
+    # points found three that TypeError on exactly that:
+    #   find_file(search_path=None)  -> expected str, bytes or os.PathLike
+    #   processes(top_n=None)        -> unsupported operand type(s) for +
+    #   sqlmap_plan(target=None)     -> 'NoneType' has no attribute 'strip'
+    # On the single-call path a raise ends the whole turn: the model is never
+    # told the tool failed, and an autonomous run just stops.
+    #
+    # Fixed HERE rather than at the ~200 call sites, because 200 hand-written
+    # guards is how two dispatch paths drift apart in the first place. Dropping
+    # the key restores the exact case every `.get(key, default)` already
+    # handles correctly, and a `.get(key)` with NO default still yields None —
+    # so a tool that reads None as "unset" (service_status, journal_tail) is
+    # unaffected either way.
+    args = {k: v for k, v in args.items() if v is not None}
+    # ── A BARE NUMBER WHERE A STRING WAS MEANT ──────────────────────
+    # A smoke-sweep of all 157 tools found 17 that do `(x or "").strip()` on a
+    # field the model is supposed to send as a string — and a model that sends
+    # `{"url": 123}` or `{"timeout": 30}` as a JSON NUMBER instead of a string
+    # made `.strip()` raise AttributeError, which on the single-call path ends
+    # the whole turn with nothing said. A new architecture (V4.1-Flash's
+    # encoder-decoder) is exactly the kind of thing that emits an unquoted
+    # number, so this is hardened HERE, at the one dispatch choke point, rather
+    # than at 17 call sites that would drift.
+    #
+    # int/float ONLY. A stringified number re-parses cleanly through the
+    # `_safe_int`/`_as_int` readers every numeric tool already uses. bool is
+    # EXCLUDED on purpose — `str(False)` is "False", which is truthy, so
+    # coercing it would flip a flag; and bool IS an int subclass, hence the
+    # explicit guard. list/dict are left alone: they are the real typed args
+    # (edits, paths, findings).
+    args = {k: (str(v) if isinstance(v, (int, float))
+                and not isinstance(v, bool) else v)
+            for k, v in args.items()}
+    out = dict(args)
+    for alias, real in (_ARG_ALIASES.get(name) or {}).items():
+        if alias in out and not str(out.get(real) or "").strip():
+            out[real] = out.pop(alias)
+    # ── REQUIRED ARGUMENTS MUST ACTUALLY BE PRESENT ──
+    # Checking "did ANY key land" is not enough, and the operator's round-2
+    # audit proved it: `copy_path{path=/etc/hostname}` aliased cleanly to
+    # src=/etc/hostname, passed the any-key check, and then ran with dst=""
+    # — so the tool called shutil.copy2(src, "") and reported
+    #     FileNotFoundError: [Errno 2] No such file or directory: ''
+    # The first fix turned "argument missing" into a DIFFERENT confusing
+    # filesystem error instead of removing it. A tool that needs two paths and
+    # is given one must say THAT.
+    missing = [k for k in (_REQUIRED_ARGS.get(name) or ())
+               if not str(out.get(k) or "").strip()]
+    if missing:
+        return (out, (
+            f"{name} is missing required argument(s) {missing}. It takes "
+            f"{sorted(_REQUIRED_ARGS.get(name) or ())} — you supplied "
+            f"{sorted(out) or 'nothing'}. Re-issue the call with all of them; "
+            f"running it as-is would act on an empty path."))
+    if not out:
+        return (out, "")
+    accepted = _spec_arg_names().get(name)
+    if not accepted:
+        return (out, "")            # no declared contract — nothing to check
+    if set(out) & accepted:
+        return (out, "")            # at least one key landed; run it
+    return (out, (
+        f"{name} received only unknown argument(s) "
+        f"{sorted(out)} and would have run with none of them — which silently "
+        f"does the wrong thing rather than nothing. This tool takes "
+        f"{sorted(accepted)}. Re-issue the call using those names."))
+
+
+def _action_summary(calls) -> str:
+    """A one-line, human 'what it just did' for an assistant turn that carried
+    ONLY tool calls — the actual command for `run`, the file path for a write,
+    or the tool name(s). This is what shows in the chat bubble so the turn reads
+    'ran nmap -sV …' instead of a generic 'thinking'. Returns '' if there's
+    nothing tool-like (caller then shows 'thinking…')."""
+    def _phrase(c):
+        n = (getattr(c, "name", "") or "").strip()
+        a = getattr(c, "args", None) or {}
+        if n == "run":
+            cmd = str(a.get("command", a.get("cmd", ""))).strip()
+            if not cmd:
+                return "ran a command"
+            if len(cmd) > 200:
+                cmd = cmd[:200] + " …"
+            return "CMD:" + cmd
+        if n in ("propose_edit", "write_file"):
+            p = str(a.get("path", a.get("file", ""))).strip()
+            return ("wrote " + p) if p else "wrote a file"
+        if n == "propose":
+            cmd = str(a.get("command", a.get("cmd", ""))).strip()
+            return ("proposed: " + cmd) if cmd else "proposed a command"
+        if n.startswith("memory_"):
+            return "updated memory"
+        return ("used " + n) if n else ""
+    phrases = []
+    for c in calls:
+        if (getattr(c, "name", "") or "") == "think":
+            continue
+        p = _phrase(c)
+        if p:
+            phrases.append(p)
+    if not phrases:
+        return ""
+    parts = []
+    for p in phrases[:3]:
+        if p.startswith("CMD:"):
+            parts.append("`$ " + p[4:] + "`")   # render commands as inline code
+        else:
+            parts.append("*" + p + "*")
+    more = len(phrases) - 3
+    text = "  ".join(parts)
+    if more > 0:
+        text += "  *(+%d more)*" % more
+    return text
+
+# Mirror of the approval_mode setting so the message renderer (no settings
+# handle) can tell whether to draw interactive proposal cards. In autonomous
+# mode ("none") proposals auto-execute, so their cards are suppressed.
+_APPROVAL_MODE = "none"
+
+
+def _img_url_is_fetchable(url: str) -> bool:
+    """SSRF guard for the inline image fetcher.  Resolve the URL's host and
+    refuse link-local / multicast / reserved / unspecified addresses — the
+    cloud-metadata endpoint (169.254.169.254) and other targets only an
+    attacker would point an <img> at (e.g. an image URL injected through a
+    compromised page or target response).  Loopback and private LAN ranges are
+    deliberately ALLOWED: Basilisk legitimately renders images from local
+    pentest targets (Juice Shop on localhost / the LAN).  This is a
+    resolve-then-check, so an active DNS-rebinding adversary could still slip an
+    internal address past it; it stops the common metadata/SSRF cases, which is
+    the point — cheap, and no cost to any legitimate fetch."""
+    import ipaddress
+    import socket as _sock
+    try:
+        from urllib.parse import urlsplit
+        host = urlsplit(url).hostname
+    except Exception:
+        host = None
+    if not host:
+        return True   # can't parse — let urlopen surface the real error
+    try:
+        infos = _sock.getaddrinfo(host, None)
+    except Exception:
+        return True   # can't resolve — not this guard's job to fail it
+    for info in infos:
+        ip = info[4][0]
+        try:
+            addr = ipaddress.ip_address(ip.split("%")[0])
+        except ValueError:
+            continue
+        if (addr.is_link_local or addr.is_multicast
+                or addr.is_reserved or addr.is_unspecified):
+            return False
+    return True
+
+
+class _ImgSafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Follows an image redirect only if the new host also clears the SSRF
+    guard — stops a public image host from bouncing the fetch to an internal /
+    cloud-metadata address."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _img_url_is_fetchable(newurl):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class ImageWidget(Gtk.Box):
+    """An image rendered inline in chat from a URL (http/https/file/local path).
+
+    The model shows a picture by emitting markdown — ![alt](url) — and this
+    widget turns it into a real image: a web image-search result, an OSINT
+    profile photo, a screenshot Basilisk just took.  The download and decode happen
+    OFF the UI thread (chat never blocks), the bytes are size-capped, and the
+    picture is scaled down to fit the bubble.  Any failure degrades to a small
+    caption with the link, so a dead URL can never break the conversation."""
+
+    _MAX_BYTES = 12_000_000          # don't pull more than ~12 MB for one image
+    _MAX_W = 480                     # display cap (px) — scaled down, never up
+    _MAX_H = 480
+    _UA = "Mozilla/5.0 (X11; Linux x86_64) Basilisk/3.2 image-fetch"
+
+    def __init__(self, url: str, alt: str = ""):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        self.add_css_class("image-block")
+        self.url = (url or "").strip()
+        self.alt = (alt or "").strip()
+        self._caption = Gtk.Label(label=(self.alt or "loading image…"),
+                                  xalign=0.0)
+        self._caption.add_css_class("image-caption")
+        self._caption.set_wrap(True)
+        self._caption.set_max_width_chars(48)
+        self.append(self._caption)
+        try:
+            threading.Thread(target=self._load, daemon=True).start()
+        except Exception as e:
+            self._fail(str(e))
+
+    # — worker thread —
+    def _load(self):
+        try:
+            data = self._fetch_bytes()
+            tex = self._decode(data)
+        except Exception as e:
+            GLib.idle_add(lambda m=str(e): self._fail(m) or False)
+            return
+        GLib.idle_add(lambda: self._show(tex) or False)
+
+    def _fetch_bytes(self) -> bytes:
+        u = self.url
+        if u.startswith("file://"):
+            u = u[7:]
+        if u.startswith("/"):  # local file path
+            with open(u, "rb") as f:
+                return f.read(self._MAX_BYTES)
+        if not (u.startswith("http://") or u.startswith("https://")):
+            raise ValueError("unsupported image URL scheme")
+        if not _img_url_is_fetchable(u):
+            raise ValueError("refusing image fetch to a link-local/reserved "
+                             "address (SSRF guard)")
+        req = urllib.request.Request(u, headers={
+            "User-Agent": self._UA,
+            "Accept": "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
+        })
+        # Re-validate on EVERY redirect hop: a public image host must not be
+        # able to 302 the fetch to an internal / cloud-metadata address after
+        # the initial check passed.
+        opener = urllib.request.build_opener(_ImgSafeRedirect())
+        with opener.open(req, timeout=15) as r:
+            return r.read(self._MAX_BYTES)
+
+    def _decode(self, data: bytes):
+        if not data:
+            raise ValueError("empty image")
+        loader = GdkPixbuf.PixbufLoader()
+        try:
+            loader.write(data)
+        except TypeError:
+            loader.write_bytes(GLib.Bytes.new(data))
+        loader.close()
+        pb = loader.get_pixbuf()
+        if pb is None:
+            raise ValueError("could not decode image")
+        w, h = pb.get_width(), pb.get_height()
+        if w <= 0 or h <= 0:
+            raise ValueError("bad image dimensions")
+        scale = min(self._MAX_W / w, self._MAX_H / h, 1.0)
+        if scale < 1.0:
+            pb = pb.scale_simple(max(1, int(w * scale)), max(1, int(h * scale)),
+                                 GdkPixbuf.InterpType.BILINEAR)
+        return Gdk.Texture.new_for_pixbuf(pb)
+
+    # — UI thread —
+    def _show(self, tex):
+        try:
+            pic = Gtk.Picture.new_for_paintable(tex)
+            pic.set_can_shrink(True)
+            try:
+                pic.set_content_fit(Gtk.ContentFit.SCALE_DOWN)
+            except Exception:
+                pass
+            pic.add_css_class("chat-image")
+            pic.set_halign(Gtk.Align.START)
+            tw, th = tex.get_width(), tex.get_height()
+            # Never let an image be wider than the viewport minus the avatar
+            # column + margins — otherwise set_size_request makes that width a
+            # hard MINIMUM and forces the whole window past the phone screen.
+            cap_w = max(160, _VIEWPORT_WIDTH - 120)
+            if tw > cap_w and tw > 0:
+                th = max(1, int(th * cap_w / tw))
+                tw = cap_w
+            pic.set_size_request(tw, th)
+            if self.alt:
+                pic.set_tooltip_text(self.alt)
+            try:
+                self.remove(self._caption)
+            except Exception:
+                pass
+            self.prepend(pic)
+            if self.alt:
+                cap = Gtk.Label(label=self.alt, xalign=0.0)
+                cap.add_css_class("image-caption")
+                cap.set_wrap(True)
+                cap.set_max_width_chars(48)
+                self.append(cap)
+        except Exception as e:
+            self._fail(str(e))
+        return False
+
+    def _fail(self, msg: str):
+        try:
+            shown = self.alt or self.url
+            self._caption.set_markup(
+                f"🖼 <i>couldn't load image</i> — "
+                f"<a href=\"{GLib.markup_escape_text(self.url)}\">"
+                f"{GLib.markup_escape_text(shown[:80])}</a>")
+        except Exception:
+            try:
+                self._caption.set_text(f"🖼 couldn't load image: {self.url}")
+            except Exception:
+                pass
+        log(f"image load failed ({self.url}): {msg}")
+        return False
+
+
+class ProposedCommandWidget(Gtk.Box):
+    """A command Basilisk wants to run, shown as an advisory card.
+
+    Nothing executes until the operator clicks Run.  on_run is called
+    with (command, explanation) when they do.
+    """
+    def __init__(self, command: str, explanation: str = "",
+                 risk: str = "medium",
+                 on_run: Optional[Callable[[str, str, Any], None]] = None):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.add_css_class("cmd-card")
+        self.command = command
+        self.explanation = explanation
+        self._on_run = on_run
+
+        # Header: title + risk badge
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        header.add_css_class("cmd-card-header")
+        title = Gtk.Label(label="⌘  PROPOSED COMMAND", xalign=0.0)
+        title.add_css_class("cmd-card-title")
+        title.set_hexpand(True)
+        header.append(title)
+        risk = (risk or "medium").lower()
+        if risk not in ("low", "medium", "high"):
+            risk = "medium"
+        badge = Gtk.Label(label=f"{risk} risk")
+        badge.add_css_class("risk-badge")
+        badge.add_css_class(risk)
+        badge.set_valign(Gtk.Align.CENTER)
+        header.append(badge)
+        self.append(header)
+
+        # The command itself
+        cmd_lbl = Gtk.Label(label=command, xalign=0.0)
+        cmd_lbl.add_css_class("cmd-text")
+        cmd_lbl.set_wrap(True)
+        cmd_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        cmd_lbl.set_selectable(True)
+        self.append(cmd_lbl)
+
+        # Explanation
+        if explanation:
+            exp = _make_wrap_label()
+            exp.add_css_class("cmd-explain")
+            try:
+                exp.set_markup(text_to_pango(explanation))
+            except Exception:
+                exp.set_text(explanation)
+            self.append(exp)
+
+        # Buttons
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.run_btn = Gtk.Button(label="Run")
+        self.run_btn.add_css_class("cmd-run-btn")
+        _track_connect(self, self.run_btn, "clicked", self._on_run_clicked)
+        btn_row.append(self.run_btn)
+
+        copy_btn = Gtk.Button(label="Copy")
+        copy_btn.add_css_class("cmd-copy-btn")
+        _track_connect(self, copy_btn, "clicked", self._on_copy_clicked)
+        btn_row.append(copy_btn)
+
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        btn_row.append(spacer)
+        self.append(btn_row)
+
+    def _on_run_clicked(self, _btn):
+        if self._on_run is None:
+            return
+        # One-shot visual: prevent a double-fire while the turn is in
+        # flight.  Reset by the host if it couldn't start (busy).
+        self.run_btn.set_sensitive(False)
+        self.run_btn.set_label("Running…")
+        self._on_run(self.command, self.explanation, self)
+
+    def reset_run_button(self):
+        self.run_btn.set_sensitive(True)
+        self.run_btn.set_label("Run")
+
+    def _on_copy_clicked(self, _btn):
+        try:
+            value = GObject.Value()
+            value.init(GObject.TYPE_STRING)
+            value.set_string(self.command)
+            provider = Gdk.ContentProvider.new_for_value(value)
+            display = self.get_display() or Gdk.Display.get_default()
+            display.get_clipboard().set_content(provider)
+        except Exception as e:
+            log(f"cmd copy failed: {e}")
+
+
+class ProposedEditWidget(Gtk.Box):
+    """A file edit Basilisk wants to make, shown as an advisory card with a
+    compact diff.  Nothing is written until the operator clicks Apply.
+
+    Mirrors ProposedCommandWidget's flow exactly — same one-shot button
+    discipline, same host callback shape — so it rides the existing
+    confirm-then-execute gate rather than a new bypass.  on_apply is
+    called with (path, content, self) when the operator approves.
+    """
+    def __init__(self, path: str, content: str,
+                 diff_lines: Optional[List[str]] = None,
+                 added: int = 0, removed: int = 0,
+                 is_new: bool = False, truncated: bool = False,
+                 explanation: str = "",
+                 on_apply: Optional[Callable[[str, str, Any], None]] = None):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.add_css_class("cmd-card")
+        self.path = path
+        self.content = content
+        self._on_apply = on_apply
+
+        # Header: title + a +adds/-removes badge
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        header.add_css_class("cmd-card-header")
+        verb = "PROPOSED NEW FILE" if is_new else "PROPOSED EDIT"
+        title = Gtk.Label(label=f"✎  {verb}", xalign=0.0)
+        title.add_css_class("cmd-card-title")
+        title.set_hexpand(True)
+        header.append(title)
+        badge = Gtk.Label(label=f"+{added} −{removed}")
+        badge.add_css_class("risk-badge")
+        # Reuse the risk colour classes: a big change reads as higher risk.
+        badge.add_css_class("high" if (added + removed) > 60
+                            else "medium" if (added + removed) > 8
+                            else "low")
+        badge.set_valign(Gtk.Align.CENTER)
+        header.append(badge)
+        self.append(header)
+
+        # Target path
+        path_lbl = Gtk.Label(label=path, xalign=0.0)
+        path_lbl.add_css_class("cmd-text")
+        path_lbl.set_wrap(True)
+        path_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        path_lbl.set_selectable(True)
+        self.append(path_lbl)
+
+        # Compact diff body in a monospace, scrollable view
+        if diff_lines:
+            sw = Gtk.ScrolledWindow()
+            sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+            sw.set_hexpand(True)
+            tv = Gtk.TextView()
+            tv.set_editable(False)
+            tv.set_cursor_visible(False)
+            tv.set_monospace(True)
+            tv.set_wrap_mode(Gtk.WrapMode.NONE)
+            buf = tv.get_buffer()
+            # colour-tag added / removed lines so the diff reads at a glance
+            t_add = buf.create_tag("add", foreground="#2ecc71")
+            t_del = buf.create_tag("del", foreground="#e5484d")
+            t_hdr = buf.create_tag("hdr", foreground="#6fae84")
+            for i, line in enumerate(diff_lines):
+                start = buf.get_end_iter()
+                buf.insert(start, (line + "\n"))
+                # re-grab iters for the line we just inserted
+                end = buf.get_end_iter()
+                ls = buf.get_iter_at_line(i)
+                if isinstance(ls, tuple):           # GTK4 returns (ok, iter)
+                    ls = ls[1]
+                if line.startswith("+") and not line.startswith("+++"):
+                    buf.apply_tag(t_add, ls, end)
+                elif line.startswith("-") and not line.startswith("---"):
+                    buf.apply_tag(t_del, ls, end)
+                elif line.startswith("@@") or line.startswith(("+++", "---")):
+                    buf.apply_tag(t_hdr, ls, end)
+            sw.set_child(tv)
+            self.append(sw)
+        if truncated:
+            more = Gtk.Label(label="…diff truncated — full content applies on Apply",
+                             xalign=0.0)
+            more.add_css_class("cmd-explain")
+            self.append(more)
+
+        if explanation:
+            exp = _make_wrap_label()
+            exp.add_css_class("cmd-explain")
+            try:
+                exp.set_markup(text_to_pango(explanation))
+            except Exception:
+                exp.set_text(explanation)
+            self.append(exp)
+
+        # Buttons
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.apply_btn = Gtk.Button(label="Apply")
+        self.apply_btn.add_css_class("cmd-run-btn")
+        _track_connect(self, self.apply_btn, "clicked", self._on_apply_clicked)
+        btn_row.append(self.apply_btn)
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        btn_row.append(spacer)
+        self.append(btn_row)
+
+    def _on_apply_clicked(self, _btn):
+        if self._on_apply is None:
+            return
+        self.apply_btn.set_sensitive(False)
+        self.apply_btn.set_label("Applying…")
+        self._on_apply(self.path, self.content, self)
+
+    def reset_apply_button(self):
+        self.apply_btn.set_sensitive(True)
+        self.apply_btn.set_label("Apply")
+
+
+# ── asset resolution ──────────────────────────────────────────────────
+# Repo layout keeps runtime art in assets/app/; the INSTALLED layout stays flat
+# in ~/.local/share/basilisk (install.sh flattens on copy), so existing installs
+# are unaffected by the repo reorganisation. Both are searched, plus the legacy
+# alongside-this-file location for anyone running an old checkout in place.
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+# Installed as a wheel, the art ships inside the `basilisk_assets` package
+# (pyproject maps that name onto assets/app/, so the repo keeps exactly one
+# copy of a 7 MB tree).  Resolved once, at import, and never allowed to raise:
+# a missing or unimportable asset package must degrade to "no art", never to
+# "no app".
+def _packaged_asset_dir() -> Optional[str]:
+    try:
+        import basilisk_assets                                  # type: ignore
+        d = os.path.dirname(os.path.abspath(basilisk_assets.__file__))
+        return d if os.path.isdir(d) else None
+    except Exception:
+        return None
+
+
+_PKG_ASSET_DIR = _packaged_asset_dir()
+
+
+def _asset_paths(filename: str) -> List[str]:
+    """Every place a runtime asset may live, most-specific first."""
+    paths = [
+        os.path.expanduser("~/.local/share/basilisk/" + filename),  # installed
+        os.path.join(_APP_DIR, "assets", "app", filename),          # repo layout
+        os.path.join(_APP_DIR, filename),                           # legacy flat
+    ]
+    # Last, so a dev checkout and an install.sh install behave exactly as they
+    # did before packaging existed.
+    if _PKG_ASSET_DIR:
+        paths.append(os.path.join(_PKG_ASSET_DIR, filename))        # wheel
+    return paths
+
+
+def _find_asset(filename: str) -> Optional[str]:
+    for _p in _asset_paths(filename):
+        if os.path.isfile(_p):
+            return _p
+    return None
+
+
+def _find_dragon_svg() -> Optional[str]:
+    """Locate the dragon emblem SVG at runtime.  Checks the install dir,
+    the icon theme dir, and the directory this script lives in (dev/run
+    in place).  Returns None if not found so the avatar falls back to a
+    letter."""
+    candidates = _asset_paths("basilisk-dragon.svg") + [
+        os.path.expanduser(
+            "~/.local/share/icons/hicolor/scalable/apps/basilisk-dragon.svg"),
+        os.path.expanduser(
+            "~/.local/share/icons/hicolor/scalable/apps/"
+            "org.thepriest.basilisk.svg"),
+    ] + _asset_paths("org.thepriest.basilisk.svg")
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+# Resolved once at import; None if the emblem isn't on disk.
+_DRAGON_SVG_PATH = _find_dragon_svg()
+
+
+def _find_btn_png(name: str) -> Optional[str]:
+    """Locate a custom dragon-forged button icon (basilisk-btn-<name>.png), in the
+    install dir or next to this module. None if it isn't on disk."""
+    return _find_asset("basilisk-btn-%s.png" % name)
+
+
+_BTN_SETTINGS = _find_btn_png("settings") or "settings"
+_BTN_BELL     = _find_btn_png("bell")     or "bell"
+_BTN_TERMINAL = _find_btn_png("terminal") or "terminal"
+_BTN_MINIMISE = _find_btn_png("minimise") or "minimise"
+_BTN_CLOSE    = _find_btn_png("close")    or "close"
+_BTN_EXPAND   = _find_btn_png("expand")   or "expand"
+_BTN_ATTACH   = _find_btn_png("attach")   or "attach"
+_BTN_CAMERA   = _find_btn_png("camera")   or "camera"
+_BTN_SUGGEST  = _find_btn_png("suggest")  or "suggest"
+_BTN_SOUND    = _find_btn_png("sound")    or "sound"
+_BTN_UNLEASH  = _find_btn_png("unleash")  or "unleash"
+
+# Composer toolbar buttons are wide word-plaques ("Camera"/"Suggestions"/
+# "Voice"/"Terminal"/"Attach"), not the small round header icons.  They need a
+# taller render height than the 26px header default or the engraved word is an
+# illegible sliver.  Header/titlebar buttons keep the _btn_art default (26).
+_COMPOSER_BTN_PX = 36
+
+
+def _btn_art(name_or_path, px: int = 26):
+    """A Gtk.Picture of a button-art PNG scaled to `px` HEIGHT (aspect kept,
+    never upscaled, never expands -- so it can't blow up a header/toolbar).
+
+    Accepts EITHER a resolved on-disk path (from _find_btn_png -- lets you
+    later drop in a replacement file to re-theme a single button) OR a short
+    name ("settings"/"bell"/"terminal"/"minimise"/"close"), in which case it
+    decodes the byte-identical art embedded in basilisk_btn_art.py. That embedded
+    copy is the GUARANTEED fallback: it ships inside a required .py file, so
+    it can never go missing the way a separate optional PNG fetch can.
+    Returns None only if both the disk file and the embedded data are
+    unavailable, so callers can fall back to a symbolic icon.
+    """
+    pb = None
+    if name_or_path and os.path.isfile(name_or_path):
+        try:
+            pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                name_or_path, -1, px, True)
+        except Exception:
+            pb = None
+    if pb is None and name_or_path:
+        # name_or_path may be a resolved disk path (unlikely to also be a key)
+        # or a short key like "settings" -- try the embedded copy either way.
+        key = os.path.splitext(os.path.basename(str(name_or_path)))[0]
+        key = key.replace("basilisk-btn-", "")
+        b64 = BTN_ART_B64.get(key) or BTN_ART_B64.get(str(name_or_path))
+        if b64:
+            try:
+                raw = base64.b64decode(b64)
+                loader = GdkPixbuf.PixbufLoader()
+                loader.write(raw)
+                loader.close()
+                full = loader.get_pixbuf()
+                w = max(1, int(full.get_width() * px / full.get_height()))
+                pb = full.scale_simple(w, px, GdkPixbuf.InterpType.BILINEAR)
+            except Exception:
+                pb = None
+    if pb is None:
+        return None
+    pic = Gtk.Picture.new_for_paintable(Gdk.Texture.new_for_pixbuf(pb))
+    pic.set_content_fit(Gtk.ContentFit.SCALE_DOWN)
+    pic.set_can_shrink(True)
+    pic.set_hexpand(False)
+    pic.set_vexpand(False)
+    pic.set_halign(Gtk.Align.CENTER)
+    pic.set_valign(Gtk.Align.CENTER)
+    pic.set_size_request(pb.get_width(), px)
+    return pic
+
+
+def _glyph_button(glyph: str, tooltip: str, css_extra: str = "",
+                  toggle: bool = False):
+    """A clean, image-free toolbar/header button: a monospace 'hacker' glyph
+    on the Aero glass frame. Used instead of the PNG-art plaques. `glyph` is a
+    short unicode/ASCII mark (e.g. '>_' for the terminal, a bell, a gear). The
+    caller connects the signal and appends it. Returns the button."""
+    btn = Gtk.ToggleButton() if toggle else Gtk.Button()
+    lbl = Gtk.Label(label=glyph)
+    lbl.add_css_class("glyph-btn-label")
+    btn.set_child(lbl)
+    btn.add_css_class("glyph-btn")
+    if css_extra:
+        btn.add_css_class(css_extra)
+    btn.set_tooltip_text(tooltip)
+    btn.set_valign(Gtk.Align.CENTER)
+    return btn
+
+
+def _find_avatar_png() -> Optional[str]:
+    """Locate the dragon PNG used as Basilisk's chat avatar (clean, no ring)."""
+    candidates = _asset_paths("basilisk-avatar.png")
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+_AVATAR_PNG_PATH = _find_avatar_png()
+
+
+def _find_emblem_png() -> Optional[str]:
+    """The round sigil for the hero card.
+
+    Cut from the SAME artwork that hangs behind the window, so the nameplate
+    and the backdrop are visibly one design rather than two pieces of art that
+    happen to share a palette. Falls back to the framed avatar, which is what
+    the card used before and still reads correctly - just less like the room
+    it is standing in."""
+    for name in ("basilisk-emblem.png", "basilisk-avatar.png"):
+        for p in _asset_paths(name):
+            if os.path.isfile(p):
+                return p
+    return None
+
+
+_EMBLEM_PNG_PATH = _find_emblem_png()
+
+
+def _find_logo_png() -> Optional[str]:
+    """Locate the BASILISK wordmark logo (death-metal art) for the header."""
+    candidates = _asset_paths("basilisk-logo.png")
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+_LOGO_PNG_PATH = _find_logo_png()
+
+
+def _find_watermark_svg() -> Optional[str]:
+    """Locate the dragon watermark for the chat background (PNG preferred,
+    then SVG).  Falls back to the emblem SVG, then None (no watermark)."""
+    candidates = (_asset_paths("basilisk-watermark.png")
+                  + _asset_paths("basilisk-watermark.svg"))
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    return _DRAGON_SVG_PATH
+
+
+_WATERMARK_SVG_PATH = _find_watermark_svg()
+
+
+def _find_cross_svg() -> Optional[str]:
+    """Locate the operator's cross emblem (shown as the user avatar)."""
+    candidates = _asset_paths("basilisk-cross.svg")
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+_CROSS_SVG_PATH = _find_cross_svg()
+
+
+def _find_priest_png() -> Optional[str]:
+    """Locate the operator's portrait (shown as the user avatar)."""
+    candidates = _asset_paths("basilisk-priest.png")
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+_PRIEST_PNG_PATH = _find_priest_png()
+
+
+# ── Arcane seal drawn faintly on each Basilisk reply (SVG -> always renders,
+#    no font dependency, so the "ancient sign" actually shows up). ──
+def _find_sigil_svg() -> Optional[str]:
+    return _find_asset("basilisk-sigil.svg")
+
+
+_MSG_SIGIL_PATH = _find_sigil_svg()
+_MSG_SIGIL_TEX = None
+
+
+def _build_msg_sigil():
+    """A small, faint arcane sigil for the corner of a Basilisk reply. Cached
+    texture, non-interactive, never touches the streamed text. None if absent."""
+    global _MSG_SIGIL_TEX
+    if not _MSG_SIGIL_PATH:
+        return None
+    try:
+        if _MSG_SIGIL_TEX is None:
+            _MSG_SIGIL_TEX = _svg_texture(_MSG_SIGIL_PATH, 96)
+        if _MSG_SIGIL_TEX is None:
+            return None
+        pic = Gtk.Picture.new_for_paintable(_MSG_SIGIL_TEX)
+        pic.set_can_target(False)
+        pic.set_size_request(32, 32)
+        pic.set_halign(Gtk.Align.END)
+        pic.set_valign(Gtk.Align.END)
+        pic.set_margin_end(9)
+        pic.set_margin_bottom(7)
+        pic.set_opacity(0.5)
+        try:
+            pic.set_content_fit(Gtk.ContentFit.CONTAIN)
+        except Exception:
+            pass
+        pic.add_css_class("msg-sigil")
+        return pic
+    except Exception:
+        return None
+
+
+# ── HARD anti-hallucination gate (code-side): flag any question that turns on
+#    CURRENT / checkable facts, so the model is FORCED to verify online instead
+#    of answering from possibly-stale training. Deliberately eager: a needless
+#    search is cheap; a confident wrong memory answer is the failure we prevent.
+_VERIFY_MARKERS = (
+    "latest", "newest", "current", "currently", "today", "recent", "recently",
+    "as of", "up to date", "up-to-date", "nowadays", "these days", "this year",
+    "this month", "this week", "right now", "at the moment", "version",
+    "release", "released", "changelog", "release date", "price", "cost",
+    "how much is", "how much does", "worth", "market cap", "valuation",
+    "stock", "exchange rate", "who is the", "who's the", "ceo of",
+    "president of", "prime minister", "leader of", "score", "standings",
+    "weather", "forecast", "news", "when did", "when will", "when is the",
+    "still active", "still alive", "still around", "still maintained",
+    "deprecated", "end of life", "eol", "supported", "discontinued",
+    "new version", "update on", "status of", "did they release",
+    "latest version", "most recent", "as recent", "how old is",
+    "out yet", "released yet", "available yet", "is out", "came out",
+    "come out", "is there a new", "has there been", "any new",
+    # Sports results and other last-night/last-week events are current-state
+    # queries with no "latest/current" word in them. "who won" is the tell;
+    # "last night" / "yesterday" / "last week" anchor it to a real event the
+    # model cannot know from training.
+    "who won", "final score", "last night", "yesterday", "last week",
+    "last game", "last match", "this season", "who's winning", "whos winning",
+    # "what's new with X" / "any updates on X" is a current-state query even
+    # without a version or year word — the exact shape that answered from
+    # stale memory instead of fetching.
+    "what's new", "whats new", "what is new", "anything new", "updates on",
+    "any update", "latest on", "news on", "happening with", "going on with",
+    "in the news",
+    # Casual "give me the news" phrasings that carry no latest/current/news
+    # word but are unmistakably current-state requests. These answered from
+    # stale training memory instead of fetching — the "it can't even fetch
+    # news" complaint. Kept to phrasings that are news-shaped, not bare
+    # "happening" (which fires on code questions).
+    "in the world today", "in the world right now",
+    "going on in the world", "happening in the world", "world news",
+    "catch me up", "fill me in", "give me the rundown", "whats up today",
+    "what's up today", "whats going on today", "what's going on today",
+    "going on lately", "happening lately", "happening today",
+    "current events", "top stories", "breaking news",
+)
+
+# Split the markers by shape. A marker with a space is a phrase and is safe to
+# match as a raw substring (" who won ", " in the news "). A single-word marker
+# ("current", "cost", "news", "score") is NOT — as a raw substring it fires
+# inside longer words ("concurrent", "costume", "newsletter", "underscore"),
+# triggering a needless fetch on ordinary coding questions. Those match on word
+# boundaries instead.
+_VERIFY_PHRASE_MARKERS = tuple(m for m in _VERIFY_MARKERS if " " in m)
+_VERIFY_WORD_RE = re.compile(
+    r"\b(?:" + "|".join(
+        re.escape(m.strip()) for m in _VERIFY_MARKERS if " " not in m)
+    + r")\b")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ...AND WHEN NOT TO. THE SUPPRESSOR.
+# ══════════════════════════════════════════════════════════════════════
+# The marker list above only ever says YES. Every marker it gained to stop a
+# missed fetch also made it fire on ordinary work, and nothing ever said no —
+# so a question about the operator's own code went to DuckDuckGo. Measured on
+# a corpus of fourteen plain coding questions, THIRTEEN forced a web fetch:
+#
+#   "explain the cost of a hash table lookup"          -> cost
+#   "which python version does my pyproject require"   -> version
+#   "refactor the price calculation in cart.py"        -> price
+#   "why is worth() returning None in this file"       -> worth
+#   "the news feed component in my react app is broken"-> news
+#
+# That is both halves of the complaint at once. It searches when it obviously
+# should not, and because the promise gate then forces a fetch the turn cannot
+# end where it should have ended — it answers, fetches, and comes back.
+#
+# THE RULE. Suppression needs POSITIVE EVIDENCE and can only ever downgrade a
+# weak signal, never a strong one. It fires only when BOTH hold:
+#
+#   1. Nothing STRONG matched. "latest", "today", "who won", "weather",
+#      "ceo of", "out yet" name the live state of the world and are never
+#      suppressed, whatever else the sentence says.
+#   2. The question has a LOCAL or CONCEPTUAL referent — it is about the
+#      operator's own files, or it is a definition / how-to / build request.
+#
+# So the failure mode is asymmetric on purpose: a question with no local
+# referent and no conceptual framing still fetches on a weak marker alone
+# ("did they release nmap 8 yet"), because a needless fetch costs a round
+# trip and a missed one costs a wrong answer.
+
+# Unambiguously about the live world. Never suppressed.
+# NOTE bare "news" is NOT here: "the news feed component in my react app" is a
+# UI bug report. The news-shaped PHRASES are ("news today", "world news",
+# "breaking news", "in the news"), and they are.
+_STRONG_VERIFY_MARKERS = (
+    "latest", "newest", "most recent", "today", "yesterday", "right now",
+    "at the moment", "this week", "this month", "this year", "nowadays",
+    "these days", "currently", "as of",
+    "out yet", "released yet", "available yet", "is out", "came out",
+    "come out", "is there a new", "has there been", "any new",
+    "who won", "final score", "standings", "last night", "last game",
+    "last match", "this season", "who's winning", "whos winning",
+    "weather", "forecast", "stock", "exchange rate", "market cap",
+    "valuation", "ceo of", "president of", "prime minister", "leader of",
+    "who is the", "who's the",
+    # "how much is/does" is DELIBERATELY NOT STRONG. It is the market price of
+    # a thing in the world AND the memory cost of a function in their file,
+    # and only the rest of the sentence tells them apart - which is exactly
+    # what the suppressor is for. It stays in _VERIFY_MARKERS, so it still
+    # fires on its own; it is simply not immune.
+    "breaking news", "top stories", "current events", "world news",
+    "in the news", "news today", "headline",
+    "still alive", "still around",
+    "in the world today", "in the world right now", "going on in the world",
+    "happening in the world", "catch me up", "fill me in",
+    "give me the rundown", "happening today", "whats up today",
+    "what's up today", "whats going on today", "what's going on today",
+)
+_STRONG_VERIFY_PHRASES = tuple(m for m in _STRONG_VERIFY_MARKERS if " " in m)
+_STRONG_VERIFY_WORD_RE = re.compile(
+    r"\b(?:" + "|".join(
+        re.escape(m) for m in _STRONG_VERIFY_MARKERS if " " not in m)
+    + r")\b")
+
+# "This is about something on MY machine." A concrete referent is required —
+# a bare "my project" is not enough, because "the latest version of requests
+# for my project" is still a web question.
+_LOCAL_SCOPE_RE = re.compile(
+    r"(?:"
+    # `(?:\w+\s+)?` so "my SCORE function" and "the PRICE calculation" read as
+    # local. Without it the determiner had to sit directly against the noun,
+    # which is not how anyone writes about their own code.
+    r"\b(?:my|this|the)\s+(?:\w+\s+)?(?:code|repo|repository|project|file|"
+    r"files|script|scripts|app|branch|fork|function|class|method|module|"
+    r"package|test|tests|suite|build|config|folder|directory|dir|workspace|"
+    r"program|codebase|calculation|logic|handler|parser|component)\b"
+    # ("in my|this|the <any word>" used to be here. It matched "in the news",
+    #  "in the world" and "in the ireland match", which are the exact
+    #  questions this must never suppress. The noun list above already covers
+    #  "in my repo" / "in this file" without guessing.)
+    # Project files named without an extension.
+    r"|\b(?:pyproject|makefile|dockerfile|requirements|package\.json|"
+    r"cargo\.toml|go\.mod|gemfile|justfile|pipfile)\b"
+    r"|\blocalhost\b|\b127\.0\.0\.1\b"
+    r"|\b[\w./-]+\.(?:py|js|jsx|ts|tsx|go|rs|c|h|cpp|java|rb|php|sh|bash|"
+    r"zsh|json|ya?ml|toml|ini|cfg|md|txt|html|css|sql|lock)\b"
+    r"|(?:^|\s)(?:~/|\./|/(?:etc|usr|var|home|opt|tmp|srv)/)"
+    r"|\w+\(\)"                       # a function call: worth(), main()
+    r"|`[^`]+`"                          # inline code
+    r"|```"                              # a fenced block
+    r")", re.I)
+
+# "This is a definition, an explanation, or something to build." None of these
+# are answered by reading today's web.
+_CONCEPTUAL_RE = re.compile(
+    r"(?:"
+    r"^\s*(?:explain|write|generate|create|make|build|implement|refactor|fix|"
+    r"debug|rewrite|convert|translate|add|remove|rename|optimi[sz]e|review)\b"
+    r"|\bwhat\s+(?:does|do|would)\b[^?]*\bmean\b"
+    r"|\bwhat(?:'s|s| is| are)?\s+the\s+difference\s+between\b"
+    r"|\bhow\s+(?:do|does|would|can)\s+(?:i|you|it|we|they)\b"
+    r"|\bwhy\s+(?:is|are|does|do|did|would)\b"
+    r"|\btime\s+complexity\b|\bbig[- ]o\b|\bo\(\s*\w+\s*\)"
+    r"|\bpseudo ?code\b|\bfrom scratch\b"
+    r")", re.I)
+
+# Arithmetic is not a market price. "how much is 2 + 2" matched "how much is".
+# A BARE HYPHEN IS NOT A MINUS SIGN. The first draft used [-+*/^%] with
+# optional spaces, so "is CVE-2026-1234 patched yet" read as 2026 minus 1234,
+# suppressed the fetch, and answered a live vulnerability question from
+# memory - the single worst thing this app can do. Subtraction now requires
+# the spaces people actually type around it.
+_ARITHMETIC_RE = re.compile(r"\d+\s*[+*/^%]\s*\d+|\d+\s+-\s+\d+")
+
+
+def _verification_suppressed(t: str) -> bool:
+    """True when a marker fired but the question is plainly not about the web.
+
+    `t` is the space-padded lowercased text _needs_web_verification built."""
+    # ARITHMETIC FIRST, and deliberately ahead of the strong check: "how much
+    # is 2 + 2" matches the strong phrase "how much is", and no amount of
+    # market data answers it.
+    if _ARITHMETIC_RE.search(t):
+        return True
+    if _STRONG_VERIFY_WORD_RE.search(t):
+        return False
+    if any(m in t for m in _STRONG_VERIFY_PHRASES):
+        return False
+    if re.search(r"\b20(2[4-9]|[3-9]\d)\b", t):
+        return False                      # a current-era year is strong too
+    return bool(_LOCAL_SCOPE_RE.search(t) or _CONCEPTUAL_RE.search(t))
+
+
+def _needs_web_verification(text: str) -> bool:
+    """True when a question's answer depends on the present state of the world
+    and must be confirmed online rather than recalled from training."""
+    t = " " + (text or "").lower().strip() + " "
+    if len(t) < 5:
+        return False
+    # "headlines" is news ONLY when it's a request FOR headlines, not a plain
+    # noun in a code/design question ("headlines aren't showing in my css").
+    # Handled here rather than as a bare marker so the css case stays stale.
+    if "headline" in t and any(
+            p in t for p in (" show me", " give me", " get me", " any ",
+                             " some ", " today", " latest", " news",
+                             " what are", " whats the", " what's the",
+                             " read me", " the top", " top ")):
+        return True
+    if any(m in t for m in _VERIFY_PHRASE_MARKERS):
+        return True
+    # Single-word markers match on WORD BOUNDARIES, not raw substring, so
+    # "current" no longer fires inside "concurrent"/"recurrent", "cost" inside
+    # "costume", "score" inside "underscore", "news" inside "newsletter". A
+    # plain `in` here was a latent false-positive class since v1.0.0.0: a code
+    # question ("concurrent processing", "current directory") triggered a
+    # needless web fetch.
+    if _VERIFY_WORD_RE.search(t):
+        return True
+    # A year at/after the training era ("in 2025", "2026 roadmap") almost always
+    # implies a current-state query.
+    if re.search(r"\b20(2[4-9]|[3-9]\d)\b", t):
+        return True
+    return False
+
+
+# The public entry point keeps its name and its meaning; the raw marker scan
+# above is now the FIRST half of the decision and _verification_suppressed is
+# the second. Kept as two functions because they answer two different
+# questions and are worth being able to test apart.
+_needs_web_verification_raw = _needs_web_verification
+
+
+def _needs_web_verification(text: str) -> bool:      # noqa: F811
+    """True when a question's answer depends on the present state of the world.
+
+    A marker firing is necessary and no longer sufficient - see the suppressor
+    above for why, and for the corpus that made the case."""
+    if not _needs_web_verification_raw(text):
+        return False
+    t = " " + (text or "").lower().strip() + " "
+    return not _verification_suppressed(t)
+
+
+# ── THE PROMISE GATE, AS A PURE DECISION ─────────────────────────────
+# Kept out of the 300-line stream-completion callback on purpose: this is the
+# rule that decides whether the app goes and fetches something the model only
+# promised to fetch, and a rule that important has to be readable and
+# testable on its own, not inferred from a GUI callback.
+#
+# It answers ONE question: this turn is about to end — is it ending on an
+# unkept promise? Two facts decide it, and neither is a phrase in the reply:
+#
+#   · the operator asked something that cannot honestly be answered from
+#     training data (_needs_web_verification), and
+#   · no web tool ran during the whole request.
+#
+# Every earlier fix for "it said it would fetch the news and then stopped"
+# was a better reader of the reply — a stall-phrase list, a printed-URL
+# recovery — and each one was one unseen phrasing away from failing again.
+# This one does not read the reply at all.
+# ══════════════════════════════════════════════════════════════════════
+#  THE VERIFICATION GATE — the promise gate, pointed at the other half
+# ══════════════════════════════════════════════════════════════════════
+# WORK MODE's contract already tells the model, at some length, to run
+# something that proves its change: "VERIFY, DON'T ASSUME", "ITERATE UNTIL IT
+# ACTUALLY PASSES". That is advice, and advice is exactly what a model drops
+# on step forty of a long job. Anthropic's own write-up of this names the
+# failure and the fix in one line:
+#
+#     "Claude stops when the work looks done. Without a check it can run,
+#      'looks done' is the only signal available, and you become the
+#      verification loop."
+#
+# and separates the two mechanisms: a prompt instruction is advisory, a Stop
+# hook is deterministic and "blocks the turn from ending until it passes".
+#
+# Basilisk already HAS the check — `workspace_verify` re-runs the repo's tests
+# and classifies the result against a baseline, so it reports what you fixed
+# AND what you broke. The gap was never the check. It was that nothing made
+# the turn go through it.
+#
+# So this is the promise gate's exact architecture aimed at the other half of
+# the product. Same shape, same reasons:
+#
+#   · it does NOT read the reply. Every earlier attempt at "did it really
+#     finish?" was a better reader of the model's prose, and each was one
+#     phrasing away from failing. Two FACTS decide this: files were written
+#     this request, and nothing was ever run to check them.
+#   · it fires at most ONCE per request, and after it fires a verifier HAS
+#     run, so the condition cannot re-arm. A floor, not a loop.
+#   · it is pure and total. Junk in, None out - a gate that raises is a gate
+#     that fails open on exactly the turn it exists to catch.
+#
+# WORKSPACE writes only. `workspace_write`/`workspace_replace` can only
+# succeed with a repo open, which is what makes `workspace_verify` applicable;
+# a bare `write_file` outside a workspace has nothing to re-run.
+_WORKSPACE_WRITE_TOOLS = frozenset({
+    "workspace_write", "workspace_replace", "workspace_revert",
+})
+# Anything that produces GROUND TRUTH from the environment rather than from
+# the model. `run` counts: a model that ran its own test command has verified
+# its work, and insisting on our tool instead would be ceremony.
+# ══════════════════════════════════════════════════════════════════════
+#  WHICH ACTIONS CHANGE THE ANSWER OTHER ACTIONS WOULD GIVE
+# ══════════════════════════════════════════════════════════════════════
+# Fed to ActionLog.record so the repeat guard counts a WINDOW rather than a
+# lifetime. Its docstring carries the reproduction; the short version is that
+# the guard compared labels, so it could not tell a scanner re-run (nothing
+# changed, refuse it) from a verifier re-run after an edit (everything
+# changed, that IS the job) — and it was refusing the second one from the
+# third call onwards, for the life of the chat, while the persona was telling
+# the model "workspace_verify. Every time."
+#
+# MEMBERSHIP RULE: a tool belongs here if running it could make a LATER,
+# DIFFERENT action return something else. Writes, deletions, moves, command
+# execution, arming and firing, recording evidence, changing scope. A pure
+# read — status, tree, search, read, verify, score — does not, and must not
+# be here: an action never resets its OWN window (see record), so adding a
+# read here would only let it excuse OTHER actions' repeats.
+_STATE_CHANGING_TOOLS = frozenset({
+    # the workspace
+    "workspace_write", "workspace_replace", "workspace_revert",
+    "workspace_import", "workspace_close", "workspace_delete",
+    "workspace_baseline", "workspace_export",
+    # the filesystem
+    "write_file", "propose_edit", "propose", "make_dir", "move_path",
+    "copy_path", "delete_path",
+    # execution
+    "run", "launch_app", "press_key", "type_text", "media_control",
+    "focus_window", "close_window", "reset_password",
+    # the engagement: arming, firing, and anything that records a fact
+    "oracle_arm", "oracle_check", "oracle_listen", "submit_flag",
+    "verify_solve", "loot_record", "asset_record", "report_findings",
+    "reflect_findings", "graph_ingest", "evidence_engagement",
+    "scope_set", "scope_exclude", "scope_window", "scope_authorisation",
+    "skill_save", "memory_save", "memory_forget", "notify",
+})
+
+# Tools whose DISTINGUISHING input is the content they write, not the path they
+# write to. For these, _action_label folds a fingerprint of that content into
+# the label, so writing v1 → v2 → v3 of one file reads as three DIFFERENT
+# actions instead of one action run three times. Without this the repeat guard
+# refused the third legitimate edit of `index.html` ("already run 2× — not
+# running it again"), which is precisely the false block the operator filmed.
+# `run` is deliberately NOT here: its command already IS its label, so
+# pytest/pytest/pytest must still collapse and block.
+_CONTENT_WRITE_TOOLS = frozenset({
+    "write_file", "workspace_write", "workspace_append", "workspace_insert",
+    "workspace_replace", "workspace_edits", "workspace_import", "propose_edit",
+})
+# The argument keys that carry that mutating payload, across the tools above —
+# including workspace_replace's accepted aliases (new_str/old_str/replace/find),
+# so an alias-form replace is still fingerprinted by content and never
+# false-blocked on the third distinct edit of one file.
+_CONTENT_ARG_KEYS = ("content", "text", "edits", "new", "diff", "data", "body",
+                     "new_str", "old_str", "replace", "find", "old")
+
+
+def _action_changes_state(label: str) -> bool:
+    """Does the action behind this label change what a later one would say?
+
+    `label` is `_action_label`'s "<tool>: <argument>" form, or a bare tool
+    name for a no-argument call. Total: an unknown tool is treated as NOT
+    state-changing, which is the conservative direction — it leaves the
+    guard exactly as strict as it is today rather than quietly widening it.
+    """
+    try:
+        name = (label or "").split(":", 1)[0].strip()
+        return name in _STATE_CHANGING_TOOLS
+    except Exception:
+        return False
+
+
+_VERIFY_TOOLS = frozenset({
+    "workspace_verify", "workspace_health", "run", "launch_app",
+})
+
+
+def unverified_work_gap(tools_used, already_forced: bool = False):
+    """The verifier to run, or None to let the turn end.
+
+    True when this request CHANGED a repo and never once asked the environment
+    whether the change works."""
+    try:
+        if already_forced:
+            return None
+        try:
+            used = set(tools_used or ())
+        except Exception:
+            return None
+        if not (used & _WORKSPACE_WRITE_TOOLS):
+            return None                   # nothing was changed; nothing to prove
+        if used & _VERIFY_TOOLS:
+            return None                   # it already checked its own work
+        return "workspace_verify"
+    except Exception:
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  THE SECOND ANSWER — why a gate has to say this
+# ══════════════════════════════════════════════════════════════════════
+# Both end-of-turn gates fire at the same moment: the model has written a
+# COMPLETE reply, emitted no tool call, and the turn was about to end. The
+# gate then runs a tool anyway and hands the result back.
+#
+# From the model's side that is indistinguishable from an ordinary mid-
+# research tool result — so it does the only sensible thing and writes the
+# answer. The answer it already wrote. The operator, who cannot see any of
+# this machinery, gets two complete answers to one question and reasonably
+# reports that the app "sends two answers".
+#
+# The gates were right to fire. What was missing is the one fact only the
+# host has: THE FIRST ANSWER IS ALREADY ON SCREEN. Said plainly, the
+# continuation becomes what it should always have been — a delta. A line
+# confirming the check, or a correction if the check changed the answer.
+#
+# It is deliberately blunt and deliberately short. This rides the volatile
+# trailing message, it is read immediately after a tool result, and the
+# competing instruction it has to beat ("answer the operator's question")
+# is the strongest one in the prompt.
+_GATE_CONTINUATION_NOTE = (
+    "\n[system note — READ THIS BEFORE YOU WRITE ANYTHING: the reply you "
+    "just wrote IS ALREADY ON SCREEN and the operator has read it. This "
+    "tool ran AFTER it, because the host forced it. So do NOT answer the "
+    "question again, do not restate your conclusion in different words, and "
+    "do not re-summarise what you already said — that is the same answer "
+    "twice and it reads as a stutter.\n"
+    "Reply with the DELTA and nothing else:\n"
+    "  · the check agreed with what you said -> one short line confirming "
+    "it, naming what was run or read. Two sentences at most.\n"
+    "  · the check CONTRADICTS or changes what you said -> say so plainly, "
+    "correct the specific part that was wrong, and cite what changed it.\n"
+    "  · the check revealed more work -> stop writing and emit the next "
+    "tool call instead.]")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  THE LEDGER GATE — the turn may not end on work it said it would do
+# ══════════════════════════════════════════════════════════════════════
+# The promise gate asks "did it fetch what the question needed?". The
+# verification gate asks "did it check the change it made?". Both read
+# facts rather than prose, and both were built because a reply-reader kept
+# being one phrasing away from wrong.
+#
+# This one asks the remaining question: "did it do what IT SAID IT WOULD?"
+# — and it is the only one of the three that can answer in BOTH directions,
+# which is why it fixes two complaints at once:
+#
+#   items still open  -> the turn does not end. This is the "it stops when
+#                        it's supposed to keep working" half. A reply like
+#                        "I've fixed two of the five files" reads as a
+#                        conclusion to every prose detector ever written,
+#                        and is plainly unfinished to a ledger.
+#   nothing open      -> the turn DOES end, and every other push is
+#                        suppressed for the rest of the request. That is
+#                        the "it doesn't stop and sends two answers" half:
+#                        once the declared work is done, the host stops
+#                        finding reasons to hand the model another turn.
+#
+# BOUNDED, like every other gate here. A model that will not close an item
+# must not be able to hold a turn open forever, so after `cap` pushes the
+# gate stands down and says so. An empty ledger is NOT "complete": a job
+# with no plan is unmanaged, not finished, and this gate says nothing about
+# it either way.
+def unfinished_plan_gap(plan, pushes: int = 0, cap: int = 6):
+    """The nudge text for a turn ending with open plan items, or None.
+
+    Pure and total: junk in, None out. A gate that raises fails open on
+    exactly the turn it exists to catch."""
+    try:
+        if plan is None or not len(plan):
+            return None
+        if plan.is_complete():
+            return None
+        try:
+            cap = max(0, int(cap))
+        except Exception:
+            cap = 6
+        if int(pushes or 0) >= cap:
+            return None
+        op = plan.open_items()
+        if not op:
+            return None
+        nxt = op[0]
+        names = "; ".join(f"{i['id']}. {i['title']}" for i in op[:8])
+        return (
+            "<tool_result>\n[system note: THE TURN IS NOT OVER. Your own plan "
+            "still has %d item(s) open:\n    %s\n"
+            "Nothing was written and nothing ran for them. The next thing you "
+            "emit must be the TOOL CALL for %r — not a description of it, not "
+            "a summary of progress, not a question about whether to continue. "
+            "Do the work.\n"
+            "If an item genuinely cannot be done, close it honestly: "
+            "plan_step {\"id\": \"%s\", \"status\": \"blocked\", \"note\": "
+            "\"<exactly what stopped you>\"} — and if the whole job is "
+            "finished and the plan is just stale, mark the remaining items "
+            "done or dropped and THEN give your final report.]\n"
+            "</tool_result>" % (len(op), names, nxt["title"], nxt["id"]))
+    except Exception:
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  THE FAILING-VERIFICATION GATE — red is not a place to stop
+# ══════════════════════════════════════════════════════════════════════
+# v1.1.3.0 made the turn RUN the check. It did not make the turn care what
+# the check said. So the remaining shape was: edit, verify, tests are red,
+# write an honest paragraph about the tests being red, end the turn — with
+# the operator's repo in a worse state than it started and a reply that
+# reads as diligent.
+#
+# `workspace_verify` returns a structured verdict (`green`, `broke`,
+# `still_failing`), so this reads a FACT, not a mood. `broke` non-empty is
+# the important one: those are regressions this turn caused, and ending on
+# them is never right.
+#
+# It does not fire on "still_failing with nothing broken" beyond the first
+# push, because a repo that arrived red and is still red may be exactly
+# what the operator asked about — and a gate that will not let a turn end
+# gets switched off.
+def failing_verification_gap(verdict: str, pushes: int = 0, cap: int = 2):
+    """The push text for a turn ending on a red verifier, or None."""
+    try:
+        v = str(verdict or "").strip()
+        if not v:
+            return None
+        try:
+            cap = max(0, int(cap))
+        except Exception:
+            cap = 2
+        if int(pushes or 0) >= cap:
+            return None
+        if v.startswith("regression"):
+            detail = (
+                "the check you ran says YOUR CHANGES BROKE something that was "
+                "passing before (`broke` was not empty). That is a regression, "
+                "and it is never an acceptable place to stop.")
+            todo = ("Read the actual failure output, fix the real cause, and "
+                    "re-run the check. If you cannot fix it, workspace_revert "
+                    "the file and say plainly that you reverted and why.")
+        else:
+            detail = ("the check you ran did not pass (verdict %r)." % v)
+            todo = ("Read the real error — not the summary line, the error — "
+                    "and fix the cause, then re-run the check. Do not edit "
+                    "again on the same hypothesis that just failed; a second "
+                    "guess from the same reasoning is the same guess.")
+        return ("<tool_result>\n[system note: NOT DONE — " + detail + " " +
+                todo + "\nIf the failure predates your changes and is not "
+                "something you were asked to fix, say so explicitly, name the "
+                "test, and then you may stop.]\n</tool_result>")
+    except Exception:
+        return None
+
+
+# ── WHAT A VERIFIER ACTUALLY SAID ────────────────────────────────────
+# Ground truth for the gate above, read off the tool result rather than
+# off the model's account of it. Total: anything unreadable is "" (no
+# opinion), never a red verdict invented from a parse failure.
+def verifier_verdict(tool: str, result_text: str) -> str:
+    """"" when this was not a verifier or it passed; the verdict when red."""
+    try:
+        if str(tool or "").strip() not in ("workspace_verify",
+                                           "workspace_health"):
+            return ""
+        txt = result_text or ""
+        if not txt:
+            return ""
+        try:
+            blob = json.loads(txt)
+        except Exception:
+            m = re.search(r"\{.*\}", txt, re.S)
+            if not m:
+                return ""
+            try:
+                blob = json.loads(m.group(0))
+            except Exception:
+                return ""
+        if not isinstance(blob, dict):
+            return ""
+        if not blob.get("ok", True):
+            return ""                     # a tool ERROR is not a red suite
+        if blob.get("green"):
+            return ""
+        if blob.get("no_baseline"):
+            return ""                     # attributes nothing; says nothing
+        broke = blob.get("broke") or []
+        if isinstance(broke, (list, tuple)) and broke:
+            return "regression: " + ", ".join(str(x) for x in broke[:5])
+        v = str(blob.get("verdict") or "").strip()
+        if v and v != "green":
+            return v
+        return ""
+    except Exception:
+        return ""
+
+
+def forced_search_url(question: str, tools_used, already_forced: bool = False):
+    """The URL the app should read ITSELF, or None to let the turn end.
+
+    Pure and total: junk in, None out — a gate that raises is a gate that
+    fails open on exactly the turn it exists to catch."""
+    try:
+        if already_forced:
+            return None
+        q = (question or "")
+        if not isinstance(q, str):
+            return None
+        q = q.strip()
+        if len(q) < 3:
+            return None
+        try:
+            used = set(tools_used or ())
+        except Exception:
+            used = set()
+        if used & _WEB_TOOL_NAMES:
+            return None
+        if not _needs_web_verification(q):
+            return None
+        return ("https://html.duckduckgo.com/html/?q="
+                + urllib.parse.quote_plus(q[:300]))
+    except Exception:
+        return None
+
+
+# Hosts a "read the top result" follow-through must never bounce back into:
+# the search engines themselves and the common tracker/aggregator shells.
+_FOLLOWTHROUGH_SKIP_HOSTS = (
+    "duckduckgo.com", "google.com", "bing.com", "r.jina.ai",
+    "youtube.com", "facebook.com", "x.com", "twitter.com",
+    # Consent-wall / heavy-JS front doors that come back as a cookie prompt
+    # with no article text (the "Yahoo bounced me to a consent wall" dead end).
+    # Skipping them makes the follow-through pick a result that actually renders.
+    "yahoo.com", "news.yahoo.com", "msn.com", "consent.yahoo.com",
+    "consent.google.com", "reddit.com",
+)
+
+
+def first_result_url(results_text, skip_hosts=_FOLLOWTHROUGH_SKIP_HOSTS):
+    """The top REAL article URL from a fetched search-results page, or None.
+
+    This is what turns "the search returned news SITES, not stories" into an
+    actual read: DuckDuckGo's HTML results wrap every hit in a
+    `//duckduckgo.com/l/?uddg=<url-encoded target>` redirect, so the real link
+    is there to be decoded. Falls back to the first external https link.
+    Pure and total — junk in, None out — so a gate built on it fails safe."""
+    try:
+        t = results_text or ""
+        if not isinstance(t, str) or len(t) < 8:
+            return None
+        # 1. DuckDuckGo redirect links carry the real URL in uddg=
+        for m in re.finditer(r'uddg=([^&"\'\s<>]+)', t):
+            try:
+                u = urllib.parse.unquote(m.group(1))
+            except Exception:
+                continue
+            if u.startswith("http"):
+                host = urllib.parse.urlparse(u).netloc.lower()
+                if host and not any(h in host for h in skip_hosts):
+                    return u
+        # 2. Otherwise the first external https link that is a real page
+        for m in re.finditer(r'https?://[^\s"\'<>)\]]+', t):
+            u = m.group(0).rstrip('.,);]')
+            host = urllib.parse.urlparse(u).netloc.lower()
+            if not host or any(h in host for h in skip_hosts):
+                continue
+            # skip obvious asset/static links
+            if re.search(r'\.(png|jpe?g|gif|svg|css|js|ico|woff2?)($|\?)',
+                         u, re.I):
+                continue
+            return u
+        return None
+    except Exception:
+        return None
+
+
+# ── DECODED-IMAGE CACHE ──────────────────────────────────────────────
+# Every avatar in this file was built with Gtk.Image.new_from_file(path),
+# which decodes the PNG off disk EVERY TIME.  basilisk-avatar.png is 512x512
+# and measures ~9ms to decode; basilisk-priest.png ~3ms.  One assistant avatar
+# is built per message bubble, so:
+#
+#   · a leashed question that chains 12 round-trips paid ~110ms of main-thread
+#     decode, arriving in 9ms chunks exactly when each new bubble appeared —
+#     which is a hitch the operator sees rather than a number in a profile;
+#   · opening a chat is worse, because _load_chat builds the whole window at
+#     once: 40 rendered messages is ~370ms of frozen UI on every chat switch,
+#     for forty identical decodes of two files.
+#
+# A Gdk.Texture is immutable and made to be shared between widgets, so one
+# decode per (file, size) serves every image for the life of the process.
+# Keyed on px as well as path because the same emblem is used at more than one
+# size and a texture carries its own resolution.
+_TEX_CACHE: Dict[Tuple[str, int], Any] = {}
+_TEX_MISSES: set = set()
+
+
+def _cached_texture(path: str, px: int):
+    """One decode per (file, size), shared by every widget that asks.
+
+    A miss is remembered too: a broken or missing file must not be re-opened
+    and re-failed once per message for the rest of the session."""
+    if not path:
+        return None
+    key = (path, int(px))
+    if key in _TEX_CACHE:
+        return _TEX_CACHE[key]
+    if key in _TEX_MISSES:
+        return None
+    tex = None
+    try:
+        pb = GdkPixbuf.Pixbuf.new_from_file_at_size(path, px, px)
+        if pb is not None:
+            tex = Gdk.Texture.new_for_pixbuf(pb)
+    except Exception as e:
+        log(f"texture load failed for {path}: {e}")
+        tex = None
+    if tex is None:
+        _TEX_MISSES.add(key)
+        return None
+    _TEX_CACHE[key] = tex
+    return tex
+
+
+def _cached_image(path: str, px: int, size: int):
+    """A Gtk.Image backed by the shared texture, or None if it can't load."""
+    tex = _cached_texture(path, px)
+    if tex is None:
+        return None
+    try:
+        img = Gtk.Image.new_from_paintable(tex)
+        img.set_pixel_size(size)
+        img.set_size_request(size, size)
+        return img
+    except Exception:
+        return None
+
+
+def _svg_texture(path: str, px: int):
+    """Rasterise an SVG file to a px-by-px Gdk.Texture using the pixbuf SVG
+    loader (CPU / cairo).  Returns None on any failure.
+
+    Why this exists: handing GTK a live SVG paintable (Gtk.Image.new_from_file
+    on an .svg) lets the SVG's own structure become a tree of Gsk render nodes.
+    A complex emblem — many hundreds of fill paths behind a feGaussianBlur —
+    forces the GL renderer to allocate an offscreen blur surface for the whole
+    group, which can exceed the GL texture-size limit and SEGFAULT the entire
+    process at draw time.  Flattening to a fixed-size bitmap first means GTK
+    only ever composites one small texture, so any emblem is safe and it still
+    looks identical at avatar scale."""
+    # Delegates to the shared cache: the rasterise itself is unchanged, it
+    # just happens once per (file, size) for the life of the process instead
+    # of once per caller. A Gdk.Texture is immutable, so sharing one between
+    # widgets is exactly what it is for.
+    return _cached_texture(path, px)
+
+
+def Avatar(kind: str = "user") -> Gtk.Widget:
+    """Square avatar.  Basilisk shows the dragon emblem; the user shows an
+    initial.  Falls back to a letter if the emblem SVG can't be loaded so
+    the UI never breaks on a missing file.  Returns a plain Gtk.Image or
+    Gtk.Label (both are valid box children) rather than a custom widget
+    subclass — simpler and impossible to crash on vfunc mismatch."""
+    size = _scaled(52, floor=28)
+    # 2x the display size so it stays crisp on HiDPI, capped so one cached
+    # texture never gets silly for a 52px avatar.
+    _px = min(max(size * 2, 96), 256)
+    if kind == "basilisk" and _AVATAR_PNG_PATH:
+        # Preferred: the clean dragon PNG (no ring) as the chat avatar.
+        img = _cached_image(_AVATAR_PNG_PATH, _px, size)
+        if img is not None:
+            img.set_valign(Gtk.Align.START)
+            img.add_css_class("avatar")
+            img.add_css_class("avatar-dragon")
+            return img
+    if kind == "basilisk" and _DRAGON_SVG_PATH:
+        # Rasterise to a bounded bitmap instead of a live SVG paintable — see
+        # _svg_texture: a filtered, many-path emblem rendered live can overflow
+        # the GL surface limit and crash the process.  Cached, so the raster
+        # happens once for the session rather than once per bubble.
+        img = _cached_image(_DRAGON_SVG_PATH, _px, size)
+        if img is not None:
+            img.set_valign(Gtk.Align.START)
+            img.add_css_class("avatar")
+            img.add_css_class("avatar-dragon")
+            return img
+
+    if kind == "user" and _PRIEST_PNG_PATH:
+        img = _cached_image(_PRIEST_PNG_PATH, _px, size)
+        if img is not None:
+            img.set_valign(Gtk.Align.START)
+            img.add_css_class("avatar")
+            img.add_css_class("avatar-priest")
+            return img
+
+    if kind == "user" and _CROSS_SVG_PATH:
+        img = _cached_image(_CROSS_SVG_PATH, _px, size)
+        if img is not None:
+            img.set_valign(Gtk.Align.START)
+            img.add_css_class("avatar")
+            img.add_css_class("avatar-cross")
+            return img
+
+    lbl = Gtk.Label(label="L" if kind == "user" else "K")
+    lbl.add_css_class("avatar")
+    lbl.add_css_class("avatar-user" if kind == "user" else "avatar-basilisk")
+    lbl.set_valign(Gtk.Align.START)
+    lbl.set_size_request(size, size)
+    return lbl
+
+
+# ══════════════════════════════════════════════════════════════════════
+# SIGNAL HANDLERS ARE WHAT KEPT EVERY BUBBLE ALIVE FOREVER
+# ══════════════════════════════════════════════════════════════════════
+# `dispose_widget()` on every widget class below nulls its Python attributes
+# and its callbacks, and the docstrings say that "breaks any reference cycle
+# so CPython reclaims the widget". It did not, because the cycle does not run
+# through those attributes -- it runs through GObject:
+#
+#     MessageWidget -> speak_btn (a child)      [Python -> C]
+#     speak_btn     -> its signal closure       [C]
+#     closure       -> the lambda / bound method[C -> Python]
+#     lambda        -> MessageWidget            [Python]
+#
+# CPython's cyclic collector cannot see the middle two hops, so the loop is
+# never broken and nulling attributes changes nothing. Measured on the real
+# app: 120 exchanges with a hard 20-row display budget left 130 MessageWidgets
+# and 120 CodeBlockWidgets alive -- exactly one leaked per assistant message,
+# each still holding its Pango layouts, textures and TextViews. That is the
+# unbounded memory growth (and the slow, laggy scrolling) that only shows up
+# in long conversations. With the speak button's handler removed the same run
+# stayed flat at 20.
+#
+# The fix is to keep the handler ids and disconnect them on disposal, which
+# severs the C-side hop. `_track_connect` records; `_drop_signals` cuts.
+
+def _track_connect(owner, widget, signal: str, cb) -> int:
+    """Connect `cb` and remember the handler so disposal can cut it."""
+    hid = widget.connect(signal, cb)
+    try:
+        owner._sig_conns.append((widget, hid))
+    except AttributeError:
+        owner._sig_conns = [(widget, hid)]
+    return hid
+
+
+def _drop_signals_recursive(root) -> None:
+    """_drop_signals for `root` and every widget beneath it.
+
+    A bubble owns its blocks; when the bubble is trimmed the blocks go with
+    it, so their handlers must be cut at the same moment or each block stays
+    pinned by its own button exactly the way the bubble was.
+    """
+    stack = [root]
+    seen = 0
+    while stack and seen < 5000:        # cheap runaway guard
+        w = stack.pop()
+        seen += 1
+        if w is not root:
+            _drop_signals(w)
+        try:
+            c = w.get_first_child()
+        except Exception:
+            continue
+        while c is not None:
+            stack.append(c)
+            c = c.get_next_sibling()
+
+
+def _drop_signals(owner) -> None:
+    """Disconnect everything _track_connect recorded for `owner`.
+
+    Safe to call twice, and safe on a widget already finalised by GTK -- a
+    disposal path that raised here would leave the rest of the teardown
+    undone, which is the failure this whole function exists to prevent.
+    """
+    for widget, hid in list(getattr(owner, "_sig_conns", ()) or ()):
+        try:
+            if widget is not None and hid:
+                widget.disconnect(hid)
+        except Exception:
+            pass
+    owner._sig_conns = []
+
+
+def _make_wrap_label() -> Gtk.Label:
+    """Return a Gtk.Label that wraps AND reports a wrapped natural
+    width, so it shrinks to fit the parent allocation on narrow
+    screens instead of overflowing.
+
+    GTK4 background: by default, a Label with set_wrap(True) STILL
+    reports its single-line, unwrapped width as the natural width.
+    That natural width is propagated up the widget tree, so the
+    layout thinks the chat bubble "needs" the full line width.  On a
+    Phosh phone the natural width is almost always wider than the
+    physical screen, so the bubble overflows the right edge and the
+    text gets clipped.
+
+    Two settings fix this:
+      - max-width-chars caps the natural width to N characters.  On
+        the phone the actual allocation is narrower than that cap, so
+        the label is given less width and wraps to it.  On the desktop
+        the cap stops a single very long line from making the bubble
+        span the entire monitor.
+      - natural-wrap-mode = WORD (GTK 4.6+) makes the label's natural
+        width the WRAPPED width (at word boundaries) instead of the
+        single-line width.  This stops the natural width from being
+        inflated by long lines.
+    """
+    lbl = Gtk.Label()
+    lbl.set_wrap(True)
+    lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+    lbl.set_xalign(0.0)
+    lbl.set_hexpand(True)
+    lbl.set_max_width_chars(_MAX_BUBBLE_CHARS)
+    try:
+        lbl.set_natural_wrap_mode(Gtk.NaturalWrapMode.WORD)
+    except (AttributeError, TypeError):
+        # Older libadwaita / GTK without NaturalWrapMode.  The label
+        # will still wrap; it just won't shrink as aggressively.
+        pass
+    return lbl
+
+
+
+# ── LIVE ACTIVITY FEED ───────────────────────────────
+def _fmt_elapsed(sec: float) -> str:
+    """Wall-clock duration, at the precision a human reads at a glance.
+
+    Sub-second work is the common case for a local tool, so it gets
+    milliseconds; anything past a minute gets m/s, because "94.3s" is a number
+    the eye has to convert and "1m34s" is not."""
+    try:
+        sec = max(0.0, float(sec))
+    except (TypeError, ValueError):
+        return ""
+    if sec < 0.001:
+        # "0ms" reads as "did not happen". It did happen; it was just faster
+        # than the unit.
+        return "<1ms"
+    if sec < 1.0:
+        return "%dms" % int(sec * 1000)
+    if sec < 60.0:
+        return "%.1fs" % sec
+    m = int(sec // 60)
+    s = int(sec % 60)
+    return "%dm%02ds" % (m, s)
+
+
+def _reply_is_tool_only(text: str) -> bool:
+    """True when a stored assistant reply carried tool calls and no prose.
+
+    Those replies are the in-flight steps of a chain, not answers. Live, the
+    activity feed shows them properly; on reload they used to render as a
+    bubble reading `(working...)`, which is why a finished conversation looked
+    like Basilisk had answered the same question four times. Same judgement the
+    renderer makes, kept in one function so the two cannot disagree."""
+    if not text or not text.strip():
+        return False
+    try:
+        if scrub_tool_debris(strip_tool_calls(
+                extract_think_blocks(text)[0])).strip():
+            return False
+        return bool(parse_tool_calls(text))
+    except Exception:
+        return False
+
+
+def _feed_detail(name: str, args: Any) -> str:
+    """The one argument that makes a tool call DISTINCT, for the feed row.
+
+    Deliberately NOT a json dump of every argument: the row has one line, and a
+    dump pushes the part that identifies the call ("which url?", "which
+    command?") off the end.  Mirrors the priority order _action_label uses, so
+    the feed and the repeat guard name the same thing."""
+    if not isinstance(args, dict):
+        return ""
+    for key in ("command", "cmd", "url", "path", "src", "query", "pattern",
+                "target", "cidr", "name", "product", "topic", "text"):
+        v = args.get(key)
+        if isinstance(v, str) and v.strip():
+            v = " ".join(v.split())
+            return v if len(v) <= 120 else v[:117] + "..."
+    for v in args.values():
+        if isinstance(v, str) and v.strip():
+            v = " ".join(v.split())
+            return v if len(v) <= 120 else v[:117] + "..."
+    return ""
+
+
+def _feed_preview(result_text: str) -> str:
+    """A short, honest receipt for a finished step.
+
+    A tool result is JSON far more often than not, so the raw head of it is
+    `{"ok": true, "status": 200, "text": "<!doctype html>...` — punctuation the
+    operator cannot read anything from.  Pull the human-facing field when the
+    shape offers one, and fall back to the first real line otherwise."""
+    if not result_text:
+        return ""
+    txt = result_text.strip()
+    try:
+        obj = json.loads(txt)
+    except Exception:
+        obj = None
+    if isinstance(obj, dict):
+        # An error is the single most important thing a preview can carry, so
+        # it wins over any success field regardless of key order.
+        for k in ("error", "err", "message"):
+            v = obj.get(k)
+            if isinstance(v, str) and v.strip():
+                return " ".join(v.split())[:220]
+        if obj.get("ok") is False:
+            return "failed"
+        for k in ("summary", "text", "output", "stdout", "result", "body"):
+            v = obj.get(k)
+            if isinstance(v, str) and v.strip():
+                s = " ".join(v.split())
+                return (s[:220] + "...") if len(s) > 220 else s
+        keys = [k for k in obj.keys()][:6]
+        if keys:
+            return "returned: " + ", ".join(str(k) for k in keys)
+        return ""
+    for line in txt.splitlines():
+        line = line.strip()
+        if line:
+            return (line[:220] + "...") if len(line) > 220 else line
+    return ""
+
+
+class ActivityFeedWidget(Gtk.Box):
+    """The live "what Basilisk is doing right now" feed.
+
+    ONE feed per OPERATOR TURN — not per model round-trip.  A leashed question
+    can chain a dozen reads across a dozen round-trips, and the operator asked
+    ONE question; splitting that across a dozen widgets is how the old UI made
+    a single answer look like four separate replies.  The feed is created when
+    the operator sends, and every round-trip of that turn appends to the same
+    one.
+
+    Shape is deliberately the one Claude's web app uses, because it is the one
+    that works: a header line that always says what is happening RIGHT NOW,
+    an expanded body while the work is live, and a collapse back to a single
+    summary line the moment the turn settles.  Clicking the header toggles it
+    at any point, and a click PINS the choice so the auto-collapse never fights
+    the operator.
+
+    HONESTY RULES, learned from the log that lied four ways:
+      - a step is only marked done when its result actually came back;
+      - a step still running when the turn tears down is marked STOPPED, never
+        silently left spinning and never retroactively called success;
+      - the header's elapsed clock is wall time from the first event, so a
+        stall is VISIBLE instead of looking like fast work.
+    """
+
+    # Bound the widget count: an unleashed mission runs for hours.  The store
+    # keeps everything; this is the display window.
+    MAX_STEPS = 160
+
+    _GLYPH = {
+        "run":  "▸",   # right-pointing triangle
+        "ok":   "✓",
+        "fail": "✗",
+        "stop": "■",
+        "note": "\u2022",
+        # NOT a warning-sign or no-entry codepoint: those get substituted by
+        # the emoji font, which ignores the row's colour and its metrics, so a
+        # refusal row rendered wider and in the wrong palette than every other
+        # row. A plain ASCII mark inherits both.
+        "gate": "!",
+    }
+
+    def __init__(self, inline: bool = False):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.add_css_class("activity-feed")
+        # ── TWO PLACEMENTS, ONE WIDGET ──
+        # A LIVE feed is a status chip on the button tray, and its step list
+        # floats over the conversation from the window's overlay (see
+        # MainWindow._dock_feed). A REPLAYED one is a record sitting inside
+        # the transcript, and its step list has to open IN FLOW underneath it
+        # — a panel that jumps to the bottom of the screen is not the row you
+        # clicked.
+        #
+        # The first cut of the chip rewrite had only the docked placement, so
+        # a replayed feed built a panel that was never parented by anything:
+        # clicking its header set the chevron, set reveal_child, and put
+        # nothing on screen. Verified under real GTK (parent None, mapped
+        # False) — a control that lies about having opened.
+        self._inline = bool(inline)
+        self._steps: Dict[int, Dict[str, Any]] = {}
+        self._order: List[int] = []
+        self._next_id = 1
+        self._t0 = time.monotonic()
+        self._tick_src = None
+        self._pinned = False
+        self._done = False
+        self._n_run = 0
+        self._n_ok = 0
+        self._n_fail = 0
+        self._phase = "thinking"
+        self._disposed = False
+        self._collapse_src = None
+        # Set once the header TITLE carries the step count, so the meta column
+        # stops repeating it ("3 steps complete ... 3 steps" reads like two
+        # different numbers that happen to agree).
+        self._title_has_count = False
+        # The plan checklist, pinned above the step rows. None until a plan
+        # exists — most turns never have one and must not pay for the box.
+        self._plan_box = None
+        self._build()
+        self._start_tick()
+
+    # ── construction ────────────────────────────────────────────
+
+    def _build(self):
+        self._header_btn = Gtk.Button()
+        self._header_btn.add_css_class("activity-header")
+        self._header_btn.set_has_frame(False)
+        self._header_btn.set_valign(Gtk.Align.CENTER)
+
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=7)
+
+        # Live indicator: a real spinner while working, a static verdict glyph
+        # when settled.  Both live in the same slot so the header never reflows
+        # when the turn ends.
+        self._spinner = Gtk.Spinner()
+        self._spinner.add_css_class("activity-spinner")
+        self._spinner.start()
+        hbox.append(self._spinner)
+        self._verdict = Gtk.Label(label="")
+        self._verdict.add_css_class("activity-verdict")
+        self._verdict.set_visible(False)
+        hbox.append(self._verdict)
+
+        self._title = Gtk.Label(label="thinking", xalign=0.0)
+        self._title.add_css_class("activity-title")
+        self._title.set_ellipsize(Pango.EllipsizeMode.END)
+        # BOUNDED, because this is a chip on a control bar now. The title is
+        # whatever the current step is called plus its argument, which for a
+        # run step is a whole command line - unbounded, it would push the
+        # model button off the end of the tray on every scan.
+        self._title.set_max_width_chars(28)
+        self._title.set_width_chars(10)
+        hbox.append(self._title)
+
+        self._meta = Gtk.Label(label="", xalign=1.0)
+        self._meta.add_css_class("activity-meta")
+        hbox.append(self._meta)
+
+        self._chevron = Gtk.Label(label="⌄")   # modifier letter down arrow
+        self._chevron.add_css_class("activity-chevron")
+        hbox.append(self._chevron)
+
+        self._header_btn.set_child(hbox)
+        _track_connect(self, self._header_btn, "clicked", self._on_header_clicked)
+        self.append(self._header_btn)
+
+        # ==============================================================
+        #  A CHIP ON THE TRAY, AND A POPOVER FOR THE DETAIL
+        # ==============================================================
+        # The step list used to be a Revealer directly under the header, in a
+        # dock of its own above the button row. That put THREE stacked
+        # surfaces between the last message and the box you type in - feed,
+        # buttons, composer - with air between each, and the gap sat there
+        # whether anything was running or not.
+        #
+        # The feed is a STATUS INDICATOR. A status indicator belongs on the
+        # control bar with the other controls, at the size of the other
+        # controls, and its detail belongs in something that opens ON DEMAND
+        # and OVER the content, rather than in something that permanently
+        # reserves layout for itself.
+        #
+        # So: the widget is now a compact chip that sits inline in the actions
+        # row, and the body hangs off it as a popover that opens UPWARD over
+        # the conversation. Nothing about the honesty rules or the step
+        # bookkeeping changes - only where the rows get drawn.
+        self._body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._body.add_css_class("activity-body")
+
+        # The list is bounded and scrolls. A mission runs up to MAX_STEPS
+        # rows, and a popover tall enough for 160 of them is taller than the
+        # screen - GTK will try, and the top rows become unreachable.
+        self._body_scroll = Gtk.ScrolledWindow()
+        self._body_scroll.set_policy(Gtk.PolicyType.NEVER,
+                                     Gtk.PolicyType.AUTOMATIC)
+        self._body_scroll.set_propagate_natural_height(True)
+        self._body_scroll.set_max_content_height(_scaled(420, floor=260))
+        self._body_scroll.set_child(self._body)
+        # A WIDTH REQUEST, not just a min-content-width. Every row in the list
+        # ellipsizes (the tool argument is a URL or a whole command line), and
+        # an ellipsizing label asks for almost nothing - so a popover sized to
+        # its child's minimum came out a few characters wide and showed a
+        # column of "...". The list has to be told how wide it wants to be.
+        self._body_scroll.set_size_request(_scaled(460, floor=340), -1)
+
+        _frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        _frame.add_css_class("activity-panel")
+        _frame.append(self._body_scroll)
+
+        # The panel is handed to MainWindow, which floats it over the
+        # conversation just above the tray (see _dock_feed). The feed owns it
+        # and disposes it; the window only decides where it hangs.
+        self._panel = Gtk.Revealer()
+        self._panel.set_transition_type(
+            Gtk.RevealerTransitionType.SLIDE_UP)
+        self._panel.set_transition_duration(160)
+        self._panel.set_child(_frame)
+        self._panel.set_reveal_child(False)
+        self._panel.set_can_target(True)
+        if self._inline:
+            # In the transcript: an ordinary collapsible block under its own
+            # header. No floating chrome, no overlay owner — it is parented
+            # here and nowhere else.
+            _frame.add_css_class("activity-panel-inline")
+            self._panel.set_halign(Gtk.Align.FILL)
+            self._panel.set_margin_top(4)
+            self.append(self._panel)
+        else:
+            self._panel.set_halign(Gtk.Align.END)
+            self._panel.set_valign(Gtk.Align.END)
+            self._panel.set_margin_end(14)
+            self._panel.set_margin_bottom(10)
+
+        # There is no in-flow Revealer under the header any more, and nothing
+        # may assume one.
+        self._revealer = None
+        self._expanded = False
+        self.add_css_class("live")
+        self.add_css_class("collapsed")
+        self._chevron.set_text("\u203a")
+
+    def dispose_widget(self):
+        """Release references and stop the clock.  Same contract as
+        MessageWidget.dispose_widget: one-way, and every method that touches a
+        nulled container checks _disposed first, because a late GLib callback
+        arriving after a trim must be a no-op rather than an AttributeError
+        that strands the turn."""
+        self._disposed = True
+        _drop_signals(self)
+        self._stop_tick()
+        if self._collapse_src is not None:
+            try:
+                GLib.source_remove(self._collapse_src)
+            except Exception:
+                pass
+            self._collapse_src = None
+        try:
+            if getattr(self, "_panel", None) is not None:
+                self._panel.set_reveal_child(False)
+        except Exception:
+            pass
+        self._panel = None
+        self._steps = {}
+        self._order = []
+        self._body = None
+        self._body_scroll = None
+        self._revealer = None
+
+    # ── the clock ───────────────────────────────────────────────
+
+    def _start_tick(self):
+        if self._tick_src is None:
+            self._tick_src = GLib.timeout_add(200, self._tick)
+
+    def _stop_tick(self):
+        if self._tick_src is not None:
+            try:
+                GLib.source_remove(self._tick_src)
+            except Exception:
+                pass
+            self._tick_src = None
+
+    def _tick(self):
+        if self._disposed:
+            self._tick_src = None
+            return False
+        self._refresh_header()
+        # Running steps carry their own live duration so a slow tool is
+        # obviously slow while it is still slow, not only in hindsight.
+        now = time.monotonic()
+        for sid in self._order:
+            st = self._steps.get(sid)
+            if st is None or st.get("state") != "run":
+                continue
+            lbl = st.get("time_lbl")
+            if lbl is not None:
+                try:
+                    lbl.set_text(_fmt_elapsed(now - st["t0"]))
+                except Exception:
+                    pass
+        return True
+
+    @staticmethod
+    def _plural(n: int, word: str) -> str:
+        return f"{n} {word}" + ("" if n == 1 else "s")
+
+    def _refresh_header(self):
+        if self._disposed:
+            return
+        el = _fmt_elapsed(time.monotonic() - self._t0)
+        n = self._n_ok + self._n_fail + self._n_run
+        bits = []
+        if n and not self._title_has_count:
+            bits.append(self._plural(n, "step"))
+        if self._n_fail:
+            bits.append(f"{self._n_fail} failed")
+        bits.append(el)
+        self._meta.set_text("  ·  ".join(bits))
+
+    # ── expand / collapse ───────────────────────────────────────
+
+    def _on_header_clicked(self, *_a):
+        if self._disposed:
+            return
+        # An explicit click PINS the state.  Without this the auto-collapse
+        # would slam shut a body the operator had just opened to read.
+        self._pinned = True
+        self.set_expanded(not self._expanded)
+
+    def set_expanded(self, on: bool):
+        if self._disposed or getattr(self, "_panel", None) is None:
+            return
+        on = bool(on)
+        self._expanded = on
+        try:
+            self._panel.set_reveal_child(on)
+        except Exception:
+            pass
+        if on:
+            self._chevron.set_text("⌄")
+            self.remove_css_class("collapsed")
+        else:
+            self._chevron.set_text("›")
+            self.add_css_class("collapsed")
+
+    # ── phases and steps ────────────────────────────────────────
+
+    def set_phase(self, text: str):
+        """Header title while no tool is in flight (streaming / thinking)."""
+        if self._disposed or self._done:
+            return
+        self._phase = (text or "").strip() or "working"
+        if self._n_run == 0:
+            self._title.set_text(self._phase)
+        self._refresh_header()
+
+    def begin_step(self, name: str, detail: str = "",
+                   kind: str = "tool") -> int:
+        """Open a live step.  Returns the id to hand back to end_step."""
+        if self._disposed or self._body is None:
+            return 0
+        sid = self._next_id
+        self._next_id += 1
+        row = self._make_row(name, detail, kind)
+        st = {
+            "t0": time.monotonic(), "state": "run", "name": name,
+            "row": row["row"], "glyph": row["glyph"],
+            "time_lbl": row["time"], "detail_lbl": row["detail"],
+            "preview": row["preview"], "preview_box": row["preview_box"],
+        }
+        self._steps[sid] = st
+        self._order.append(sid)
+        self._n_run += 1
+        self._title.set_text(name if not detail else f"{name}  {detail}")
+        self._trim()
+        self._refresh_header()
+        return sid
+
+    def end_step(self, sid: int, ok: bool = True, detail: str = "",
+                 preview: str = ""):
+        if self._disposed:
+            return
+        st = self._steps.get(sid)
+        if st is None or st.get("state") != "run":
+            return
+        st["state"] = "ok" if ok else "fail"
+        self._n_run = max(0, self._n_run - 1)
+        if ok:
+            self._n_ok += 1
+        else:
+            self._n_fail += 1
+        dur = time.monotonic() - st["t0"]
+        try:
+            st["glyph"].set_text(self._GLYPH["ok" if ok else "fail"])
+            st["row"].remove_css_class("run")
+            st["row"].add_css_class("ok" if ok else "fail")
+            st["time_lbl"].set_text(_fmt_elapsed(dur))
+            if detail:
+                st["detail_lbl"].set_text(detail)
+                st["detail_lbl"].set_visible(True)
+            if preview:
+                st["preview"].set_text(preview)
+                st["preview_box"].set_visible(True)
+        except Exception:
+            pass
+        if self._n_run == 0 and not self._done:
+            self._title.set_text(self._phase)
+        self._refresh_header()
+
+    # ══════════════════════════════════════════════════════════════════
+    #  THE CHECKLIST — the plan, ticking off, where he can see it
+    # ══════════════════════════════════════════════════════════════════
+    # Pinned ABOVE the step rows rather than mixed in among them, because it
+    # answers a different question. The step rows say what just happened;
+    # the checklist says how much of the job is left. Mixed together, the
+    # plan scrolls away behind forty tool rows exactly when it is most
+    # wanted.
+    #
+    # Rebuilt wholesale on every update. The plan is 3-8 rows and a diff
+    # would be more code than it saves — and a diffed list that drifts from
+    # the ledger is worse than no list, because it is a checklist that lies
+    # about what is done.
+    #
+    # ASCII GLYPHS ONLY, same rule the step rows already follow: the emoji
+    # face substitutes U+2705 / U+26D4 and friends, ignoring both the row's
+    # colour and its metrics, so one row would render wider and in a colour
+    # nothing in the stylesheet chose.
+    _PLAN_GLYPH = {"open": "\u25cb",     # white circle, an empty box
+                   "doing": "\u25d0",    # half-filled circle
+                   "done": "\u25cf",     # filled circle
+                   "blocked": "!",
+                   "dropped": "\u2013"}  # en dash
+
+    def set_checklist(self, items, summary: str = ""):
+        """Show (or refresh) the plan for this turn. Total: never raises."""
+        if self._disposed or self._body is None:
+            return
+        try:
+            items = list(items or [])
+        except Exception:
+            return
+        try:
+            if self._plan_box is not None:
+                self._body.remove(self._plan_box)
+        except Exception:
+            pass
+        self._plan_box = None
+        if not items:
+            return
+        try:
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            box.add_css_class("activity-plan")
+
+            head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            head.add_css_class("activity-plan-head")
+            h = Gtk.Label(label="plan", xalign=0.0)
+            h.add_css_class("activity-plan-title")
+            head.append(h)
+            sm = Gtk.Label(label=summary or "", xalign=1.0)
+            sm.add_css_class("activity-plan-count")
+            sm.set_hexpand(True)
+            head.append(sm)
+            box.append(head)
+
+            for it in items[:40]:
+                st = str(it.get("status", "open"))
+                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                              spacing=8)
+                row.add_css_class("activity-plan-row")
+                row.add_css_class("plan-" + (st if st in self._PLAN_GLYPH
+                                             else "open"))
+                g = Gtk.Label(label=self._PLAN_GLYPH.get(st, "\u25cb"))
+                g.add_css_class("activity-plan-glyph")
+                row.append(g)
+                t = Gtk.Label(label=str(it.get("title", "")), xalign=0.0)
+                t.add_css_class("activity-plan-name")
+                t.set_ellipsize(Pango.EllipsizeMode.END)
+                t.set_hexpand(True)
+                row.append(t)
+                # A blocked or dropped item without its reason on screen is
+                # just a step that vanished. The ledger makes the note
+                # mandatory; this is where it is worth having.
+                nt = str(it.get("note", "") or "")
+                if st in ("blocked", "dropped") and nt:
+                    n = Gtk.Label(label=nt[:60], xalign=1.0)
+                    n.add_css_class("activity-plan-note")
+                    n.set_ellipsize(Pango.EllipsizeMode.END)
+                    row.append(n)
+                box.append(row)
+
+            self._body.prepend(box)
+            self._plan_box = box
+            # A plan arriving is worth seeing: open the panel unless he has
+            # deliberately folded it. `_pinned` is his choice either way and
+            # is never overridden — see _on_header_clicked.
+            if not self._pinned and not self._done:
+                try:
+                    self._panel.set_reveal_child(True)
+                    self._chevron.set_text("\u2303")
+                except Exception:
+                    pass
+        except Exception as e:
+            log(f"activity checklist failed: {e}")
+
+    def note(self, text: str, kind: str = "note"):
+        """A non-tool event worth showing: a gate refusal, a retry, the repeat
+        guard firing, the tool cap being hit.  These are exactly the moments
+        the old UI was silent about, so the operator saw a stall with no
+        reason attached."""
+        if self._disposed or self._body is None:
+            return
+        row = self._make_row(text, "", kind, note=True)
+        self._order.append(-self._next_id)
+        self._steps[-self._next_id] = {"state": kind, "row": row["row"]}
+        self._next_id += 1
+        self._trim()
+
+    def stop_running(self, why: str = "stopped"):
+        """Mark every still-live step as stopped.  Called from the turn
+        teardown, because a spinner left spinning after the turn ended is the
+        UI telling the operator a lie."""
+        if self._disposed:
+            return
+        for sid in list(self._order):
+            st = self._steps.get(sid)
+            if st is None or st.get("state") != "run":
+                continue
+            st["state"] = "stop"
+            self._n_run = max(0, self._n_run - 1)
+            try:
+                st["glyph"].set_text(self._GLYPH["stop"])
+                st["row"].remove_css_class("run")
+                st["row"].add_css_class("stop")
+                st["time_lbl"].set_text(why)
+            except Exception:
+                pass
+        self._refresh_header()
+
+    def finish(self, summary: str = "", ok: bool = True):
+        """Settle the feed: freeze the clock, show a verdict, and collapse back
+        to one line unless the operator pinned it open."""
+        if self._disposed or self._done:
+            return
+        self._done = True
+        self._stop_tick()
+        self.stop_running("ended")
+        self._refresh_header()
+        try:
+            self._spinner.stop()
+            self._spinner.set_visible(False)
+            self._verdict.set_text(
+                self._GLYPH["ok"] if ok and not self._n_fail
+                else self._GLYPH["fail"])
+            self._verdict.set_visible(True)
+            self._verdict.add_css_class("ok" if ok and not self._n_fail
+                                        else "fail")
+        except Exception:
+            pass
+        self.remove_css_class("live")
+        self.add_css_class("done")
+        done_n = self._n_ok + self._n_fail
+        if summary:
+            self._title.set_text(summary)
+        elif done_n:
+            self._title.set_text(self._plural(done_n, "step") + " complete")
+            self._title_has_count = True
+        else:
+            self._title.set_text("done")
+        self._refresh_header()
+        if not self._pinned:
+            # Hold the finished state on screen for a beat before folding it
+            # away, so the operator sees the last step land instead of the body
+            # vanishing under their eyes.
+            self._collapse_src = GLib.timeout_add(900, self._auto_collapse)
+
+    def _auto_collapse(self):
+        self._collapse_src = None
+        if self._disposed or self._pinned:
+            return False
+        self.set_expanded(False)
+        return False
+
+    def replay_step(self, name: str, detail: str = ""):
+        """Rebuild a row for a call that ran in an EARLIER session.
+
+        The store records that a tool was CALLED; it does not record whether it
+        succeeded — the result rows are trimmed out of history on purpose. So a
+        replayed row gets a NEUTRAL glyph and no duration, never a green tick.
+        Painting a tick over an outcome nobody recorded is the same lie as the
+        unconditional `done` this project already had to dig out of its log,
+        and it would be a lie the operator has no way to check."""
+        if self._disposed or self._body is None:
+            return
+        row = self._make_row(name, detail, "note", note=True)
+        sid = self._next_id
+        self._next_id += 1
+        self._steps[sid] = {"state": "past", "row": row["row"]}
+        self._order.append(sid)
+        self._n_past = getattr(self, "_n_past", 0) + 1
+        try:
+            row["row"].add_css_class("past")
+        except Exception:
+            pass
+        self._trim()
+
+    def finish_history(self):
+        """Settle a REPLAYED feed: no clock, no verdict tick, folded shut at
+        once. There is nothing live to watch, so animating it open and then
+        closed would just make a reopened chat flicker."""
+        if self._disposed:
+            return
+        self._done = True
+        self._stop_tick()
+        n_past = getattr(self, "_n_past", 0)
+        try:
+            self._spinner.stop()
+            self._spinner.set_visible(False)
+            self._verdict.set_text(self._GLYPH["note"])
+            self._verdict.set_visible(True)
+        except Exception:
+            pass
+        self.remove_css_class("live")
+        self.add_css_class("done")
+        self._title.set_text(self._plural(n_past, "step") + " earlier")
+        self._meta.set_text("from history")
+        self.set_expanded(False)
+
+    # ── rows ────────────────────────────────────────────────────
+
+    def _make_row(self, name: str, detail: str, kind: str,
+                  note: bool = False) -> Dict[str, Any]:
+        wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row.add_css_class("activity-step")
+        if note:
+            row.add_css_class(kind if kind in ("gate", "note") else "note")
+        else:
+            row.add_css_class("run")
+
+        glyph = Gtk.Label(
+            label=self._GLYPH.get(kind if note else "run", "•"))
+        glyph.add_css_class("activity-glyph")
+        row.append(glyph)
+
+        lbl = Gtk.Label(label=name, xalign=0.0)
+        lbl.add_css_class("activity-step-name")
+        lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        row.append(lbl)
+
+        det = Gtk.Label(label=detail, xalign=0.0)
+        det.add_css_class("activity-step-detail")
+        det.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        det.set_hexpand(True)
+        det.set_visible(bool(detail))
+        row.append(det)
+
+        tm = Gtk.Label(label="", xalign=1.0)
+        tm.add_css_class("activity-step-time")
+        row.append(tm)
+
+        wrap.append(row)
+
+        # Per-step result preview, hidden until there is one.  Kept to a couple
+        # of lines: this is a receipt that the tool returned something real,
+        # not a second copy of the transcript.
+        pv_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        pv_box.add_css_class("activity-preview-box")
+        pv = Gtk.Label(label="", xalign=0.0)
+        pv.add_css_class("activity-preview")
+        pv.set_wrap(True)
+        pv.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        pv.set_lines(2)
+        pv.set_ellipsize(Pango.EllipsizeMode.END)
+        pv.set_hexpand(True)
+        pv_box.append(pv)
+        pv_box.set_visible(False)
+        wrap.append(pv_box)
+
+        self._body.append(wrap)
+        return {"row": row, "glyph": glyph, "detail": det, "time": tm,
+                "preview": pv, "preview_box": pv_box, "wrap": wrap}
+
+    def _trim(self):
+        """Drop the oldest rows past the cap.  Display only — the store and the
+        terminal log keep the full record."""
+        if self._body is None:
+            return
+        extra = len(self._order) - self.MAX_STEPS
+        while extra > 0:
+            sid = self._order.pop(0)
+            st = self._steps.pop(sid, None)
+            extra -= 1
+            if not st:
+                continue
+            row = st.get("row")
+            if row is None:
+                continue
+            try:
+                parent = row.get_parent()
+                if parent is not None:
+                    self._body.remove(parent)
+            except Exception:
+                pass
+
+
+class MessageWidget(Gtk.Box):
+    """A single chat message."""
+
+    def __init__(self, role: str, content: str = "",
+                 meta: Optional[Dict[str, Any]] = None,
+                 on_run_command: Optional[Callable[[str, str], None]] = None,
+                 on_apply_edit: Optional[Callable[[str, str, Any], None]] = None,
+                 on_speak: Optional[Callable[["MessageWidget"], None]] = None,
+                 show_thoughts: bool = True):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.role = role
+        self.meta = meta or {}
+        self._content = content or ""
+        self._on_run_command = on_run_command
+        self._on_apply_edit = on_apply_edit
+        self._on_speak = on_speak
+        self.speak_btn: Optional[Gtk.Button] = None
+        self._speak_state = "idle"
+        self._blocks_container: Optional[Gtk.Box] = None
+        self._streaming_label: Optional[Gtk.Label] = None
+        # Live-stream render throttle — see append_streaming.
+        self._last_stream_render: float = 0.0
+        self._stream_render_pending: bool = False
+        # Captured model reasoning ("thoughts"): from a reasoning_content
+        # stream field and/or inline <think> blocks.  Shown in a collapsed
+        # expander the operator can click open.
+        self._thoughts: str = (self.meta or {}).get("thoughts", "") or ""
+        self._thoughts_container: Optional[Gtk.Box] = None
+        self._thoughts_label: Optional[Gtk.Label] = None
+        self._show_thoughts: bool = show_thoughts
+        # Set by dispose_widget when the view trims this bubble. Every method
+        # that touches a container checks it — see dispose_widget.
+        self._disposed: bool = False
+        self.add_css_class("msg-row")
+        self._build_shell()
+        if content and role != "tool":
+            self.set_content(content)
+        if self._thoughts:
+            self._render_thoughts()
+
+    def dispose_widget(self):
+        """Release this bubble's references so it can be freed the moment it's
+        trimmed from the view. It holds callbacks back to the window and heavy
+        child containers; nulling them breaks any reference cycle so CPython
+        reclaims the widget (and its TextViews / code blocks / images) instead of
+        letting it linger in RAM. Display-only — the message stays in the store.
+
+        DISPOSAL IS ONE-WAY AND THE WIDGET MUST SURVIVE BEING USED AFTER IT.
+        The window keeps its own references to bubbles (streaming_msg_widget,
+        _speaking_widget) that are independent of the view's rolling trim, so a
+        disposed bubble can still receive a late token or a state change. Every
+        method that touches a nulled container checks _disposed first and
+        becomes a no-op, because the alternative is an AttributeError on
+        `None.get_first_child()` inside a GLib callback — which strands whatever
+        turn was driving it."""
+        self._disposed = True
+        # FIRST, because it is the one that actually frees the widget. The
+        # attribute nulling below is housekeeping; this is the cycle.
+        _drop_signals(self)
+        # ── AND THE SAME CYCLE EXISTS IN EVERY BLOCK INSIDE THE BUBBLE ──
+        # A CodeBlockWidget's copy button, a proposed command's Run button
+        # and a proposed edit's Apply button each hold their own C-side
+        # closure back to their own widget. Those widgets are children of
+        # this one, so cutting only this widget's handlers still leaves each
+        # block pinned -- measured at 120 live CodeBlockWidgets for 120
+        # exchanges with 20 rows on screen. Nothing else walks in here to
+        # dispose them, so the bubble does it for its own children.
+        _drop_signals_recursive(self)
+        self._on_run_command = None
+        self._on_apply_edit = None
+        self._on_speak = None
+        self._blocks_container = None
+        self._streaming_label = None
+        self._thoughts_container = None
+        self._thoughts_label = None
+        self.speak_btn = None
+        self._content = ""
+        self._thoughts = ""
+
+    def _build_shell(self):
+        if self.role == "user":
+            # User message: row fills the viewport, a left spacer pushes
+            # the bubble to the right.  The OLD layout used
+            # row.set_halign(Gtk.Align.END) which made the row claim
+            # its NATURAL width (the unwrapped one-line size of the
+            # message) and overflow the right edge of the screen on
+            # narrow phones.  The hexpand-row + spacer pattern keeps
+            # the row's own width equal to the viewport so the bubble
+            # can't escape.
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            row.set_hexpand(True)
+
+            spacer = Gtk.Box()
+            spacer.set_hexpand(True)
+            row.append(spacer)
+
+            content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                  spacing=2)
+            content_box.set_halign(Gtk.Align.END)
+            content_box.set_hexpand(False)
+            content_box.add_css_class("msg-column-user")
+
+            label = Gtk.Label(label="YOU", xalign=1.0)
+            label.add_css_class("role-label")
+            label.add_css_class("user")
+            content_box.append(label)
+
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            inner.add_css_class("msg-user")
+            content_box.append(inner)
+
+            row.append(content_box)
+            row.append(Avatar("user"))
+            self.append(row)
+            self._blocks_container = inner
+
+        elif self.role == "assistant":
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            row.set_hexpand(True)
+
+            row.append(Avatar("basilisk"))
+
+            content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                  spacing=2)
+            content_box.set_hexpand(True)
+            content_box.add_css_class("msg-column-assistant")
+            # Header: role label on the left, a per-message play/pause
+            # button on the right (so each reply can be read, paused, and
+            # replayed on its own).
+            header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            label = Gtk.Label(label="BASILISK", xalign=0.0)
+            label.add_css_class("role-label")
+            label.add_css_class("basilisk")
+            header.append(label)
+            content_box.append(header)
+            # Thoughts container sits between the header and the reply body.
+            # It stays empty (and invisible) unless the model exposed its
+            # reasoning, in which case _render_thoughts drops a collapsed
+            # expander here.  Kept separate from the blocks container so
+            # streaming/redraw of the reply never wipes it.
+            self._thoughts_container = Gtk.Box(
+                orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            content_box.append(self._thoughts_container)
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            inner.add_css_class("msg-assistant")
+            # Hug the content: without this the bubble fills the whole row
+            # width (content_box hexpands for avatar layout, and the body label
+            # hexpands), so a two-word reply drew a full-screen bubble. START +
+            # no-expand makes the bubble size to its text and sit left; the
+            # label's max-width-chars cap still wraps long replies.
+            # ── HUGGING WITHOUT BREAKING HEIGHT-FOR-WIDTH ──
+            # This used to be halign=START + hexpand=False on the bubble
+            # itself, and that is what made text draw outside the bubble
+            # background.
+            #
+            # A vertical GtkBox asks its child "how tall are you at MY width",
+            # then -- because halign=START means "take your natural width" --
+            # allocates it something NARROWER. The bubble's content is
+            # wrapped text and a two-column list, so narrower means taller:
+            # it was sized from the answer to a question about a wider box.
+            # Measured on a real reply at ui_scale 0.5: allocated 490px,
+            # needed 576px, and the last paragraph drew 43px below its own
+            # background, on top of the Listen button.
+            #
+            # A HORIZONTAL box does not have this problem: it settles every
+            # child's WIDTH first and only then asks for height, so the width
+            # the bubble is measured at is the width it gets. Hugging moves
+            # to the trailing spacer -- the same pattern the user row above
+            # already uses -- so a two-word reply still draws a small bubble
+            # instead of a full-width one.
+            # Hug the content at its natural width. halign=START + hexpand
+            # False means GTK allocates the bubble exactly the width it asks
+            # for, and the trailing spacer in the row below absorbs the rest —
+            # so the width the bubble is measured at IS the width it is drawn
+            # at, and its height is honest. (Getting this wrong is the whole
+            # history of this widget: either text spilling out the bottom, or
+            # a bubble drawn hundreds of px taller than its text.)
+            inner.set_halign(Gtk.Align.START)
+            inner.set_hexpand(False)
+            # Arcane seal: a faint sigil in the corner of every Basilisk reply.
+            # Overlaid, non-interactive -> never touches the streamed text, which
+            # still targets `inner` (self._blocks_container below). No-op if the
+            # sigil art isn't on disk.
+            _seal = _build_msg_sigil()
+            if _seal is not None:
+                _seal_ov = Gtk.Overlay()
+                _seal_ov.set_halign(Gtk.Align.FILL)
+                _seal_ov.set_hexpand(False)
+                _seal_ov.set_child(inner)
+                _seal_ov.add_overlay(_seal)
+                _bubble_widget = _seal_ov
+            else:
+                _bubble_widget = inner
+            # The hug row: bubble at natural width, then a spacer that eats
+            # the rest so the bubble stays left and does not stretch.
+            _hug = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+            _hug.set_hexpand(True)
+            _hug.append(_bubble_widget)
+            _hug_spacer = Gtk.Box()
+            _hug_spacer.set_hexpand(True)
+            _hug.append(_hug_spacer)
+            content_box.append(_hug)
+            # Read-aloud control sits UNDERNEATH the message (left-aligned),
+            # where it's easy to reach, rather than off on the far right.
+            if self._on_speak is not None:
+                footer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                 spacing=6)
+                footer.add_css_class("msg-footer")
+                # Gtk.Button.set_icon_name() REPLACES the button's child, so
+                # the label passed to the constructor was silently discarded
+                # and this rendered as a bare icon circle sitting on its own
+                # under the bubble, connected to nothing. Build the child
+                # explicitly to get both.
+                self.speak_btn = Gtk.Button()
+                _sb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                              spacing=7)
+                _sb.append(Gtk.Image.new_from_icon_name(
+                    "audio-volume-high-symbolic"))
+                _sb.append(Gtk.Label(label="Listen"))
+                self.speak_btn.set_child(_sb)
+                self.speak_btn.add_css_class("msg-speak-btn")
+                self.speak_btn.set_halign(Gtk.Align.START)
+                self.speak_btn.set_tooltip_text("Read this message aloud")
+                _track_connect(self, self.speak_btn, "clicked",
+                               lambda *_: self._on_speak(self))
+                footer.append(self.speak_btn)
+                content_box.append(footer)
+            row.append(content_box)
+            self.append(row)
+            self._blocks_container = inner
+
+        elif self.role == "tool":
+            kind = self.meta.get("kind", "result")
+            if kind == "result":
+                # Hide tool results entirely — let the assistant summarize.
+                self.set_visible(False)
+                self._blocks_container = None
+                return
+            # Tool CALL: compact one-line indicator
+            tool_name = self.meta.get("tool_name", "")
+            if not tool_name:
+                # Try to parse from legacy content like "⚙ tool: check_updates({...})"
+                import re as _re
+                m = _re.search(r'tool:\s*([a-zA-Z_]+)', self._content or "")
+                tool_name = m.group(1) if m else "tool"
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            row.add_css_class("msg-tool-indicator")
+            row.set_halign(Gtk.Align.START)
+            lbl = Gtk.Label(label=f"⚙  used {tool_name}", xalign=0.0)
+            lbl.add_css_class("tool-indicator-label")
+            row.append(lbl)
+            self.append(row)
+            self._blocks_container = None
+
+        else:
+            inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            inner.add_css_class("msg-system-notice")
+            self.append(inner)
+            self._blocks_container = inner
+
+    def set_content(self, text: str):
+        if getattr(self, "_disposed", False) or self._blocks_container is None:
+            # Trimmed out of the view already; the message itself is safe in
+            # the store and will render from there if the chat is reopened.
+            self._content = text or ""
+            return
+        self._content = text
+        if self.role == "tool" or self._blocks_container is None:
+            return
+        child = self._blocks_container.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            self._blocks_container.remove(child)
+            child = nxt
+        if self.role == "assistant":
+            visible, think = extract_think_blocks(text)
+            if think and think not in self._thoughts:
+                self._thoughts = ((self._thoughts + "\n" + think).strip()
+                                  if self._thoughts else think)
+            if self._thoughts:
+                self._render_thoughts()
+            # strip_tool_calls only removes the canonical <tool …> form. A call
+            # in any other dialect survives it and is rendered to the operator
+            # as raw protocol garbage — which is what he actually sees when this
+            # goes wrong, and it looks like the app is broken. Scrub the wreckage
+            # too: he should never be shown transport internals.
+            display_text = scrub_tool_debris(strip_tool_calls(visible))
+        else:
+            display_text = text
+        # If the assistant message carries only tool calls, don't show a
+        # placeholder when at least one is a proposal — the card speaks for
+        # itself.  Only fall back to the placeholder for a bare execution
+        # tag with no prose and no card.
+        # Set only by the bare-tool-step branch below. A propose/propose_edit
+        # turn ALSO ends up with empty display_text, and its card is drawn into
+        # this same container further down — so visibility must key off this
+        # flag, not off `not display_text`, or an approval card would be
+        # rendered into a hidden bubble and the operator would be waiting to
+        # click something that is not on screen.
+        _bare_tool_step = False
+        if not display_text and self.role == "assistant":
+            calls = []
+            try:
+                calls = parse_tool_calls(text)
+            except Exception:
+                calls = []
+            has_propose = any(getattr(c, "name", "") == "propose" for c in calls)
+            if has_propose:
+                display_text = ""
+            elif calls:
+                # THE FEED ALREADY SAID THIS, AND SAID IT BETTER.
+                # This bubble is an in-flight step of a chain, not an answer.
+                # It used to render `(working…)` or a one-line action summary —
+                # so a single question that took four tools drew four bubbles
+                # that all looked like replies, which is exactly the "it
+                # answered me four times" complaint. The activity feed above
+                # carries the tool, its argument, its duration and its outcome,
+                # so this bubble has nothing left to add: hide it. Nothing is
+                # lost — the raw content is already in the store and still goes
+                # to the model as history.
+                display_text = ""
+                _bare_tool_step = True
+            else:
+                # No tool calls and no prose in this turn — it really was just
+                # reasoning. Only here is "thinking" the honest label.
+                display_text = "*(thinking…)*"
+
+        if self.role == "assistant":
+            # Visibility is derived, not latched: a bubble hidden as a bare
+            # tool step must come back the moment it is given real text, or a
+            # reused widget would stay invisible for the rest of the chat.
+            self.set_visible(not _bare_tool_step)
+        blocks = split_message_into_blocks(display_text) if display_text else []
+        for b in blocks:
+            if b["kind"] == "code":
+                self._blocks_container.append(
+                    CodeBlockWidget(b["content"], b["lang"]))
+            elif b["kind"] == "table":
+                # Every structural block is built inside its own try: a
+                # malformed table must cost that ONE block, not the whole
+                # reply. Falling back to the raw text keeps the content
+                # visible, which is the property that actually matters.
+                try:
+                    self._blocks_container.append(
+                        TableWidget(b.get("header") or [],
+                                    b.get("rows") or [],
+                                    b.get("aligns")))
+                except Exception as e:
+                    log(f"table render failed: {e}")
+                    _l = _make_wrap_label()
+                    _l.set_text(_table_to_text(b))
+                    self._blocks_container.append(_l)
+            elif b["kind"] == "heading":
+                try:
+                    self._blocks_container.append(
+                        HeadingWidget(b.get("content", ""),
+                                      int(b.get("level", 2))))
+                except Exception:
+                    _l = _make_wrap_label()
+                    _l.set_text(b.get("content", ""))
+                    self._blocks_container.append(_l)
+            elif b["kind"] == "quote":
+                try:
+                    self._blocks_container.append(
+                        QuoteWidget(b.get("content", "")))
+                except Exception:
+                    _l = _make_wrap_label()
+                    _l.set_text(b.get("content", ""))
+                    self._blocks_container.append(_l)
+            elif b["kind"] == "rule":
+                try:
+                    self._blocks_container.append(RuleWidget())
+                except Exception:
+                    pass
+            elif b["kind"] == "list":
+                try:
+                    self._blocks_container.append(
+                        ListWidget(b.get("items") or []))
+                except Exception:
+                    _l = _make_wrap_label()
+                    _l.set_text("\n".join(
+                        "%s %s" % (i.get("marker", "-"), i.get("content", ""))
+                        for i in (b.get("items") or [])))
+                    self._blocks_container.append(_l)
+            elif b["kind"] == "image":
+                if _RENDER_IMAGES:
+                    self._blocks_container.append(
+                        ImageWidget(b.get("url", ""), b.get("alt", "")))
+                else:
+                    # Image rendering disabled — show a tappable link instead so
+                    # nothing reaches out to the image host unasked.
+                    lbl = _make_wrap_label()
+                    alt = b.get("alt") or "image"
+                    url = b.get("url", "")
+                    try:
+                        lbl.set_markup(
+                            f"🖼 <a href=\"{GLib.markup_escape_text(url)}\">"
+                            f"{GLib.markup_escape_text(alt)}</a>")
+                    except Exception:
+                        lbl.set_text(f"🖼 {url}")
+                    self._blocks_container.append(lbl)
+            else:
+                lbl = _make_wrap_label()
+                # NOT selectable — selectable labels swallow touch swipes
+                # and break message-list scrolling.  Code blocks have a
+                # copy button; prose can be copied via long-press menu.
+                try:
+                    lbl.set_markup(text_to_pango(b["content"]))
+                except Exception:
+                    lbl.set_text(b["content"])
+                self._blocks_container.append(lbl)
+
+        # Render any proposed-command cards from the raw text.  These are
+        # advisory only — the model emits <tool name="propose"> and the
+        # operator decides whether to run.  Parsed from the raw (un-
+        # stripped) content so the cards survive a chat reload.
+        # In autonomous mode proposals auto-execute (no operator watching), so
+        # we don't draw interactive cards at all — they'd just sit there.
+        if self.role == "assistant" and _APPROVAL_MODE != "none":
+            try:
+                for call in parse_tool_calls(text):
+                    _rendered = False
+                    if call.name == "propose":
+                        cmd = (call.args.get("command")
+                               or call.args.get("cmd") or "").strip()
+                        if not cmd:
+                            self._append_card_warn(
+                                "Basilisk tried to propose a command but the call "
+                                "had no command text — nothing to run.")
+                            break
+                        try:
+                            self._blocks_container.append(ProposedCommandWidget(
+                                cmd,
+                                explanation=str(call.args.get("explanation", "")),
+                                risk=str(call.args.get("risk", "medium")),
+                                on_run=self._on_run_command))
+                            _rendered = True
+                        except Exception as e:
+                            log(f"command card build failed: {e}")
+                            self._append_card_warn(
+                                f"Basilisk proposed a command but the card failed "
+                                f"to render ({e}). Nothing was run.")
+                            break
+                    elif call.name in ("propose_edit", "write_file"):
+                        # An edit proposal renders as a diff card.  It NEVER
+                        # writes on its own — the operator's Apply click is
+                        # the approval, and tool_write_file still enforces
+                        # the parse-check + backup + immutable-guardrail net.
+                        epath = (call.args.get("path") or "").strip()
+                        econtent = call.args.get("content")
+                        # The tag WAS emitted but the args are unusable — say
+                        # WHY in the chat instead of silently drawing nothing
+                        # and letting Basilisk claim a card that isn't there.
+                        if "_raw" in call.args or not epath or econtent is None:
+                            if "_raw" in call.args:
+                                why = (
+                                    "the reply hit the per-turn time limit "
+                                    "part-way through the file, so the call "
+                                    "arrived unfinished (ask it to re-send "
+                                    "with less preamble)"
+                                    if self._last_stream_cut_by == "time"
+                                    else "the reply hit the response-token cap "
+                                    "part-way through the file, so the call "
+                                    "arrived unfinished (raise Max response "
+                                    "tokens in Settings, or have it write the "
+                                    "file in sections)"
+                                    if self._last_stream_truncated
+                                    else "the file contents couldn't be "
+                                         "parsed — most likely an unescaped "
+                                         "\" or a stray control character in "
+                                         "the JSON")
+                            elif not epath:
+                                why = "no target path was given"
+                            else:
+                                why = "no file content was given"
+                            self._append_card_warn(
+                                f"⚠ Basilisk tried to write a file but {why}, so no "
+                                f"diff card could be drawn and nothing was "
+                                f"written. Ask it to re-send the change.")
+                            break
+                        econtent = str(econtent)
+                        try:
+                            d = make_edit_diff(epath, econtent)
+                        except Exception:
+                            d = {"ok": False}
+                        try:
+                            self._blocks_container.append(ProposedEditWidget(
+                                epath, econtent,
+                                diff_lines=d.get("diff") if d.get("ok") else None,
+                                added=d.get("added", 0),
+                                removed=d.get("removed", 0),
+                                is_new=d.get("is_new", False),
+                                truncated=d.get("truncated", False),
+                                explanation=str(call.args.get("explanation", "")),
+                                on_apply=self._on_apply_edit))
+                            _rendered = True
+                        except Exception as e:
+                            log(f"edit card build failed: {e}")
+                            self._append_card_warn(
+                                f"⚠ Basilisk proposed an edit to {epath} but the "
+                                f"diff card failed to render ({e}). Nothing was "
+                                f"written.")
+                            break
+                    # One command at a time: only the first proposal becomes a
+                    # card.  Anything past it is ignored at render time.
+                    if _rendered:
+                        break
+            except Exception as e:
+                log(f"propose render failed: {e}")
+
+    def _append_card_warn(self, msg: str):
+        """Show a visible, in-chat diagnostic when a proposal/edit tag was
+        emitted but no card could be drawn.  Without this the failure is
+        silent and Basilisk looks like it's lying about a card that isn't there."""
+        if self._blocks_container is None:
+            return
+        try:
+            lbl = _make_wrap_label()
+            lbl.set_text(msg)
+            lbl.add_css_class("card-warn")
+            self._blocks_container.append(lbl)
+        except Exception as e:
+            log(f"card-warn render failed: {e}")
+
+    def set_speak_state(self, state: str):
+        """state: 'idle' | 'speaking' | 'paused'."""
+        self._speak_state = state
+        if not self.speak_btn:
+            return
+        if state == "speaking":
+            self.speak_btn.set_icon_name("media-playback-pause-symbolic")
+            self.speak_btn.set_tooltip_text("Pause")
+            self.speak_btn.add_css_class("speaking")
+        elif state == "paused":
+            self.speak_btn.set_icon_name("media-playback-start-symbolic")
+            self.speak_btn.set_tooltip_text("Resume")
+            self.speak_btn.add_css_class("speaking")
+        else:  # idle
+            self.speak_btn.set_icon_name("audio-volume-high-symbolic")
+            self.speak_btn.set_tooltip_text("Read this message aloud")
+            self.speak_btn.remove_css_class("speaking")
+
+    def start_streaming(self):
+        if getattr(self, "_disposed", False) or self._blocks_container is None:
+            return
+        child = self._blocks_container.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            self._blocks_container.remove(child)
+            child = nxt
+        self._streaming_label = _make_wrap_label()
+        # NOT selectable — see comment in set_content
+        self._streaming_label.set_text("")
+        self._blocks_container.append(self._streaming_label)
+        self._content = ""
+        # Force the first token of a new stream to paint immediately — a reply
+        # that opens with a pause reads as a hang.
+        self._last_stream_render = 0.0
+        self._stream_render_pending = False
+
+    def append_streaming(self, token: str):
+        if getattr(self, "_disposed", False):
+            return
+        if self._streaming_label is None:
+            self.start_streaming()
+        if self._streaming_label is None:      # disposed / no container
+            return
+        self._content += token
+        # RENDER IS COALESCED, AND THAT IS A COMPLEXITY FIX, NOT A COSMETIC ONE.
+        # Stripping is a function of the WHOLE buffer, so re-running it per
+        # token is O(n²) in the reply length no matter how fast the regexes
+        # are.  Measured on the shipped v9.6.0 with a single large write_file —
+        # the ordinary path for the workspace repair tools — that was 1.75s of
+        # GTK main-thread CPU at 66KB and 7.24s at 131KB, scaling ×4 per ×2.
+        # Redrawing on a ~50ms floor instead caps the number of full passes at
+        # ~20/second regardless of token rate, which no reader can tell apart
+        # from per-token and which no longer grows with the reply.
+        now = time.monotonic()
+        if now - self._last_stream_render >= _STREAM_RENDER_MIN_S:
+            self._render_stream()
+        elif not self._stream_render_pending:
+            # Trailing edge: the last token of a burst must still land, or the
+            # tail of a reply that ends mid-interval is never drawn.
+            self._stream_render_pending = True
+            GLib.timeout_add(_STREAM_RENDER_MIN_MS, self._flush_stream_render)
+
+    def _render_stream(self):
+        """Recompute the visible text from the whole buffer and paint it."""
+        if getattr(self, "_disposed", False) or self._streaming_label is None:
+            return
+        self._last_stream_render = time.monotonic()
+        # Hide both tool XML and any inline <think> reasoning from the live
+        # reply.  The reasoning (if any) gets captured at finish_streaming /
+        # set_content and shown in the collapsible thoughts panel.
+        # ONE transform, shared with the attach decision in _on_stream_token —
+        # see stream_visible_text's docstring. It is the finished-message chain
+        # plus the in-flight hold, so a half-arrived `<too` / `<invok` / `<|`
+        # is never painted and then deleted a frame later.
+        self._streaming_label.set_text(stream_visible_text(self._content))
+
+    def _flush_stream_render(self):
+        self._stream_render_pending = False
+        self._render_stream()
+        return False        # GLib.SOURCE_REMOVE — one shot
+
+    def canonical_content(self) -> str:
+        """Fold `_content` to the canonical tool syntax, in place, and return it.
+
+        ── THE BOUNDARY ──
+        A stream becomes "the message" at more than one place: it can FINISH,
+        it can be STOPPED by the operator, or it can ERROR mid-token.  All
+        three write `_content` into the store and into the history that is
+        re-sent to the model on every later turn — so all three must fold the
+        model's native dialect to the canonical form first.  Only the finish
+        path did.  A stopped or errored turn wrote raw `<｜DSML｜｜tool …>` into
+        the database, and strip_tool_calls' own docstring spells out the cost:
+        every later turn re-sent that garbage as history, wasting context and
+        teaching the model the broken format was acceptable.
+
+        Doing it here, on the attribute rather than on a caller's local, is what
+        makes `_content` canonical for EVERY later reader — renderer, store, and
+        the per-message speak button all read it directly.
+
+        _normalise_tool_syntax is idempotent (locked by tests/test_toolsyntax),
+        so calling this twice, or calling it after the caller already
+        normalised, is a no-op rather than a second opinion.
+        """
+        try:
+            self._content = _normalise_tool_syntax(self._content or "")
+        except Exception:
+            pass                      # keep the raw text over losing the reply
+        return self._content
+
+    def finish_streaming(self) -> str:
+        final = self.canonical_content()
+        self._streaming_label = None
+        if not getattr(self, "_disposed", False):
+            self.set_content(final)
+        return final
+
+    # ── thoughts (model reasoning) ─────────────────────────────────
+    def append_thought(self, token: str):
+        """Accumulate a reasoning token (from a reasoning_content stream)
+        and reveal/refresh the collapsed thoughts expander live."""
+        if not token or getattr(self, "_disposed", False):
+            return
+        self._thoughts += token
+        self._render_thoughts()
+
+    def get_thoughts(self) -> str:
+        return (self._thoughts or "").strip()
+
+    def _render_thoughts(self):
+        """Create (once) and update a collapsed 'Thoughts' expander holding
+        the model's reasoning.  No-op for non-assistant messages."""
+        text = (self._thoughts or "").strip()
+        if not text or self._thoughts_container is None or not self._show_thoughts:
+            return
+        if self._thoughts_label is None:
+            expander = Gtk.Expander(label="Thoughts")
+            expander.set_expanded(False)          # click to open
+            expander.add_css_class("thoughts-expander")
+            lbl = _make_wrap_label()
+            lbl.add_css_class("thoughts-text")
+            lbl.set_margin_top(4)
+            lbl.set_margin_start(6)
+            lbl.set_margin_bottom(4)
+            expander.set_child(lbl)
+            self._thoughts_container.append(expander)
+            self._thoughts_label = lbl
+        try:
+            self._thoughts_label.set_text(text)
+        except Exception:
+            pass
+
+
+# ═════════════════════════════════════════════════════════════════════
+# CHAT ROW
+# ═════════════════════════════════════════════════════════════════════
+
+class ChatRow(Gtk.ListBoxRow):
+    def __init__(self, chat: Chat):
+        super().__init__()
+        self.chat = chat
+        self.add_css_class("chat-row")
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+
+        title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        # MONOCHROME GLYPHS, NOT EMOJI — same rule the activity feed already
+        # follows. An emoji codepoint is rendered by the emoji face, which
+        # ignores the row's CSS colour AND its metrics: a pinned row came out
+        # with a full-colour sticker on it and sat a pixel taller than its
+        # neighbours. These two take the palette like everything else.
+        if chat.pinned:
+            pin = Gtk.Label(label="\u25c6")          # BLACK DIAMOND
+            pin.add_css_class("pin-icon")
+            title_row.append(pin)
+        if chat.agent_mode:
+            mode = Gtk.Label(label="\u25b8")         # BLACK RIGHT SMALL TRIANGLE
+            mode.add_css_class("pin-icon")
+            mode.add_css_class("agent-icon")
+            title_row.append(mode)
+
+        title = Gtk.Label(label=chat.title, xalign=0.0)
+        title.set_ellipsize(Pango.EllipsizeMode.END)
+        title.set_hexpand(True)
+        title.add_css_class("title-line")
+        title_row.append(title)
+        outer.append(title_row)
+
+        meta_lbl = Gtk.Label(label=self._format_meta(chat), xalign=0.0)
+        meta_lbl.add_css_class("meta-line")
+        meta_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        outer.append(meta_lbl)
+
+        self.set_child(outer)
+
+    @staticmethod
+    def _format_meta(chat: Chat) -> str:
+        try:
+            dt = datetime.datetime.fromtimestamp(chat.updated_at)
+            delta = datetime.datetime.now() - dt
+            if delta.days == 0:
+                stamp = dt.strftime("%H:%M")
+            elif delta.days == 1:
+                stamp = "yesterday"
+            elif delta.days < 7:
+                stamp = dt.strftime("%a")
+            else:
+                stamp = dt.strftime("%d %b")
+        except Exception:
+            stamp = ""
+        # Chat row shows just the time — the model isn't useful clutter here.
+        return stamp or ""
+
+
+# ═════════════════════════════════════════════════════════════════════
+# CONFIRM DIALOGS
+# ═════════════════════════════════════════════════════════════════════
+
+def confirm_command_dialog(parent: Gtk.Window, command: str, reason: str,
+                            on_decision: Callable[[bool, Optional[str]], None],
+                            catastrophic: bool = False):
+    """Confirm a shell command.  If it needs sudo, show an inline
+    password field so the operator can authenticate in one step.
+
+    on_decision(allow: bool, password: Optional[str]) — password is the
+    typed sudo password when the command needs sudo and the operator
+    approved; otherwise None.
+
+    catastrophic=True is the auto-run backstop: the command matched a
+    system-destroying pattern (disk wipe, fs nuke, recursive root delete).
+    The dialog shouts, defaults to Cancel, and is shown even in auto-run
+    mode so an irreversible mistake always stops for a human.
+    """
+    needs_sudo = command_needs_sudo(command)
+    if catastrophic:
+        title = "⚠ DESTRUCTIVE COMMAND — confirm to run"
+        subtitle = ("This command can irreversibly destroy data or this "
+                    "system (disk/filesystem wipe, recursive delete of a "
+                    "system path, or similar). It will NOT auto-run. Only "
+                    "continue if you typed it or fully understand it.\n\n"
+                    f"{reason}")
+    else:
+        title = "Run shell command?"
+        subtitle = (f"{reason}\n\nRuns as your user.  Output goes back to Basilisk."
+                    if not needs_sudo else
+                    f"{reason}\n\nThis needs root.  Enter your sudo password to "
+                    f"let it through — Basilisk never stores or sees it.")
+    dlg = Adw.AlertDialog.new(title, subtitle)
+    body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+    cmd_lbl = Gtk.Label(label=command, xalign=0.0)
+    cmd_lbl.set_wrap(True)
+    cmd_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+    cmd_lbl.set_selectable(True)
+    cmd_lbl.add_css_class("confirm-cmd")
+    body.append(cmd_lbl)
+
+    pw_entry: Optional[Gtk.PasswordEntry] = None
+    if needs_sudo:
+        pw_entry = Gtk.PasswordEntry()
+        pw_entry.set_show_peek_icon(True)
+        pw_entry.add_css_class("sudo-pass")
+        pw_entry.set_property("placeholder-text", "sudo password")
+        body.append(pw_entry)
+
+    dlg.set_extra_child(body)
+    dlg.add_response("cancel", "Cancel")
+    run_label = ("Run anyway" if catastrophic
+                 else "Run" if not needs_sudo else "Authenticate & run")
+    dlg.add_response("run", run_label)
+    if catastrophic:
+        # Red button, and default to Cancel so a reflexive Enter is safe.
+        dlg.set_response_appearance("run", Adw.ResponseAppearance.DESTRUCTIVE)
+        dlg.set_default_response("cancel")
+    else:
+        dlg.set_response_appearance("run", Adw.ResponseAppearance.SUGGESTED)
+        dlg.set_default_response("run")
+    dlg.set_close_response("cancel")
+
+    def _cb(_dlg, response):
+        allow = (response == "run")
+        pw = pw_entry.get_text() if (allow and pw_entry is not None) else None
+        on_decision(allow, pw)
+    dlg.connect("response", _cb)
+
+    # Pressing Enter in the password field activates the run response.
+    # (Not for catastrophic commands — there the default is Cancel.)
+    if pw_entry is not None and not catastrophic:
+        pw_entry.connect("activate", lambda *_: dlg.response("run"))
+
+    dlg.present(parent)
+    if pw_entry is not None:
+        pw_entry.grab_focus()
+
+
+def confirm_sensitive_read_dialog(parent: Gtk.Window, path: str,
+                                   on_decision: Callable[[bool], None]):
+    dlg = Adw.AlertDialog.new(
+        "Read sensitive file?",
+        f"Basilisk wants to read:\n\n{path}\n\nThis path is on the "
+        f"sensitive list (keys, secrets, system auth).",
+    )
+    dlg.add_response("cancel", "Deny")
+    dlg.add_response("read", "Allow")
+    dlg.set_response_appearance("read", Adw.ResponseAppearance.DESTRUCTIVE)
+    dlg.set_default_response("cancel")
+    dlg.set_close_response("cancel")
+
+    def _cb(_dlg, response):
+        on_decision(response == "read")
+    dlg.connect("response", _cb)
+    dlg.present(parent)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# SETTINGS DIALOG
+# ═════════════════════════════════════════════════════════════════════
+
+class SettingsDialog(Adw.PreferencesDialog):
+    def __init__(self, parent: "MainWindow"):
+        super().__init__()
+        self.win = parent
+        self.set_title("Settings")
+
+        # ── BACKENDS ───────────────────────────────────────
+        page = Adw.PreferencesPage()
+        page.set_title("Backends")
+        page.set_icon_name("network-server-symbolic")
+
+        # ── Provider routing (which cloud provider is active) ──
+        self._model_rows = {}   # provider_key -> (combo_row, [model_ids])
+
+        rg = Adw.PreferencesGroup()
+        rg.set_title("Provider routing")
+        rg.set_description(
+            "Pick which cloud provider Basilisk uses.  Set that provider's "
+            "API key and model in its section below.")
+
+        self.active_provider_row = Adw.ComboRow()
+        self.active_provider_row.set_title("Active provider")
+        prov_labels = [p.label for p in PROVIDERS]
+        self.active_provider_row.set_model(Gtk.StringList.new(prov_labels))
+        cur_key = parent.settings.get("active_provider", "siliconflow")
+        prov_keys = [p.key for p in PROVIDERS]
+        if cur_key in prov_keys:
+            self.active_provider_row.set_selected(prov_keys.index(cur_key))
+        self.active_provider_row.connect("notify::selected",
+                                         self._on_active_provider)
+        rg.add(self.active_provider_row)
+
+        # Research depth for LEASHED (question) turns. This had NO control at
+        # all: it was a hardcoded fallback of 18 that was not even in
+        # DEFAULT_SETTINGS, so the operator could neither see it nor raise it.
+        # Every load_tools, web_search, web_read and file read counts against
+        # it, so a genuinely deep question hit the cap while still mid-research
+        # and the answer arrived truncated. Exposed here because it is the one
+        # limit he is realistically going to want to move.
+        self.answer_budget_row = Adw.SpinRow.new_with_range(5, 200, 5)
+        self.answer_budget_row.set_title("Research depth (answer mode)")
+        self.answer_budget_row.set_subtitle(
+            "How many tool round-trips one QUESTION may take before Basilisk "
+            "stops looking and answers with what it has. A runaway backstop, "
+            "not a work budget — raise it for deep research.")
+        self.answer_budget_row.set_value(
+            float(parent.settings.get("answer_tool_budget", 40)))
+        self.answer_budget_row.connect(
+            "notify::value",
+            lambda r, *_a: self._set("answer_tool_budget",
+                                     int(r.get_value())))
+        rg.add(self.answer_budget_row)
+
+        # ── Reasoning depth: chosen HERE, before the chat starts ──
+        # This used to be a segmented pill sitting in the composer, changeable
+        # mid-conversation. That is not how a reasoning dial works: the
+        # thinking budget is part of how the whole conversation was produced,
+        # so flipping it at message nine gives you a transcript half of which
+        # was reasoned one way and half the other, and no way to tell which
+        # reply came from which. It now belongs to the chat: pick it before
+        # the first message, and it is fixed for that chat's lifetime. A new
+        # chat is how you change your mind.
+        self.effort_row = Adw.ComboRow()
+        self.effort_row.set_title("Reasoning depth")
+        self.effort_row.set_model(
+            Gtk.StringList.new(["Low \u00b7 fastest", "Medium",
+                                "High \u00b7 thinks hardest"]))
+        _lvls = list(_REASONING_EFFORT_LEVELS)
+        _cur = parent._effective_effort()
+        self.effort_row.set_selected(
+            _lvls.index(_cur) if _cur in _lvls else 0)
+        self.effort_row.connect(
+            "notify::selected",
+            lambda r, *_a: self._set_effort(_lvls[min(int(r.get_selected()),
+                                                      len(_lvls) - 1)]))
+        self._sync_effort_row(parent)
+        rg.add(self.effort_row)
+
+        self.adaptive_effort_row = Adw.SwitchRow()
+        self.adaptive_effort_row.set_title("Adaptive effort")
+        self.adaptive_effort_row.set_subtitle(
+            "Match model + token budget to the task: fast model for chat, the "
+            "heavier reasoning sibling once several tool-steps deep. Turn OFF to "
+            "keep every turn on the fast model — snappier for a benchmark grind.")
+        self.adaptive_effort_row.set_active(
+            bool(parent.settings.get("adaptive_effort", True)))
+        self.adaptive_effort_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("adaptive_effort", r.get_active()))
+        rg.add(self.adaptive_effort_row)
+
+        self.fast_light_row = Adw.SwitchRow()
+        self.fast_light_row.set_title("Skip thinking on light turns")
+        self.fast_light_row.set_subtitle(
+            "On short conversational turns, ask the model to answer without "
+            "chain-of-thought. Output tokens are generated one at a time, so "
+            "a few hundred thinking tokens on \"yeah, makes sense\" is pure "
+            "waiting \u2014 and output costs 2-3x input. Engagement work is "
+            "never touched. Needs Adaptive effort ON. If a model rejects it, "
+            "Basilisk retries without it and stops asking.")
+        self.fast_light_row.set_active(
+            bool(parent.settings.get("fast_light_turns", False)))
+        self.fast_light_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("fast_light_turns", r.get_active()))
+        rg.add(self.fast_light_row)
+
+        self.auto_fallback_row = Adw.SwitchRow()
+        self.auto_fallback_row.set_title("Auto-fallback on a bad reply")
+        self.auto_fallback_row.set_subtitle(
+            "If a reply comes back empty or repetitive, automatically retry on "
+            "the fallback provider for the next turn instead of just warning.")
+        self.auto_fallback_row.set_active(
+            bool(parent.settings.get("auto_fallback_on_degraded", False)))
+        self.auto_fallback_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("auto_fallback_on_degraded", r.get_active()))
+        rg.add(self.auto_fallback_row)
+
+        page.add(rg)
+
+        # ── Agent mode (moved here from above the chat) ──
+        ag = Adw.PreferencesGroup()
+        ag.set_title("Agent mode")
+        ag.set_description(
+            "Let Basilisk use system tools and run commands on its own. Off = a "
+            "plain conversational chat (it describes what it would run instead).")
+        self.agent_mode_row = Adw.SwitchRow()
+        self.agent_mode_row.set_title("Agent mode (system tools)")
+        self.agent_mode_row.set_active(bool(parent.current_agent_mode))
+        self.agent_mode_row.connect("notify::active", self._on_agent_mode_setting)
+        ag.add(self.agent_mode_row)
+        page.add(ag)
+
+        # ── One group per cloud provider: key + model picker ──
+        for spec in PROVIDERS:
+            self._build_provider_group(page, spec, parent)
+
+        self.add(page)
+
+        # ── GENERATION ─────────────────────────────────────
+        gen_page = Adw.PreferencesPage()
+        gen_page.set_title("Generation")
+        gen_page.set_icon_name("preferences-other-symbolic")
+
+        gen_g = Adw.PreferencesGroup()
+        gen_g.set_title("Parameters")
+
+        temp_row = Adw.SpinRow.new_with_range(0.0, 2.0, 0.05)
+        temp_row.set_title("Temperature")
+        temp_row.set_subtitle("Higher = more creative")
+        temp_row.set_value(parent.settings["temperature"])
+        temp_row.connect("notify::value", self._on_temp)
+        gen_g.add(temp_row)
+
+        max_row = Adw.SpinRow.new_with_range(256, 8192, 128)
+        max_row.set_title("Max response tokens")
+        max_row.set_value(parent.settings["max_tokens"])
+        max_row.connect("notify::value", self._on_max)
+        gen_g.add(max_row)
+
+        gen_page.add(gen_g)
+
+        # ── Intelligence & trust ──
+        intel_g = Adw.PreferencesGroup()
+        intel_g.set_title("Intelligence &amp; trust")
+        intel_g.set_description(
+            "Verification, reasoning, and context handling.")
+
+        self.headroom_row = Adw.SwitchRow()
+        self.headroom_row.set_title("Context compression")
+        self.headroom_row.set_subtitle(
+            "Crush bulky tool output before it reaches the model — saves "
+            "context and tokens on long sessions.")
+        self.headroom_row.set_active(
+            bool(parent.settings.get("headroom_enabled", True)))
+        self.headroom_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("headroom_enabled", r.get_active()))
+        intel_g.add(self.headroom_row)
+
+        self.lean_chat_row = Adw.SwitchRow()
+        self.lean_chat_row.set_title("Lean chat")
+        self.lean_chat_row.set_subtitle(
+            "Skip the tool list on plain conversational messages (a greeting, "
+            "thanks, an opinion) — big token save for just talking. The full "
+            "toolset returns the moment a message asks for an action.")
+        self.lean_chat_row.set_active(
+            bool(parent.settings.get("lean_chat", True)))
+        self.lean_chat_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("lean_chat", r.get_active()))
+        intel_g.add(self.lean_chat_row)
+
+        self.max_mode_row = Adw.SwitchRow()
+        self.max_mode_row.set_title("Max mode (full tool catalog)")
+        self.max_mode_row.set_subtitle(
+            "OFF (default): lean — a tiny tool directory plus load-on-demand, "
+            "~7k tokens lighter every turn. ON: ship every tool's full spec "
+            "inline every turn — maximum context for the model, far more tokens "
+            "(and money). Autonomous mode always stays lean regardless.")
+        self.max_mode_row.set_active(
+            bool(parent.settings.get("max_mode", False)))
+        self.max_mode_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("max_mode", r.get_active()))
+        intel_g.add(self.max_mode_row)
+
+        self.thoughts_row = Adw.SwitchRow()
+        self.thoughts_row.set_title("Show reasoning panel")
+        self.thoughts_row.set_subtitle(
+            "Add a click-to-open Thoughts panel on a reply when the model "
+            "exposes its reasoning.")
+        self.thoughts_row.set_active(
+            bool(parent.settings.get("show_thoughts", True)))
+        self.thoughts_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("show_thoughts", r.get_active()))
+        intel_g.add(self.thoughts_row)
+
+        gen_page.add(intel_g)
+
+        # ── Extensions (sidecar capabilities) ──
+        ext_g = Adw.PreferencesGroup()
+        ext_g.set_title("Extensions")
+        ext_g.set_description(
+            "Basilisk's sidecar capabilities. Memory, skills and foresight are on "
+            "by default. MCP stays off until you start it here.")
+
+        self.memory_row = Adw.SwitchRow()
+        self.memory_row.set_title("Memory")
+        self.memory_row.set_subtitle(
+            "Persistent cross-session recall of facts about you and your gear.")
+        self.memory_row.set_active(
+            bool(parent.settings.get("memory_enabled", True)))
+        self.memory_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("memory_enabled", r.get_active()))
+        ext_g.add(self.memory_row)
+
+        self.skills_row = Adw.SwitchRow()
+        self.skills_row.set_title("Skills")
+        self.skills_row.set_subtitle(
+            "Let Basilisk write and sandbox-test small reusable skills.")
+        self.skills_row.set_active(
+            bool(parent.settings.get("skills_enabled", True)))
+        self.skills_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("skills_enabled", r.get_active()))
+        ext_g.add(self.skills_row)
+
+        self.foresight_row = Adw.SwitchRow()
+        self.foresight_row.set_title("Foresight")
+        self.foresight_row.set_subtitle(
+            "Predict a command's consequences before running it. "
+            "Catastrophic commands are always blocked regardless.")
+        self.foresight_row.set_active(
+            bool(parent.settings.get("foresight_enabled", True)))
+        self.foresight_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("foresight_enabled", r.get_active()))
+        ext_g.add(self.foresight_row)
+
+        self.mem_consolidate_row = Adw.SwitchRow()
+        self.mem_consolidate_row.set_title("Consolidate memory")
+        self.mem_consolidate_row.set_subtitle(
+            "Let the model distil durable facts from a conversation into memory "
+            "(costs an extra call). Needs memory on.")
+        self.mem_consolidate_row.set_active(
+            bool(parent.settings.get("memory_consolidate", True)))
+        self.mem_consolidate_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("memory_consolidate", r.get_active()))
+        ext_g.add(self.mem_consolidate_row)
+
+        self.mem_semantic_row = Adw.SwitchRow()
+        self.mem_semantic_row.set_title("Semantic recall")
+        self.mem_semantic_row.set_subtitle(
+            "Recall memories by meaning, not just matching words, using "
+            "SiliconFlow embeddings. Needs a SiliconFlow key; falls back to "
+            "keyword recall without one.")
+        self.mem_semantic_row.set_active(
+            bool(parent.settings.get("memory_semantic", True)))
+        self.mem_semantic_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("memory_semantic", r.get_active()))
+        ext_g.add(self.mem_semantic_row)
+
+        self.foresight_model_row = Adw.SwitchRow()
+        self.foresight_model_row.set_title("Foresight: add a model pass")
+        self.foresight_model_row.set_subtitle(
+            "Add a model-based consequence check on top of the rule-based "
+            "foresight before acting. Needs foresight on.")
+        self.foresight_model_row.set_active(
+            bool(parent.settings.get("foresight_model", False)))
+        self.foresight_model_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("foresight_model", r.get_active()))
+        ext_g.add(self.foresight_model_row)
+
+        self.mcp_row = Adw.SwitchRow()
+        self.mcp_row.set_title("MCP (external tool servers)")
+        self.mcp_row.set_subtitle(
+            "Start the MCP servers configured below. Off by default — MCP runs "
+            "external subprocesses (an RCE surface), so only enable it for "
+            "servers you trust.")
+        self.mcp_row.set_active(bool(parent.settings.get("mcp_enabled", False)))
+        self.mcp_row.connect("notify::active", self._on_mcp_toggled)
+        ext_g.add(self.mcp_row)
+
+        self.mcp_servers_row = Adw.EntryRow()
+        self.mcp_servers_row.set_title("Add MCP server (command)")
+        self.mcp_servers_row.set_text("")
+        self.mcp_servers_row.set_show_apply_button(True)
+        self.mcp_servers_row.connect("apply", self._on_mcp_server_add)
+        ext_g.add(self.mcp_servers_row)
+
+        self.mcp_status_row = Adw.ActionRow()
+        self.mcp_status_row.set_title("MCP status")
+        self._refresh_mcp_status()
+        ext_g.add(self.mcp_status_row)
+
+        gen_page.add(ext_g)
+        self.add(gen_page)
+
+        # ── DISPLAY ────────────────────────────────────────
+        d_page = Adw.PreferencesPage()
+        d_page.set_title("Display")
+        d_page.set_icon_name("video-display-symbolic")
+
+        dg = Adw.PreferencesGroup()
+        dg.set_title("UI scale")
+        dg.set_description(
+            "Resize text, padding, and controls.  Changes apply live — "
+            "no restart needed.  Set to 0 for automatic detection based "
+            "on screen size.")
+
+        # Use a SpinRow over the full useful range.  0 is a sentinel
+        # meaning "let auto-detection pick" — clamped on the lower side
+        # so a slip of the finger doesn't make the UI invisible.
+        ui_scale_current = parent.settings.get("ui_scale", 0) or 0
+        scale_row = Adw.SpinRow.new_with_range(0.0, 2.0, 0.05)
+        scale_row.set_title("Scale factor")
+        scale_row.set_subtitle("1.0 = unmodified.  Higher = bigger.  0 = auto.")
+        scale_row.set_value(float(ui_scale_current))
+        scale_row.set_digits(2)
+        scale_row.connect("notify::value", self._on_ui_scale)
+        dg.add(scale_row)
+
+        # Reset button row
+        reset_row = Adw.ActionRow()
+        reset_row.set_title("Reset to auto-detect")
+        reset_row.set_subtitle("Sets scale back to 0 and re-runs detection.")
+        reset_btn = Gtk.Button(label="Reset")
+        reset_btn.set_valign(Gtk.Align.CENTER)
+        reset_btn.add_css_class("icon-button")
+        def _reset_scale(_b):
+            scale_row.set_value(0.0)
+        reset_btn.connect("clicked", _reset_scale)
+        reset_row.add_suffix(reset_btn)
+        dg.add(reset_row)
+
+        d_page.add(dg)
+
+        # Backdrop — brightness of the ember/castle image behind the chat.
+        bg_g = Adw.PreferencesGroup()
+        bg_g.set_title("Backdrop")
+        bg_g.set_description(
+            "How bright the background image behind the chat appears. "
+            "Changes apply live.")
+
+        self.brightness_row = Adw.SpinRow.new_with_range(0, 100, 5)
+        self.brightness_row.set_title("Background brightness")
+        self.brightness_row.set_subtitle(
+            "0 = darkest (heaviest dim), 100 = brightest (image shows "
+            "through most). 50 is the default.")
+        self.brightness_row.set_value(
+            float(parent.settings.get("backdrop_brightness", 50)))
+
+        def _on_brightness(row, *_a):
+            self._set("backdrop_brightness", int(row.get_value()))
+            # repaint the live scrim immediately
+            try:
+                self.win._apply_backdrop_brightness()
+            except Exception:
+                pass
+        self.brightness_row.connect("notify::value", _on_brightness)
+        bg_g.add(self.brightness_row)
+
+        # Reset backdrop brightness to the default.
+        b_reset = Adw.ActionRow()
+        b_reset.set_title("Reset brightness")
+        b_reset.set_subtitle("Back to the default (50).")
+        b_reset_btn = Gtk.Button(label="Reset")
+        b_reset_btn.set_valign(Gtk.Align.CENTER)
+        b_reset_btn.add_css_class("icon-button")
+        b_reset_btn.connect(
+            "clicked", lambda _b: self.brightness_row.set_value(50.0))
+        b_reset.add_suffix(b_reset_btn)
+        bg_g.add(b_reset)
+
+        d_page.add(bg_g)
+
+        # Interface
+        ui_g = Adw.PreferencesGroup()
+        ui_g.set_title("Interface")
+
+        self.provider_pill_row = Adw.SwitchRow()
+        self.provider_pill_row.set_title("Show provider pill")
+        self.provider_pill_row.set_subtitle(
+            "Show the active provider and model in the composer bar.")
+        self.provider_pill_row.set_active(
+            bool(parent.settings.get("show_provider_pill", True)))
+        self.provider_pill_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("show_provider_pill", r.get_active()))
+        ui_g.add(self.provider_pill_row)
+
+        self.token_count_row = Adw.SwitchRow()
+        self.token_count_row.set_title("Show token count")
+        self.token_count_row.set_subtitle(
+            "Show an approximate token count for the conversation.")
+        self.token_count_row.set_active(
+            bool(parent.settings.get("show_token_count", False)))
+        self.token_count_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("show_token_count", r.get_active()))
+        ui_g.add(self.token_count_row)
+
+        d_page.add(ui_g)
+
+        # Images & vision
+        iv_g = Adw.PreferencesGroup()
+        iv_g.set_title("Images &amp; vision")
+        iv_g.set_description(
+            "Show pictures in chat, and choose the model Basilisk uses to SEE "
+            "images (analyze_image).")
+
+        self.render_images_row = Adw.SwitchRow()
+        self.render_images_row.set_title("Show images in chat")
+        self.render_images_row.set_subtitle(
+            "Render image links as pictures.  Off = a tappable link instead "
+            "(no auto-download; better OPSEC).")
+        self.render_images_row.set_active(
+            bool(parent.settings.get("chat_render_images", True)))
+        self.render_images_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set_render_images(r.get_active()))
+        iv_g.add(self.render_images_row)
+
+        self.notif_sound_row = Adw.SwitchRow()
+        self.notif_sound_row.set_title("Notification sound")
+        self.notif_sound_row.set_subtitle(
+            "Play a chime when Basilisk raises a notification.")
+        self.notif_sound_row.set_active(
+            bool(parent.settings.get("notif_sound", True)))
+        self.notif_sound_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("notif_sound", r.get_active()))
+        iv_g.add(self.notif_sound_row)
+
+        _vp_labels = [p.label for p in PROVIDERS]
+        self._vp_keys = [p.key for p in PROVIDERS]
+        self.vision_provider_row = Adw.ComboRow()
+        self.vision_provider_row.set_title("Vision provider")
+        self.vision_provider_row.set_subtitle(
+            "Which provider hosts the vision model. Needs that provider's API "
+            "key — set it right below.")
+        self.vision_provider_row.set_model(Gtk.StringList.new(_vp_labels))
+        _cur_vp = parent.settings.get("vision_provider", "siliconflow")
+        if _cur_vp in self._vp_keys:
+            self.vision_provider_row.set_selected(self._vp_keys.index(_cur_vp))
+        self.vision_provider_row.connect(
+            "notify::selected", self._on_vision_provider)
+        iv_g.add(self.vision_provider_row)
+
+        # API key for the vision provider — the SAME key that provider uses for
+        # chat, surfaced here so vision can be set up in one place.  Editing it
+        # here updates it everywhere.
+        self.vision_key_row = Adw.PasswordEntryRow()
+        self.vision_key_row.set_title("API key")
+        self.vision_key_row.set_show_apply_button(True)
+        self.vision_key_row.connect(
+            "apply",
+            lambda r: self._on_provider_key(self._vision_prov_key(),
+                                            r.get_text().strip()))
+        iv_g.add(self.vision_key_row)
+
+        # Quick-pick of known vision models for the chosen provider.  Selecting
+        # one fills the free-text field below; that field stays authoritative so
+        # any current model id can still be typed (line-ups change).
+        self.vision_pick_row = Adw.ComboRow()
+        self.vision_pick_row.set_title("Pick a vision model")
+        self.vision_pick_row.connect("notify::selected", self._on_vision_pick)
+        iv_g.add(self.vision_pick_row)
+
+        self.vision_model_row = Adw.EntryRow()
+        self.vision_model_row.set_title("Vision model")
+        self.vision_model_row.set_text(
+            parent.settings.get("vision_model", "") or "")
+        self.vision_model_row.set_show_apply_button(True)
+        self.vision_model_row.connect(
+            "apply",
+            lambda r: self._set("vision_model", r.get_text().strip()))
+        iv_g.add(self.vision_model_row)
+
+        # fill the key field + quick-pick for whichever provider is selected
+        self._refresh_vision_widgets()
+
+        d_page.add(iv_g)
+        self.add(d_page)
+
+        # ── BEHAVIOUR ──────────────────────────────────────
+        b_page = Adw.PreferencesPage()
+        b_page.set_title("Behaviour")
+        b_page.set_icon_name("system-run-symbolic")
+
+        bg = Adw.PreferencesGroup()
+        bg.set_title("Agent mode")
+        self.agent_default_row = Adw.SwitchRow()
+        self.agent_default_row.set_title("Agent mode by default")
+        self.agent_default_row.set_active(parent.settings["agent_mode_default"])
+        self.agent_default_row.connect("notify::active", self._on_agent_default)
+        bg.add(self.agent_default_row)
+
+        self.autonomous_persist_row = Adw.SwitchRow()
+        self.autonomous_persist_row.set_title("Never stop until the task is done")
+        self.autonomous_persist_row.set_subtitle(
+            "Walk-away autonomy: the message you send is the objective, and "
+            "Basilisk keeps working it — through plain replies and through "
+            "errors — until it's genuinely finished or you press Stop. Nothing "
+            "else ends the run. (Agent mode only.)")
+        self.autonomous_persist_row.set_active(
+            bool(parent.settings.get("autonomous_persist", True)))
+        self.autonomous_persist_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("autonomous_persist", r.get_active()))
+        bg.add(self.autonomous_persist_row)
+        # Autonomous operation is the ONLY posture — there is no confirmation
+        # setting. Every command runs; a sudo password is collected once and
+        # cached; catastrophic commands are refused outright. A read-only info
+        # row makes that explicit (Adw.ActionRow with no switch).
+        _auto_info = Adw.ActionRow()
+        _auto_info.set_title("Autonomous operation")
+        _auto_info.set_subtitle(
+            "Basilisk runs every command with no approval prompts — turn it on a "
+            "task, walk away, come back to results. The only prompt is a one-time "
+            "sudo password (then cached, never shown). System-destroying commands "
+            "are refused outright. There is no confirm-every-command mode.")
+        bg.add(_auto_info)
+
+        self.one_cmd_row = Adw.SwitchRow()
+        self.one_cmd_row.set_title("One command at a time")
+        self.one_cmd_row.set_subtitle(
+            "Never propose or run more than one shell command per message. "
+            "Safer; leave on unless you want batched commands.")
+        self.one_cmd_row.set_active(
+            bool(parent.settings.get("one_command_at_a_time", True)))
+        self.one_cmd_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("one_command_at_a_time", r.get_active()))
+        bg.add(self.one_cmd_row)
+
+        self.urgency_row = Adw.SwitchRow()
+        self.urgency_row.set_title("Urgency fast-path")
+        self.urgency_row.set_subtitle(
+            "When your message reads as urgent, skip the preamble and act "
+            "immediately.")
+        self.urgency_row.set_active(
+            bool(parent.settings.get("urgency_fast_path", True)))
+        self.urgency_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("urgency_fast_path", r.get_active()))
+        bg.add(self.urgency_row)
+
+        self.auto_sudo_row = Adw.SwitchRow()
+        self.auto_sudo_row.set_title("Reuse cached sudo")
+        self.auto_sudo_row.set_subtitle(
+            "If you've already authenticated this session, use sudo silently "
+            "instead of prompting again. Your password is never stored or shown.")
+        self.auto_sudo_row.set_active(
+            bool(parent.settings.get("auto_sudo_when_cached", True)))
+        self.auto_sudo_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("auto_sudo_when_cached", r.get_active()))
+        bg.add(self.auto_sudo_row)
+
+        self.warn_dup_row = Adw.SwitchRow()
+        self.warn_dup_row.set_title("Warn on duplicate commands")
+        self.warn_dup_row.set_subtitle(
+            "Flag when the same command is about to run again within ~10 minutes.")
+        self.warn_dup_row.set_active(
+            bool(parent.settings.get("warn_duplicate_commands", False)))
+        self.warn_dup_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("warn_duplicate_commands", r.get_active()))
+        bg.add(self.warn_dup_row)
+
+        b_page.add(bg)
+
+        # Watcher
+        wg = Adw.PreferencesGroup()
+        wg.set_title("Watcher (background)")
+        wg.set_description(
+            "Periodically checks system state and surfaces notable events.")
+
+        self.watcher_row = Adw.SwitchRow()
+        self.watcher_row.set_title("Enable watcher")
+        self.watcher_row.set_active(parent.settings["watcher_enabled"])
+        self.watcher_row.connect("notify::active", self._on_watcher_enable)
+        wg.add(self.watcher_row)
+
+        self.w_updates_row = Adw.SwitchRow()
+        self.w_updates_row.set_title("Watch for security updates")
+        self.w_updates_row.set_active(parent.settings["watcher_check_updates"])
+        self.w_updates_row.connect("notify::active",
+                                    lambda r, _ps: self._set("watcher_check_updates",
+                                                              r.get_active()))
+        wg.add(self.w_updates_row)
+
+        self.w_dl_row = Adw.SwitchRow()
+        self.w_dl_row.set_title("Watch Downloads folder")
+        self.w_dl_row.set_active(parent.settings["watcher_check_downloads"])
+        self.w_dl_row.connect("notify::active",
+                               lambda r, _ps: self._set("watcher_check_downloads",
+                                                         r.get_active()))
+        wg.add(self.w_dl_row)
+
+        self.w_journal_row = Adw.SwitchRow()
+        self.w_journal_row.set_title("Watch system journal")
+        self.w_journal_row.set_subtitle("Surfaces failed logins, USB, OOM")
+        self.w_journal_row.set_active(parent.settings["watcher_check_journal"])
+        self.w_journal_row.connect("notify::active",
+                                    lambda r, _ps: self._set("watcher_check_journal",
+                                                              r.get_active()))
+        wg.add(self.w_journal_row)
+
+        interval = Adw.SpinRow.new_with_range(5, 360, 5)
+        interval.set_title("Check interval (minutes)")
+        interval.set_value(parent.settings["watcher_interval_minutes"])
+        interval.connect("notify::value",
+                          lambda r, *_: self._set("watcher_interval_minutes",
+                                                  int(r.get_value())))
+        wg.add(interval)
+
+        self.worker_row = Adw.SwitchRow()
+        self.worker_row.set_title("Background worker")
+        self.worker_row.set_subtitle(
+            "The headless systemd --user companion (installed by the installer) "
+            "polls on a cadence and posts notable events to the inbox even when "
+            "the app is closed. Off by default.")
+        self.worker_row.set_active(
+            bool(parent.settings.get("worker_enabled", False)))
+        self.worker_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("worker_enabled", r.get_active()))
+        wg.add(self.worker_row)
+
+        b_page.add(wg)
+
+        # History / retention
+        hg = Adw.PreferencesGroup()
+        hg.set_title("Chat history")
+        hg.set_description(
+            "Keep things ephemeral.  Pinned chats are always kept.")
+
+        self.fresh_chat_row = Adw.SwitchRow()
+        self.fresh_chat_row.set_title("Start a new chat each launch")
+        self.fresh_chat_row.set_active(
+            bool(parent.settings.get("ephemeral_new_chat_on_launch", True)))
+        self.fresh_chat_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("ephemeral_new_chat_on_launch",
+                                     r.get_active()))
+        hg.add(self.fresh_chat_row)
+
+        self.discard_empty_row = Adw.SwitchRow()
+        self.discard_empty_row.set_title("Discard empty chats")
+        self.discard_empty_row.set_subtitle(
+            "Bin unused 'New chat' placeholders on close.")
+        self.discard_empty_row.set_active(
+            bool(parent.settings.get("discard_empty_chats", True)))
+        self.discard_empty_row.connect(
+            "notify::active",
+            lambda r, _ps: self._set("discard_empty_chats", r.get_active()))
+        hg.add(self.discard_empty_row)
+
+        retain_row = Adw.SpinRow.new_with_range(0, 720, 1)
+        retain_row.set_title("Auto-delete chats after (hours)")
+        retain_row.set_subtitle("Idle chats older than this go.  0 = keep forever.")
+        retain_row.set_value(
+            float(parent.settings.get("chat_retention_hours", 24)))
+        retain_row.connect(
+            "notify::value",
+            lambda r, *_: self._set("chat_retention_hours",
+                                    int(r.get_value())))
+        hg.add(retain_row)
+        b_page.add(hg)
+        self.add(b_page)
+
+        # ── VOICE ──────────────────────────────────────────
+        v_page = Adw.PreferencesPage()
+        v_page.set_title("Voice")
+        v_page.set_icon_name("audio-input-microphone-symbolic")
+
+        tts = getattr(parent, "tts", None)
+        stt = getattr(parent, "stt", None)
+
+        # Output (read replies aloud)
+        og = Adw.PreferencesGroup()
+        og.set_title("Read replies aloud")
+        if tts is not None and tts.available():
+            og.set_description(f"Speech engine: {tts.engine_name()}.")
+        elif tts is not None:
+            og.set_description(
+                "No speech engine found.  Install espeak-ng (basic) or "
+                "Piper (neural) — see install.sh --voice.")
+        else:
+            og.set_description("Voice module unavailable.")
+
+        self.tts_enabled_row = Adw.SwitchRow()
+        self.tts_enabled_row.set_title("Read assistant replies aloud")
+        self.tts_enabled_row.set_active(bool(parent.settings.get("tts_enabled")))
+        self.tts_enabled_row.set_sensitive(tts is not None)
+        self.tts_enabled_row.connect("notify::active", self._on_tts_enable)
+        og.add(self.tts_enabled_row)
+
+        self.tts_engine_row = Adw.ComboRow()
+        self.tts_engine_row.set_title("Voice engine")
+        self.tts_engine_row.set_subtitle("Auto prefers Piper, falls back to espeak")
+        self._tts_engine_keys = ["auto", "piper", "espeak"]
+        self.tts_engine_row.set_model(Gtk.StringList.new(
+            ["Auto", "Piper (neural)", "espeak (robotic)"]))
+        cur_eng = (parent.settings.get("tts_engine") or "auto").lower()
+        if cur_eng in self._tts_engine_keys:
+            self.tts_engine_row.set_selected(self._tts_engine_keys.index(cur_eng))
+        self.tts_engine_row.connect("notify::selected", self._on_tts_engine)
+        og.add(self.tts_engine_row)
+
+        self.tts_monster_row = Adw.SwitchRow()
+        self.tts_monster_row.set_title("Monster voice")
+        self.tts_monster_row.set_subtitle(
+            "Deep growling monster instead of a plain voice.  Needs sox or "
+            "ffmpeg for the full pitch-down; install one if it sounds flat.")
+        self.tts_monster_row.set_active(
+            bool(parent.settings.get("tts_monster", True)))
+        # A preference, not an action — keep it settable whenever the voice
+        # module loaded, so you can turn it on and have it ready even before
+        # espeak/ffmpeg are installed (it applies the moment they are).
+        self.tts_monster_row.set_sensitive(tts is not None)
+        self.tts_monster_row.connect("notify::active", self._on_tts_monster)
+        og.add(self.tts_monster_row)
+
+        self.tts_depth_row = Adw.SpinRow.new_with_range(0.0, 8.0, 0.5)
+        self.tts_depth_row.set_title("Voice depth")
+        self.tts_depth_row.set_subtitle(
+            "Semitones the voice drops.  Higher = deeper and more monstrous.")
+        self.tts_depth_row.set_digits(1)
+        self.tts_depth_row.set_value(
+            float(parent.settings.get("tts_depth", 4.0) or 4.0))
+        self.tts_depth_row.set_sensitive(
+            tts is not None
+            and bool(parent.settings.get("tts_monster", True)))
+        self.tts_depth_row.connect(
+            "notify::value",
+            lambda r, *_: self._set("tts_depth", round(r.get_value(), 1)))
+        og.add(self.tts_depth_row)
+
+        rate_row = Adw.SpinRow.new_with_range(0.5, 2.0, 0.05)
+        rate_row.set_title("Speech rate")
+        rate_row.set_subtitle("1.0 = normal.  Lower = slower.")
+        rate_row.set_digits(2)
+        rate_row.set_value(float(parent.settings.get("tts_rate", 1.0) or 1.0))
+        rate_row.connect("notify::value",
+                         lambda r, *_: self._set("tts_rate",
+                                                 round(r.get_value(), 2)))
+        og.add(rate_row)
+
+        self.tts_voice_row = Adw.EntryRow()
+        self.tts_voice_row.set_title("Piper voice file (.onnx)")
+        self.tts_voice_row.set_text(parent.settings.get("tts_voice", "") or "")
+        self.tts_voice_row.set_show_apply_button(True)
+        self.tts_voice_row.connect("apply", self._on_tts_voice)
+        og.add(self.tts_voice_row)
+
+        test_row = Adw.ActionRow()
+        test_row.set_title("Test voice")
+        test_row.set_subtitle("Speak a short sample with the current settings.")
+        test_btn = Gtk.Button(label="▶ Test")
+        test_btn.set_valign(Gtk.Align.CENTER)
+        test_btn.add_css_class("icon-button")
+        test_btn.set_sensitive(tts is not None and tts.available())
+        test_btn.connect("clicked", self._on_tts_test)
+        test_row.add_suffix(test_btn)
+        og.add(test_row)
+        v_page.add(og)
+
+        # Input (speak instead of type)
+        ig = Adw.PreferencesGroup()
+        ig.set_title("Speak instead of type")
+        if stt is not None and stt.recorder_available():
+            ig.set_description(
+                f"Mic recorder: {stt.recorder_name()}.  Transcribed by "
+                "SiliconFlow (SenseVoiceSmall) or Groq (Whisper) — whichever "
+                "key you have.")
+        elif stt is not None:
+            ig.set_description(
+                "No microphone recorder found.  Install pulseaudio-utils "
+                "(parecord) or alsa-utils (arecord).")
+        else:
+            ig.set_description("Voice module unavailable.")
+
+        self.autosend_row = Adw.SwitchRow()
+        self.autosend_row.set_title("Auto-send after transcription")
+        self.autosend_row.set_subtitle(
+            "Off = drop the text in the box so you can edit before sending.")
+        self.autosend_row.set_active(bool(parent.settings.get("voice_autosend", True)))
+        self.autosend_row.set_sensitive(stt is not None and stt.recorder_available())
+        self.autosend_row.connect("notify::active",
+                                  lambda r, _ps: self._set("voice_autosend",
+                                                           r.get_active()))
+        ig.add(self.autosend_row)
+
+        self.stt_provider_row = Adw.ComboRow()
+        self.stt_provider_row.set_title("Transcription provider")
+        self.stt_provider_row.set_subtitle(
+            "Auto uses your active chat provider when it can transcribe.")
+        self._stt_provider_keys = ["auto", "siliconflow", "groq"]
+        self.stt_provider_row.set_model(Gtk.StringList.new(
+            ["Auto", "SiliconFlow (SenseVoiceSmall)", "Groq (Whisper)"]))
+        cur_sp = (parent.settings.get("stt_provider") or "auto").lower()
+        if cur_sp in self._stt_provider_keys:
+            self.stt_provider_row.set_selected(
+                self._stt_provider_keys.index(cur_sp))
+        self.stt_provider_row.set_sensitive(
+            stt is not None and stt.recorder_available())
+        self.stt_provider_row.connect(
+            "notify::selected",
+            lambda r, *_: self._set(
+                "stt_provider",
+                self._stt_provider_keys[r.get_selected()]))
+        ig.add(self.stt_provider_row)
+
+        # Groq is no longer a CHAT provider, so it no longer gets an API-key row
+        # from _build_provider_group. But it is still the Whisper transcription
+        # backend, and the picker above still offers it — which left the option
+        # selectable with nowhere to put the key. Give it its own field here,
+        # beside the setting that actually uses it.
+        self.stt_key_row = Adw.PasswordEntryRow()
+        self.stt_key_row.set_title("Groq API key (Whisper only)")
+        self.stt_key_row.set_text(parent.settings.get("groq_api_key", ""))
+        self.stt_key_row.connect(
+            "changed",
+            lambda r: self._set("groq_api_key", r.get_text().strip()))
+        ig.add(self.stt_key_row)
+
+        self.stt_key_hint = Adw.ActionRow()
+        self.stt_key_hint.set_title("Get a Groq key")
+        self.stt_key_hint.set_subtitle(
+            "console.groq.com/keys — free. Used ONLY for speech-to-text; "
+            "Basilisk does not chat through Groq.")
+        _stt_link = Gtk.Button(label="Open")
+        _stt_link.set_valign(Gtk.Align.CENTER)
+        _stt_link.connect(
+            "clicked",
+            lambda *_a: tool_open_url("https://console.groq.com/keys"))
+        self.stt_key_hint.add_suffix(_stt_link)
+        ig.add(self.stt_key_hint)
+
+        self.stt_model_row = Adw.EntryRow()
+        self.stt_model_row.set_title("Groq Whisper model")
+        self.stt_model_row.set_text(
+            parent.settings.get("stt_model", "whisper-large-v3-turbo"))
+        self.stt_model_row.set_show_apply_button(True)
+        self.stt_model_row.connect("apply",
+                                   lambda r: self._set("stt_model",
+                                                       r.get_text().strip()
+                                                       or "whisper-large-v3-turbo"))
+        ig.add(self.stt_model_row)
+
+        self.stt_lang_row = Adw.EntryRow()
+        self.stt_lang_row.set_title("Language hint (optional)")
+        self.stt_lang_row.set_text(parent.settings.get("stt_language", "") or "")
+        self.stt_lang_row.set_show_apply_button(True)
+        self.stt_lang_row.connect("apply",
+                                  lambda r: self._set("stt_language",
+                                                      r.get_text().strip()))
+        ig.add(self.stt_lang_row)
+
+        stt_test_row = Adw.ActionRow()
+        stt_test_row.set_title("Test microphone")
+        stt_test_row.set_subtitle(
+            "Records ~4s, transcribes, shows the exact result or error.")
+        self.stt_test_btn = Gtk.Button(label="● Record 4s")
+        self.stt_test_btn.set_valign(Gtk.Align.CENTER)
+        self.stt_test_btn.add_css_class("icon-button")
+        self.stt_test_btn.set_sensitive(
+            stt is not None and stt.recorder_available())
+        self.stt_test_btn.connect("clicked", self._on_stt_test)
+        stt_test_row.add_suffix(self.stt_test_btn)
+        ig.add(stt_test_row)
+        v_page.add(ig)
+        self.add(v_page)
+
+        # ── SYSTEM PROMPT ──────────────────────────────────
+        sp_page = Adw.PreferencesPage()
+        sp_page.set_title("Persona")
+        sp_page.set_icon_name("emblem-favorite-symbolic")
+
+        sp_g = Adw.PreferencesGroup()
+        sp_g.set_title("Custom addendum to system prompt")
+        sp_g.set_description(
+            "Appended to Basilisk's built-in persona.  "
+            "Edit basilisk_persona.py for deeper changes.")
+
+        sp_card = Gtk.Frame()
+        sp_card.set_margin_top(8)
+        sp_card.set_margin_bottom(8)
+        sp_sw = Gtk.ScrolledWindow()
+        sp_sw.set_min_content_height(_scaled(200, floor=140))
+        sp_sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        self.sp_view = Gtk.TextView()
+        self.sp_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.sp_view.set_top_margin(8)
+        self.sp_view.set_bottom_margin(8)
+        self.sp_view.set_left_margin(8)
+        self.sp_view.set_right_margin(8)
+        self.sp_view.get_buffer().set_text(parent.settings.get("system_prompt", ""))
+        self.sp_view.get_buffer().connect("changed", self._on_sp_changed)
+        sp_sw.set_child(self.sp_view)
+        sp_card.set_child(sp_sw)
+        sp_g.add(sp_card)
+        sp_page.add(sp_g)
+        self.add(sp_page)
+
+    # ── helpers ────────────────────────────────────────────
+
+    def _build_provider_group(self, page, spec, parent):
+        """Build a Settings group for one cloud provider: API key entry,
+        a model picker (curated big-first list, refreshable from the live
+        catalogue), and a 'get a key' link."""
+        g = Adw.PreferencesGroup()
+        g.set_title(spec.label)
+        g.set_description(spec.blurb)
+
+        # API key
+        key_row = Adw.PasswordEntryRow()
+        key_row.set_title("API key")
+        key_row.set_text(parent.settings.get(f"{spec.key}_api_key", ""))
+        key_row.connect(
+            "changed",
+            lambda row, k=spec.key: self._on_provider_key(k, row.get_text()))
+        g.add(key_row)
+
+        # Model picker.  The visible strings carry context + price so the
+        # choice is informed, which means the display text is NOT the model
+        # id — `self._model_rows` keeps the parallel id list and the handler
+        # indexes into that.  (The old code read the id back out of the
+        # widget label, so any label change would have silently written a
+        # bogus model into settings.)
+        model_row = Adw.ComboRow()
+        model_row.set_title("Model")
+        model_row.set_subtitle("Best first. Use \u27f3 to fetch the live list.")
+        ids = list(spec.pick_ids)
+        saved = parent.settings.get(f"{spec.key}_model", spec.default_model)
+        if saved and saved not in ids:
+            ids.insert(0, saved)   # keep a custom/old selection visible
+        self._populate_model_row(spec.key, model_row, ids, saved)
+        model_row.connect(
+            "notify::selected",
+            lambda row, _ps, k=spec.key: self._on_provider_model(k, row))
+
+        # Refresh-from-API button lives as a suffix on the model row
+        refresh_btn = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
+        refresh_btn.set_valign(Gtk.Align.CENTER)
+        refresh_btn.add_css_class("flat")
+        refresh_btn.set_tooltip_text("Fetch available models from the API")
+        refresh_btn.connect(
+            "clicked",
+            lambda _b, k=spec.key: self._fetch_live_models(k))
+        model_row.add_suffix(refresh_btn)
+        g.add(model_row)
+
+        # Get-a-key link
+        link_row = Adw.ActionRow()
+        link_row.set_title("Get an API key")
+        link_btn = Gtk.LinkButton.new_with_label(spec.key_url, "Open")
+        link_btn.set_valign(Gtk.Align.CENTER)
+        link_row.add_suffix(link_btn)
+        g.add(link_row)
+
+        page.add(g)
+
+    def _set(self, key, value):
+        self.win.settings[key] = value
+        save_settings(self.win.settings)
+
+    # ── Reasoning depth is a per-chat, start-of-chat decision ──
+    def _set_effort(self, level):
+        if self.win._effort_locked():
+            # Belt and braces: the row is insensitive, but a combo can still
+            # be driven from code, and silently accepting the change would
+            # mean the transcript no longer matches the dial it shows.
+            self._sync_effort_row(self.win)
+            return
+        self._set("reasoning_effort", level)
+
+    def _sync_effort_row(self, parent):
+        """Show the depth the CURRENT chat is running at, and lock the row
+        once that chat has started."""
+        row = getattr(self, "effort_row", None)
+        if row is None:
+            return
+        model_has_dial = supports_reasoning_effort(parent._active_model_id())
+        row.set_visible(model_has_dial)
+        if not model_has_dial:
+            return
+        locked = parent._effort_locked()
+        row.set_sensitive(not locked)
+        if locked:
+            row.set_subtitle(
+                "Locked for this chat \u2014 it was set to "
+                f"{parent._effective_effort().upper()} when the conversation "
+                "started. Start a new chat to choose a different depth.")
+        else:
+            row.set_subtitle(
+                "How hard the model thinks on every turn of this chat. Fixed "
+                "as soon as you send the first message \u2014 start a new chat "
+                "to change it.")
+
+    def _on_agent_mode_setting(self, row, _ps):
+        # Drive the (now-hidden) toolbar toggle so every existing agent-mode side
+        # effect fires — per-chat persistence, subtitle, and the internal state.
+        want = row.get_active()
+        tog = getattr(self.win, "agent_toggle", None)
+        if tog is not None and tog.get_active() != want:
+            tog.set_active(want)          # fires _on_agent_toggled
+        else:
+            self.win.current_agent_mode = want
+
+    def _set_render_images(self, on):
+        # Persist and apply live so the chat renderer picks it up immediately.
+        self._set("chat_render_images", on)
+        global _RENDER_IMAGES
+        _RENDER_IMAGES = bool(on)
+
+    def _ext(self):
+        return getattr(self.win, "_ext", None)
+
+    def _refresh_mcp_status(self):
+        row = getattr(self, "mcp_status_row", None)
+        if row is None:
+            return
+        ext = self._ext()
+        if ext is None:
+            row.set_subtitle("extensions not loaded")
+            return
+        try:
+            st = ext.mcp_status()
+            if st.get("running"):
+                row.set_subtitle(
+                    f"running — {st.get('tools', 0)} tools from "
+                    f"{st.get('configured_servers', 0)} server(s)")
+            else:
+                row.set_subtitle(
+                    f"stopped — {st.get('configured_servers', 0)} "
+                    f"server(s) configured")
+        except Exception:
+            row.set_subtitle("status unavailable")
+
+    def _on_mcp_toggled(self, row, _ps):
+        on = row.get_active()
+        if getattr(self, "_mcp_toggling", False):
+            return
+        self._set("mcp_enabled", on)
+        ext = self._ext()
+        if ext is None:
+            self.win._show_toast("Extensions not loaded — MCP unavailable")
+            return
+        try:
+            res = ext.set_mcp_enabled(on)
+        except Exception as e:
+            res = {"ok": False, "error": str(e)}
+        if res.get("ok"):
+            self.win._show_toast(
+                f"MCP started — {res.get('tools', 0)} tools" if on
+                else "MCP stopped")
+        else:
+            self.win._show_toast(f"MCP: {res.get('error', 'failed to start')}")
+            if on:                       # revert the switch without recursing
+                self._mcp_toggling = True
+                row.set_active(False)
+                self._mcp_toggling = False
+                self._set("mcp_enabled", False)
+        self._refresh_mcp_status()
+
+    def _on_mcp_server_add(self, row):
+        raw = (row.get_text() or "").strip()
+        if not raw:
+            return
+        # Parse "command arg1 arg2" into {name, command, args}.
+        parts = raw.split()
+        cmd = parts[0]
+        args = parts[1:]
+        name = os.path.basename(cmd).split(".")[0] or "server"
+        servers = list(self.win.settings.get("mcp_servers") or [])
+        if any(s.get("name") == name for s in servers):
+            name = f"{name}-{len(servers) + 1}"
+        servers.append({"name": name, "command": cmd, "args": args})
+        self._set("mcp_servers", servers)
+        row.set_text("")
+        self.win._show_toast(
+            f"Added MCP server '{name}'. Toggle MCP off/on to (re)start.")
+        self._refresh_mcp_status()
+
+    def _on_provider_key(self, key, text):
+        self.win.settings[f"{key}_api_key"] = text
+        save_settings(self.win.settings)
+        backend = self.win.cloud.get(key)
+        if backend is not None and hasattr(backend, "set_api_key"):
+            backend.set_api_key(text)
+        self.win.update_status_pills()
+        # a key change may unlock/lock the vision key field mirror
+        if getattr(self, "vision_key_row", None) is not None:
+            self._refresh_vision_widgets()
+
+    def _vision_prov_key(self):
+        """Provider key currently selected in the Vision provider row."""
+        i = self.vision_provider_row.get_selected()
+        return (self._vp_keys[i] if 0 <= i < len(self._vp_keys)
+                else "siliconflow")
+
+    def _on_vision_provider(self, row, _ps):
+        self._set("vision_provider", self._vision_prov_key())
+        self._refresh_vision_widgets()
+
+    def _refresh_vision_widgets(self):
+        """Sync the vision API-key field and the model quick-pick to whichever
+        vision provider is selected.  Guarded so programmatic updates here don't
+        re-fire the pick handler and clobber the saved model."""
+        self._vision_refreshing = True
+        try:
+            pk = self._vision_prov_key()
+            label = (PROVIDERS_BY_KEY[pk].label
+                     if pk in PROVIDERS_BY_KEY else pk)
+            self.vision_key_row.set_title(f"{label} API key")
+            self.vision_key_row.set_text(
+                self.win.settings.get(f"{pk}_api_key", "") or "")
+            models = list(VISION_MODELS.get(pk, []))
+            self._vision_pick_models = models
+            self.vision_pick_row.set_model(
+                Gtk.StringList.new(models + ["Custom (type below)"]))
+            cur = (self.win.settings.get("vision_model", "") or "").strip()
+            self.vision_pick_row.set_selected(
+                models.index(cur) if cur in models else len(models))
+        finally:
+            self._vision_refreshing = False
+
+    def _on_vision_pick(self, row, _ps):
+        if getattr(self, "_vision_refreshing", False):
+            return
+        i = row.get_selected()
+        models = getattr(self, "_vision_pick_models", [])
+        if 0 <= i < len(models):
+            self.vision_model_row.set_text(models[i])
+            self._set("vision_model", models[i])
+
+    def _model_row_text(self, spec, model_id):
+        """One combo line: name, then the numbers that decide the pick."""
+        info = spec.info(model_id) if hasattr(spec, "info") else None
+        short = (info.label if info is not None
+                 else (model_id.split("/")[-1] if "/" in model_id
+                       else model_id))
+        detail = self.win._model_detail(spec, model_id)
+        return f"{short}   \u2014   {detail}" if detail else short
+
+    def _populate_model_row(self, key, model_row, ids, saved):
+        """Fill a provider's model ComboRow and restore the saved selection.
+
+        GUARDED.  Gtk.ComboRow.set_model() resets `selected` to 0 and emits
+        notify::selected, so repopulating fired _on_provider_model with
+        whatever happened to be first and wrote it to disk -- a spurious
+        settings write on every Settings open, and a window where the wrong
+        model was persisted during a live refresh.  The vision picker
+        already had this guard; the provider picker did not.
+        """
+        spec = PROVIDERS_BY_KEY.get(key)
+        self._model_rows_refreshing = True
+        try:
+            model_row.set_model(Gtk.StringList.new(
+                [self._model_row_text(spec, i) for i in ids] if spec
+                else list(ids)))
+            if saved in ids:
+                model_row.set_selected(ids.index(saved))
+        finally:
+            self._model_rows_refreshing = False
+        self._model_rows[key] = (model_row, ids)
+
+    def _on_provider_model(self, key, row):
+        if getattr(self, "_model_rows_refreshing", False):
+            return
+        entry = self._model_rows.get(key)
+        if not entry:
+            return
+        _row, ids = entry
+        idx = row.get_selected()
+        if 0 <= idx < len(ids):
+            model_id = ids[idx]
+            if model_id:
+                self.win.settings[f"{key}_model"] = model_id
+                save_settings(self.win.settings)
+                self.win._update_model_button()
+
+    def _on_active_provider(self, row, _ps):
+        idx = row.get_selected()
+        keys = [p.key for p in PROVIDERS]
+        if 0 <= idx < len(keys):
+            self.win.settings["active_provider"] = keys[idx]
+            save_settings(self.win.settings)
+            self.win.update_status_pills()
+
+    def _fetch_live_models(self, key):
+        """Query the provider's live /models catalogue on a background
+        thread and repopulate its picker.  Falls back silently to the
+        curated chain on any failure."""
+        backend = self.win.cloud.get(key)
+        if backend is None or not hasattr(backend, "list_models_live"):
+            self.win._show_toast("This provider has no live model list.")
+            return
+        spec = PROVIDERS_BY_KEY.get(key)
+        self.win._show_toast(f"Fetching {spec.label if spec else key} models…")
+
+        def _bg():
+            ids = backend.list_models_live()
+            GLib.idle_add(lambda: self._apply_live_models(key, ids) or False)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _apply_live_models(self, key, ids):
+        entry = self._model_rows.get(key)
+        if not entry:
+            return
+        model_row, _old = entry
+        if not ids:
+            self.win._show_toast("No models returned — keeping defaults.")
+            return
+        # Keep the currently-saved model visible even if the live list
+        # omits it (some catalogues page or filter).
+        saved = self.win.settings.get(f"{key}_model", "")
+        names = list(ids)
+        if saved and saved not in names:
+            names.insert(0, saved)
+        self._populate_model_row(key, model_row, names, saved)
+        spec = PROVIDERS_BY_KEY.get(key)
+        self.win._show_toast(
+            f"{spec.label if spec else key}: {len(ids)} chat models loaded.")
+
+    def _on_temp(self, row, *args):
+        self._set("temperature", float(row.get_value()))
+
+    def _on_max(self, row, *args):
+        self._set("max_tokens", int(row.get_value()))
+
+    def _on_ui_scale(self, row, *args):
+        # Persist as float.  Then trigger a LIVE CSS reload so the
+        # change is visible immediately — no app restart needed.
+        # Debounce the reload by 200ms so rapid scrolling doesn't
+        # spam the CSS provider.
+        value = float(row.get_value())
+        self._set("ui_scale", value)
+
+        if hasattr(self, "_ui_scale_timeout") and self._ui_scale_timeout:
+            try:
+                GLib.source_remove(self._ui_scale_timeout)
+            except Exception:
+                pass
+            self._ui_scale_timeout = None
+
+        def _do_reload():
+            try:
+                self.win.app.reload_css(value)
+            except Exception as e:
+                log(f"ui_scale live reload failed: {e}")
+            self._ui_scale_timeout = None
+            return False
+
+        self._ui_scale_timeout = GLib.timeout_add(200, _do_reload)
+
+    def _on_agent_default(self, row, _ps):
+        self._set("agent_mode_default", row.get_active())
+
+    def _on_watcher_enable(self, row, _ps):
+        self._set("watcher_enabled", row.get_active())
+        if row.get_active():
+            self.win.watcher.start()
+        else:
+            self.win.watcher.stop()
+
+    def _on_sp_changed(self, buf):
+        text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
+        self._set("system_prompt", text)
+
+    # ── voice handlers ──
+    def _on_tts_enable(self, row, _ps):
+        on = row.get_active()
+        self._set("tts_enabled", on)
+        # Keep the toolbar speaker toggle in sync if it exists.
+        tb = getattr(self.win, "tts_toggle", None)
+        if tb is not None and tb.get_active() != on:
+            tb.set_active(on)
+
+    def _on_tts_monster(self, row, _ps):
+        on = row.get_active()
+        self._set("tts_monster", on)
+        # Depth only matters when the monster voice is on — grey it out otherwise.
+        dr = getattr(self, "tts_depth_row", None)
+        if dr is not None:
+            dr.set_sensitive(on)
+        if not on and getattr(self.win, "tts", None):
+            self.win.tts.stop()
+
+    def _on_tts_engine(self, row, _ps):
+        idx = row.get_selected()
+        key = self._tts_engine_keys[idx] if 0 <= idx < len(self._tts_engine_keys) else "auto"
+        self._set("tts_engine", key)
+        tts = getattr(self.win, "tts", None)
+        if tts is not None:
+            tts.reconfigure()
+            avail = tts.available()
+            self.tts_enabled_row.set_sensitive(avail)
+            if avail:
+                self.win._show_toast(f"Voice engine: {tts.engine_name()}")
+            else:
+                self.win._show_toast("That engine isn't available on this box.")
+
+    def _on_tts_voice(self, row):
+        self._set("tts_voice", row.get_text().strip())
+        tts = getattr(self.win, "tts", None)
+        if tts is not None:
+            tts.reconfigure()
+            self.tts_enabled_row.set_sensitive(tts.available())
+            self.win._show_toast(f"Voice engine: {tts.engine_name()}")
+
+    def _on_tts_test(self, _btn):
+        tts = getattr(self.win, "tts", None)
+        if tts is None or not tts.available():
+            self.win._show_toast("No voice engine available.")
+            return
+        tts.stop()
+        tts.speak_all("Voice check. Basilisk is online and ready.")
+
+    def _on_stt_test(self, _btn):
+        stt = getattr(self.win, "stt", None)
+        if stt is None or not stt.recorder_available():
+            self.win._show_toast("No microphone recorder available.")
+            return
+        reason = stt.unavailable_reason()
+        if reason:
+            self.win._show_toast(reason, timeout=6)
+            return
+        self.stt_test_btn.set_sensitive(False)
+        self.stt_test_btn.set_label("● Listening 4s…")
+        self.win._show_toast("Listening for 4 seconds — say something.", timeout=4)
+
+        def _bg():
+            text, err = stt.test_capture(4.0)
+
+            def _show():
+                self.stt_test_btn.set_sensitive(True)
+                self.stt_test_btn.set_label("● Record 4s")
+                if err:
+                    self.win._show_toast(f"Mic test failed: {err}", timeout=8)
+                    self.win.terminal_log(f"mic test FAILED: {err}", "error")
+                elif text:
+                    self.win._show_toast(f"Heard: “{text}”", timeout=8)
+                    self.win.terminal_log(f"mic test OK: {text}", "ok")
+                else:
+                    self.win._show_toast(
+                        "Recorded but transcript was empty — likely silence "
+                        "or wrong input source.", timeout=8)
+                    self.win.terminal_log("mic test: empty transcript", "error")
+                return False
+            GLib.idle_add(_show)
+        threading.Thread(target=_bg, daemon=True).start()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# MAIN WINDOW
+# ═════════════════════════════════════════════════════════════════════
+
+class MainWindow(Adw.ApplicationWindow):
+
+    # ── PER-TURN STREAM STATE, DECLARED ON THE CLASS ON PURPOSE ──────
+    # These are read on paths that can run before __init__ has set them (and
+    # by the test harnesses, which build the window with __new__). Declaring
+    # them here rather than reading them with getattr(..., default) makes the
+    # default a REAL attribute lookup: a base class with a catch-all
+    # __getattr__ — which the GTK test stub has — hands back a TRUTHY object
+    # for any missing name, so a flag whose entire job is to be false would
+    # arm its recovery path on every single turn. Caught by
+    # tests/test_turn_directives.py the first time it happened.
+    _recover_silent_reasoner: bool = False   # last turn reasoned, said nothing
+    # One-shot: the model id to run for the NEXT turn only, overriding the
+    # operator's selected model. Set by the degraded/empty branch to WALK to
+    # the next model in the provider's own chain (V4.1-Flash -> V4-Flash ->
+    # GLM) when the selected model keeps returning empty — a same-model retry
+    # cannot fix a model that deterministically returns nothing on this
+    # endpoint. Consumed and cleared in _start_stream, so it never persists
+    # past the one retry and never edits the operator's saved choice. Declared
+    # here for the catch-all-__getattr__ reason above.
+    _next_model_override: str = ""
+    _degraded_escalated_to: str = ""         # what we escalated to, for the log
+    _last_stream_cut_by: str = ""            # "" | "length" | "time"
+    _last_stream_truncated: bool = False
+    _forged_retries: int = 0                 # forged-tool-result corrections
+    _fabricated_this_turn: int = 0
+    # True while a LEASHED turn is doing WORK (edit/run/iterate) rather than
+    # answering a question. Set once per round-trip where the addendum is
+    # built; read by the stall-nudge path, which has to say something
+    # different to a model that stalled mid-job than to one that stalled
+    # mid-answer. Declared here for the same catch-all-__getattr__ reason as
+    # the flags above.
+    _leash_work_turn: bool = False
+    # Names of the tools that have actually run during THIS request, plus the
+    # counters for the end-of-turn promise gate. Same class-attribute reason
+    # as the flags above: the GTK test stub's catch-all __getattr__ makes a
+    # getattr default truthy, and a gate that must be able to read "nothing
+    # ran" cannot be built on that.
+    _tools_used_this_request: set = frozenset()
+    _promise_pushes: int = 0
+    _forced_fetch_done: bool = False
+    _forced_followthrough: int = 0     # top-result reads forced this request
+    _last_web_result: str = ""         # most recent web tool output, for it
+    _forced_verify_done: bool = False
+
+    def __init__(self, app: "BasiliskApp"):
+        super().__init__(application=app)
+        self.set_title(APP_NAME)
+        w, h = _default_window_size()
+        self.set_default_size(w, h)
+        # libadwaita warns once per layout pass that an AdwApplicationWindow
+        # "does not have a minimum size" — 25 times in a 16-state sweep — and
+        # without one the adaptive machinery has nothing to break against, so
+        # a narrow window can squeeze children past their own minimums (which
+        # is how widgets end up overlapping).
+        #
+        # ── BUT THE NUMBER HAS TO BE TRUE ──
+        # It was 360, chosen as "the narrowest screen this app targets", and
+        # the content pane's own measured minimum is 480. A size request
+        # BELOW what the children need does not make them fit; it forces GTK
+        # to allocate less than the minimum and clip the remainder off the
+        # right edge. Measured: at a 458px window the Close button was sliced
+        # in half, the model pill was truncated, the user avatar was off
+        # screen entirely, and libadwaita said so on every layout pass —
+        #
+        #   AdwToastOverlay exceeds MainWindow width:
+        #   requested 462 px, 458 px available
+        #
+        # — which is the warning this line was added to silence, still being
+        # emitted because the declared minimum was a wish rather than a
+        # measurement. The message bubbles were never the constraint: every
+        # block type wraps or scrolls cleanly down to 350px. The floor is the
+        # header's fixed-size art buttons, and those are not negotiable.
+        #
+        # So declare the truth. The window can still be small; it can no
+        # longer be made smaller than it can draw.
+        self.set_size_request(480, 480)
+        self.app = app
+        self.settings = load_settings()
+        global _APPROVAL_MODE
+        _APPROVAL_MODE = self.settings.get("approval_mode", "none")
+        # In-app notification inbox — things Basilisk flags for the operator.
+        # Persisted so they survive a restart; capped so it can't grow forever.
+        self._notif_path = os.path.expanduser(
+            "~/.local/share/basilisk/notifications.json")
+        self._notifications = self._load_notifications()
+        # Community-tier web_read hosts the operator has approved THIS session.
+        # In-memory only (a fresh run starts locked down again); the gate that
+        # enforces this lives in _web_read_gated, not in the model's prompt.
+        self._web_grants: set = set()
+        # In-app sudo password cache. Held ONLY in memory, passed straight to
+        # the sudo subprocess, never written to disk/log/history — the model
+        # cannot see it. Entered once per chat; cleared when you start a new
+        # chat; expires 30 minutes after entry, after which it's asked again.
+        self._sudo_pw = None
+        self._sudo_pw_time = 0.0
+        # Apply the inline-image toggle to the module global the renderer reads.
+        global _RENDER_IMAGES
+        try:
+            _RENDER_IMAGES = bool(self.settings.get("chat_render_images", True))
+        except Exception:
+            _RENDER_IMAGES = True
+        # Build one backend per registered cloud provider.  Groq keeps its
+        # library-backed backend; everything else rides the generic
+        # OpenAI-compatible backend.  Keyed by provider id for the router.
+        self.cloud: Dict[str, Any] = {}
+        for spec in PROVIDERS:
+            key = self.settings.get(f"{spec.key}_api_key", "")
+            if spec.engine == "groq":
+                self.cloud[spec.key] = GroqBackend(key)
+            else:
+                self.cloud[spec.key] = OpenAICompatBackend(spec, key)
+        # Back-compat alias used in a few spots.
+        self.groq = self.cloud.get("groq")
+        self.router = BackendRouter(self.cloud, self.settings)
+        self.store = ChatStore()
+        # If the previous chats.db could not be opened it was moved aside and
+        # a fresh one started (see ChatStore.__init__). SAY SO — a silent
+        # recovery is how an operator discovers months of history are gone by
+        # noticing, weeks later, that the sidebar is empty.
+        if getattr(self.store, "quarantined_from", ""):
+            GLib.idle_add(self._warn_db_quarantined,
+                          self.store.quarantined_from)
+        self.watcher = Watcher(self.settings, self._on_watcher_event)
+
+        # ── basilisk_ext sidecar (optional) ──
+        # Imports nothing from this app; depends only on stdlib + the two
+        # callables handed to init().  If the package is missing or init
+        # raises, self._ext stays None and every hook below no-ops, leaving
+        # Basilisk identical to a stock build.  Nothing here starts a background
+        # thread unless the matching setting is on.
+        self._ext = None
+        try:
+            from basilisk_ext import extman as _extman
+            # Semantic memory recall: wire the embedder only when it's enabled
+            # AND a SiliconFlow key exists (that's the endpoint hosting the
+            # embedding models).  Otherwise pass None and memory stays in the
+            # offline keyword mode — recall degrades, never breaks.
+            _semantic = (bool(self.settings.get("memory_semantic", True))
+                         and bool((self.settings.get("siliconflow_api_key")
+                                   or "").strip()))
+            _extman.init(settings=self.settings,
+                         data_dir="~/.local/share/basilisk",
+                         complete_fn=self._ext_complete,
+                         embed_fn=(self._ext_embed if _semantic else None),
+                         ledger=get_ledger())
+            self._ext = _extman
+            if _semantic:
+                self._start_memory_backfill()
+        except Exception as _e:
+            log(f"basilisk_ext not loaded: {_e}")
+
+        self.current_chat_id: Optional[int] = None
+        self.current_agent_mode = bool(self.settings.get("agent_mode_default",
+                                                          True))
+        # ── UNLEASH: the master switch (the big red dragon button) ──
+        # ON  → confirm the target, then go FULLY autonomous and never stop until
+        #       the mission is complete (MISSION_COMPLETE token).
+        # OFF → answer once and stop. No autonomous grind, ever.
+        # Unleash implies agent mode (it needs the tools + the mission loop), so
+        # arming it forces current_agent_mode on and syncs the agent toggle.
+        # NOT read from settings any more: Unleash is per-chat (see
+        # _SESSION_FIELDS) and every chat opens stood down. A saved global
+        # "unleashed": true meant a relaunch came up armed, and the operator
+        # had no chat context in front of them when it did.
+        self._unleashed: bool = False
+        # One-shot: set when Unleash is armed so the very next turn confirms the
+        # target (or asks for it once if none is set yet) before going full send.
+        self._unleash_kickoff_pending: bool = False
+        self.streaming_thread: Optional[threading.Thread] = None
+        # Bumped once per stream. A callback carrying an older value belongs
+        # to a turn that has been replaced and is ignored -- see the block
+        # in the stream setup for the three ways that happens.
+        self._stream_epoch: int = 0
+        # GLib source id of a queued next-turn kick, 0 when none. Declared
+        # here so _is_busy() and _cancel_pending_kick() never depend on a
+        # getattr default to be correct.
+        self._pending_kick_id: int = 0
+        self.streaming_cancel: Optional[threading.Event] = None
+        self.streaming_msg_widget: Optional[MessageWidget] = None
+        self.streaming_msg_db_id: Optional[int] = None
+        # Chat the active streaming/tool turn belongs to.  Used so that
+        # if the user navigates to a different chat mid-turn, tool results
+        # and follow-up assistant messages still land in the chat that
+        # started the turn — not whichever chat happens to be displayed
+        # when the background work completes.
+        self.streaming_chat_id: Optional[int] = None
+        # ── ONE SESSION PER CHAT ──
+        # Everything in _SESSION_FIELDS below used to be a single set of
+        # window-wide attributes, which meant a chat switch carried the
+        # previous conversation's session across with it: an armed Unleash,
+        # a latched mission and its objective, the tool-chain depth, the
+        # retry counters, the loop-detection history. Open a fresh chat off
+        # the back of a mission and the very first message inherited "keep
+        # going until the objective is complete" from a conversation it had
+        # nothing to do with - which is what "it keeps talking when I change
+        # chats" is. Each chat now owns its own copy: snapshotted on the way
+        # out of a chat, restored on the way in, and started clean for a new
+        # one. Keyed by chat id; entries are dropped when a chat is deleted.
+        self._sessions: Dict[int, Dict[str, Any]] = {}
+        # The open Settings dialog, or None. Only used to re-sync the
+        # reasoning-depth row when the chat or model changes under it.
+        self._settings_dialog = None
+        # True only while _load_chat is pushing restored state back into the
+        # widgets. The toggles fire their handlers on set_active(), and those
+        # handlers write settings, toast and stand down a mission - none of
+        # which may happen when we are merely REDRAWING a session.
+        self._restoring_session: bool = False
+        self._tool_chain_depth: int = 0
+        # Set once per turn when the tool-step budget is exhausted: the next
+        # turn ignores any tool calls and just answers, so we never dead-end.
+        self._tools_locked: bool = False
+        # How many times THIS turn has been pushed to produce a written answer
+        # after a dropped tool call or an all-tool-call reply. Bounded so a
+        # model that will not write prose cannot loop. See _on_stream_done.
+        self._force_answer_tries: int = 0
+        # Text appended to the next tool result when extra calls in a reply
+        # were not run this turn. See _on_stream_done_body / _feed_tool_result.
+        self._deferred_note: str = ""
+        # Name of the tool currently being dispatched, so a lambda-wrapped
+        # handler can log what it actually is. See _run_tool_call / _tool_simple.
+        self._dispatching_tool: str = ""
+        # Per-tool labels for a parallel batch, so the repeat guard can match a
+        # later SOLO call of a tool that already ran inside one.
+        self._batch_members: List[str] = []
+        # Answer-mode stall pushes spent on the current request. See
+        # ANSWER_STALL_NUDGE_MAX.
+        # ── THE TASK LEDGER ──
+        # The plan for the current request, the number of times the host has
+        # pushed the turn onward because items were still open, and whether a
+        # GATE (rather than the model) put the last tool call in flight.
+        # That last one is the double-answer fix: a gate-forced continuation
+        # arrives AFTER the model has already written a complete answer to
+        # the screen, so the continuation has to be told that, or the model
+        # very reasonably writes the whole answer again.
+        self._plan = None
+        self._plan_pushes: int = 0
+        self._plan_done_announced: bool = False
+        self._gate_forced: str = ""
+        # Ground truth from the last verifier that ran this request: the
+        # verdict string when it came back RED, "" otherwise. Read by the
+        # failing-verification gate, which is the other half of "not done
+        # until it actually passes".
+        self._verify_red: str = ""
+        self._verify_pushes: int = 0
+        self._answer_stall_nudges: int = 0
+        # Absolute per-request ceiling — see ANSWER_STALL_NUDGE_TOTAL_MAX.
+        self._answer_stall_total: int = 0
+        # Whether a tool has ACTUALLY RUN this request. The continuation
+        # directives ("you already read a source, don't re-read") key off
+        # this, NOT off _tool_chain_depth — because the answer-mode stall
+        # nudge bumps the chain depth without any tool having run, and telling
+        # a model that fetched NOTHING "you already read a source this turn"
+        # is what turned the news-fetch stall into a dead end: it discouraged
+        # the very fetch the nudge existed to force.
+        self._tool_ran_this_request: bool = False
+        # Set when the operator hits the stop button.  Halts the current
+        # stream AND prevents the tool chain from kicking another turn.
+        self._stop_requested: bool = False
+
+        # ── Autonomous mission (walk-away autonomy) ──
+        # When agent mode is on, the message you send IS the objective. Basilisk
+        # works it turn after turn; a plain (no-tool) reply does NOT end the run
+        # and a stream/API error triggers backoff+retry, never a dead stop. It
+        # ends ONLY when you press Stop, or the model explicitly signals the
+        # objective is fully done AND re-confirms it on a forced re-check.
+        self._mission_active: bool = False
+        self._mission_objective: str = ""
+        self._mission_kicks: int = 0            # consecutive no-progress re-kicks
+        self._recent_commands: list = []        # tail of run commands, for loop-break
+        # ACTION RECALL — the durable record of what this run has already done.
+        # The transcript is NOT that record: _build_history_for_model keeps only
+        # HISTORY_KEEP_FULL_TOOL_RESULTS full tool results and headroom
+        # compresses what survives, so several steps in, the model's evidence of
+        # having already tried something is a truncated stub while the loudest
+        # thing in its context is still the original objective. That is what
+        # made it redo work from a few turns back. One line per action lives
+        # here instead, outside the transcript, and is re-sent whole every turn.
+        self._action_log = _recall.ActionLog() if _recall else None
+        # The action currently in flight, so the result that comes back can be
+        # attached to it. Set at dispatch, consumed in _feed_tool_result — one
+        # hook covers every tool instead of instrumenting each of them.
+        self._pending_action: Optional[str] = None
+        # Files staged for the NEXT message. Shown as chips above the
+        # composer; folded into the text at send.
+        self._attachments: List[Dict[str, Any]] = []
+        # Liveness marker for the turn watchdog — bumped whenever the turn
+        # actually advances (a token, a tool result, a new step).
+        self._turn_progress_ts: float = time.monotonic()
+        # How many times the watchdog has tried to nudge the CURRENT stall.
+        # Reset by any real progress. See _turn_watchdog.
+        self._unblock_attempts: int = 0
+        # Per-chat trim watermark: how many tool results have been demoted to
+        # their trimmed form. Only ever advances, and only when the history
+        # exceeds HISTORY_STABLE_BUDGET_CHARS — so the request stays
+        # append-only (and cacheable) between advances. See
+        # _build_history_for_model.
+        self._trim_watermark: dict = {}
+        self._mission_verify_pending: bool = False   # first completion signal seen
+        self._mission_no_action_streak: int = 0      # turns in a row with no tool call
+        self._mission_directive: str = ""       # transient nudge for the next kick
+        self._error_retries: int = 0            # consecutive stream-error retries
+
+        # ── Voice (optional) ──
+        # stt: tap-to-talk transcription via Groq Whisper.
+        # tts: read assistant replies aloud (Piper or espeak).
+        # streamer: turns the token stream into speakable sentences.
+        self.stt = None
+        self.tts = None
+        self._tts_streamer = None
+        self._recording = False
+        self._tts_suspended = False    # true for a turn that's running tools
+        # The assistant message whose audio is currently queued/playing,
+        # so its per-message button reflects play/pause and switching to
+        # another message stops this one.
+        self._speaking_widget = None
+        self._turn_active = False       # an assistant turn is mid-flight
+        if _VOICE_OK:
+            try:
+                self.stt = basilisk_voice.SpeechToText(lambda: self.settings)
+                self.tts = basilisk_voice.TextToSpeech(lambda: self.settings)
+                self._tts_streamer = basilisk_voice.SpeechStreamer()
+                self.tts.set_state_callback(
+                    lambda st: GLib.idle_add(self._on_tts_state, st))
+            except Exception as _e:
+                log(f"voice init failed: {_e}")
+                self.stt = None
+                self.tts = None
+
+        self._build_ui()
+        self._wire_actions()
+        self._boot()
+        GLib.idle_add(self._initial_chat_load)
+        GLib.idle_add(self._refresh_sidebar)
+        # Open with the cursor in the composer. Every other chat application
+        # does this, and without it the first thing the operator has to do on
+        # launch is find and click a text box that is the only place they were
+        # ever going to type.
+        GLib.idle_add(self._focus_composer)
+
+    def _initial_chat_load(self):
+        """At launch: tidy up per the history policy, then either open a
+        brand-new chat (the default) or resume the most recent one."""
+        self._run_retention()
+        if self.settings.get("ephemeral_new_chat_on_launch", True):
+            self._new_chat()
+            return False
+        chats = self.store.list_chats(limit=1)
+        if chats:
+            self._load_chat(chats[0].id)
+        else:
+            self._new_chat()
+        return False
+
+    def _run_retention(self):
+        """Apply the chat-history policy: drop chats idle past the
+        retention window and abandoned empty placeholders.  Never removes
+        the chat currently open, nor pinned chats."""
+        keep = self.current_chat_id
+        try:
+            hours = float(self.settings.get("chat_retention_hours", 24) or 0)
+        except (TypeError, ValueError):
+            hours = 24.0
+        removed = 0
+        try:
+            if hours > 0:
+                removed += self.store.purge_old_chats(hours * 3600.0,
+                                                      keep_chat_id=keep)
+            if self.settings.get("discard_empty_chats", True):
+                removed += self.store.purge_empty_chats(keep_chat_id=keep)
+        except Exception as e:
+            log(f"retention error: {e}")
+        if removed:
+            log(f"retention: removed {removed} chat(s)")
+            self._refresh_sidebar()
+        return removed
+
+    def _mark_turn_progress(self):
+        """Something advanced the current turn.  Cheap enough to call anywhere."""
+        self._turn_progress_ts = time.monotonic()
+        # Real progress clears the unblock ladder, so a run that hits one slow
+        # patch hours in still gets its full two nudges rather than inheriting
+        # a count from something that resolved itself long ago.
+        if getattr(self, "_unblock_attempts", 0):
+            self._unblock_attempts = 0
+
+    def _turn_watchdog(self):
+        """Recover a turn whose loop has died.
+
+        The assistant turn loop is a chain of hand-offs — stream callback feeds
+        a tool call, tool thread feeds a result, result kicks the next stream —
+        and every link runs on a daemon thread.  Before this existed, one
+        unhandled exception anywhere in that chain ended the turn silently: no
+        error, no toast, just "working…" forever and a Stop button that only
+        cleared a flag nothing was reading any more.  The individual links are
+        all guarded now (_tool_thread, _feed_tool_result, the stream worker),
+        but a chain of guards is a promise, and this is the check.
+
+        It only fires after TURN_WATCHDOG_S of TOTAL silence, which is longer
+        than the longest command the runtime estimator will ever wait for, so it
+        cannot cut real work short.  It does not retry anything — retrying an
+        unknown failure blind is how you get duplicate side effects.  It hands
+        the UI back and says what happened.
+        """
+        try:
+            if self.streaming_chat_id is None and not self._is_busy():
+                return True
+            last = getattr(self, "_turn_progress_ts", None)
+            if last is None:
+                self._turn_progress_ts = time.monotonic()
+                return True
+            idle = time.monotonic() - last
+            if idle < TURN_WATCHDOG_S:
+                return True
+            # ── UNBLOCK LADDER, not a kill ──
+            # The first version of this ended the turn, which is the same
+            # mistake as a timeout: the conversation, the action ledger and
+            # whatever the run had achieved all went in the bin because one
+            # step failed to report back. Try to get it MOVING first, and only
+            # hand the UI back if nudging has already failed twice.
+            self._unblock_attempts = getattr(self, "_unblock_attempts", 0) + 1
+
+            if self._unblock_attempts <= 2:
+                self.terminal_log(
+                    f"⏸ nothing has advanced for {int(idle)}s — nudging the "
+                    f"run rather than ending it "
+                    f"(attempt {self._unblock_attempts}/2)", "error")
+                # Cancel only the stream that is hanging. The chat, the store
+                # and the action ledger are untouched, so the model comes back
+                # with its full context and knows exactly what it already did —
+                # which is what stops a nudge turning into a loop.
+                try:
+                    if self.streaming_cancel:
+                        self.streaming_cancel.set()
+                except Exception:
+                    pass
+                # ABANDONING A STREAM MEANS RETIRING ITS IDENTITY.
+                # The worker is not joined here -- it may be blocked in a
+                # socket read and will not notice the cancel until its own
+                # idle timeout, then call back. By then this turn has been
+                # replaced, and without this bump the dead stream's tokens
+                # would append to the NEW turn's bubble and its error path
+                # would schedule a retry for a turn that is not its own.
+                self._stream_epoch = getattr(self, "_stream_epoch", 0) + 1
+                self.streaming_msg_widget = None
+                self.streaming_msg_db_id = None
+                try:
+                    cid = self.streaming_chat_id or self.current_chat_id
+                    if cid:
+                        self.store.add_message(
+                            cid, "user",
+                            "<tool_result>\n[host] The previous step never "
+                            "reported back and was cancelled. Nothing was lost "
+                            "— everything you had already done still stands, "
+                            "and the ALREADY DONE list above is current. Do NOT "
+                            "start over and do NOT repeat the step that hung. "
+                            "Pick the next action from where you actually got "
+                            "to; if the same step hangs again, do it a "
+                            "different way or with a narrower "
+                            "scope.\n</tool_result>",
+                            meta={"kind": "tool_result"})
+                except Exception:
+                    pass
+                self._turn_progress_ts = time.monotonic()
+                try:
+                    self._kick_assistant_turn()
+                except Exception:
+                    log(f"watchdog nudge failed: {traceback.format_exc()}")
+                    self._unblock_attempts = 99      # fall through next tick
+                return True
+
+            # Nudging twice did not move it: hand the UI back rather than
+            # leaving him staring at a spinner.
+            self.terminal_log(
+                f"■ turn watchdog: still stuck after {self._unblock_attempts - 1} "
+                f"nudges — ending the turn so the app is usable again. The "
+                f"conversation and everything done so far are kept.", "error")
+            self._show_toast(
+                "That step wouldn't restart — turn ended, nothing lost. "
+                "Send again to continue.", timeout=8)
+            self._stop_requested = True
+            self._mission_active = False
+            try:
+                if self.streaming_cancel:
+                    self.streaming_cancel.set()
+            except Exception:
+                pass
+            self._finish_turn_cleanup()
+            self._stop_requested = False
+            self._unblock_attempts = 0
+            self._turn_progress_ts = time.monotonic()
+        except Exception:
+            log(f"turn watchdog: {traceback.format_exc()}")
+        return True
+
+    def _periodic_retention(self):
+        """Hourly sweep so a long-running session still honours the
+        retention window (a startup-only purge would miss it)."""
+        self._run_retention()
+        return True   # keep the GLib timer alive
+
+    # ── boot ────────────────────────────────────────────────────
+
+    def _boot(self):
+        def _bg():
+            GLib.idle_add(self.update_status_pills)
+            if self.settings.get("watcher_enabled"):
+                self.watcher.start()
+        threading.Thread(target=_bg, daemon=True).start()
+        # Roll old chats hourly so a session left open for days still
+        # honours the retention window.
+        GLib.timeout_add_seconds(3600, self._periodic_retention)
+        # Liveness backstop for the turn loop.  See _turn_watchdog.
+        GLib.timeout_add_seconds(TURN_WATCHDOG_POLL_S, self._turn_watchdog)
+
+    # ── UI construction ─────────────────────────────────────────
+
+    def _build_ui(self):
+        self.toast_overlay = Adw.ToastOverlay()
+        self.set_content(self.toast_overlay)
+
+        self.split = Adw.OverlaySplitView()
+        self.split.set_min_sidebar_width(280)
+        self.split.set_max_sidebar_width(360)
+        self.split.set_sidebar_width_fraction(0.28)
+
+        self.split.set_sidebar(self._build_sidebar())
+        self.split.set_content(self._build_main())
+
+        # ── OBSIDIAN GLASS: the artwork is the APP's backdrop, not the chat's ──
+        # It used to live inside _build_main, behind the message scroller only,
+        # which is why the sidebar, the header and the composer were flat slabs
+        # bolted onto a picture: three different surfaces that never agreed on
+        # what was behind them. Now one Gtk.Overlay carries the art across the
+        # entire window and the split view floats ON it, so every panel that
+        # went translucent in the stylesheet shows the SAME backdrop through
+        # itself and the glass reads as one sheet instead of five patches.
+        # The window itself stays opaque - nothing here punches through to the
+        # desktop; the transparency is entirely internal.
+        backdrop = self._build_chat_watermark()
+        if backdrop is not None:
+            scrim = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            scrim.add_css_class("chat-scrim")
+            scrim.set_hexpand(True)
+            scrim.set_vexpand(True)
+            scrim.append(backdrop)
+            # Same handle the Display page's brightness slider re-tints live.
+            self._chat_scrim = scrim
+            self._apply_backdrop_brightness()
+            app_overlay = Gtk.Overlay()
+            app_overlay.set_hexpand(True)
+            app_overlay.set_vexpand(True)
+            app_overlay.set_child(scrim)
+            app_overlay.add_overlay(self.split)
+            self.toast_overlay.set_child(app_overlay)
+        else:
+            self.toast_overlay.set_child(self.split)
+
+        # On narrow screens (phones, split-view tablets) the 280-360 px
+        # sidebar eats the whole window, leaving no room for the chat
+        # area.  Collapse it so the sidebar overlays content instead of
+        # pushing it aside.  Two paths: a libadwaita Breakpoint when
+        # available (reactive to resize), and a static fallback gated
+        # on actual screen width when Breakpoint isn't supported.
+        try:
+            bp = Adw.Breakpoint.new(
+                Adw.BreakpointCondition.parse("max-width: 820px"))
+            bp.add_setter(self.split, "collapsed", True)
+            self.add_breakpoint(bp)
+        except Exception as e:
+            log(f"breakpoint unavailable, using static collapse: {e}")
+            # Detect narrow screen via Gdk directly so we don't depend on
+            # UI scale (which is about font sizes, not screen geometry).
+            # Use LOGICAL width (device width / scale factor) so a phone that
+            # reports raw device pixels (e.g. 1080) still collapses correctly.
+            try:
+                display = Gdk.Display.get_default()
+                mon = display.get_monitors().get_item(0) if display else None
+                if mon:
+                    geo = mon.get_geometry()
+                    sf = mon.get_scale_factor() or 1
+                    logical_w = geo.width / sf if sf > 0 else geo.width
+                    if logical_w < 820 or geo.width < 820:
+                        self.split.set_collapsed(True)
+            except Exception:
+                pass
+
+    def _build_sidebar(self):
+        sb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        sb.add_css_class("sidebar")
+
+        # Header
+        sb_header = Adw.HeaderBar()
+        sb_header.set_show_end_title_buttons(False)
+        sb_header.set_show_start_title_buttons(False)
+
+        # Header — BASILISK (with a live online dot) on the left, new-chat on the
+        # right.  The dot is green when online, red when offline.
+        title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=7)
+        # Death-metal wordmark: the carved logo art. SCALED DOWN to a small
+        # intrinsic size (never CONTAIN off a full-res texture, which renders at
+        # the image's huge natural size and blows the header up). Falls back to a
+        # styled text label if the image isn't present.
+        if _LOGO_PNG_PATH:
+            try:
+                _lh = 34
+                _pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                    _LOGO_PNG_PATH, -1, _lh, True)   # height=_lh, width auto
+                t = Gtk.Picture.new_for_paintable(
+                    Gdk.Texture.new_for_pixbuf(_pb))
+                t.set_content_fit(Gtk.ContentFit.SCALE_DOWN)
+                t.set_can_shrink(True)
+                t.set_hexpand(False)
+                t.set_vexpand(False)
+                t.set_size_request(_pb.get_width(), _lh)
+                t.set_valign(Gtk.Align.CENTER)
+                t.set_halign(Gtk.Align.START)
+                t.set_tooltip_text(APP_NAME)
+            except Exception:
+                t = Gtk.Label(label=APP_NAME.upper(), xalign=0.0)
+                t.add_css_class("app-title")
+                t.set_valign(Gtk.Align.CENTER)
+        else:
+            t = Gtk.Label(label=APP_NAME.upper(), xalign=0.0)
+            t.add_css_class("app-title")
+            t.set_valign(Gtk.Align.CENTER)
+        # The BASILISK death-metal wordmark IS the new-chat button now: tap the
+        # logo art to start a fresh chat (no separate + button beside it).
+        wordmark_btn = Gtk.Button()
+        wordmark_btn.add_css_class("wordmark-btn")
+        wordmark_btn.set_has_frame(False)
+        wordmark_btn.set_child(t)
+        wordmark_btn.set_tooltip_text("New chat")
+        wordmark_btn.set_valign(Gtk.Align.CENTER)
+        wordmark_btn.connect("clicked", lambda *_: self._new_chat())
+        title_box.append(wordmark_btn)
+        self.online_dot = Gtk.Label(label="●")
+        self.online_dot.add_css_class("online-dot")
+        self.online_dot.set_valign(Gtk.Align.CENTER)
+        self.online_dot.set_tooltip_text("Connectivity")
+        title_box.append(self.online_dot)
+        sb_header.pack_start(title_box)
+        # Suppress the default centered window-title ("Basilisk") — the red
+        # BASILISK wordmark packed on the left is the only brand mark we want.
+        # Without this, Adw.HeaderBar renders the window title in the center,
+        # showing "Basilisk" a second time (in white) next to the wordmark.
+        _empty_title = Gtk.Label()
+        _empty_title.set_visible(False)
+        sb_header.set_title_widget(_empty_title)
+        sb.append(sb_header)
+
+        # (Chat search removed by request.)
+
+        # List
+        self.chat_listbox = Gtk.ListBox()
+        self.chat_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.chat_listbox.connect("row-activated", self._on_chat_selected)
+
+        gc = Gtk.GestureClick()
+        gc.set_button(3)
+        gc.connect("pressed", self._on_chat_rightclick)
+        self.chat_listbox.add_controller(gc)
+        lp = Gtk.GestureLongPress()
+        lp.connect("pressed", self._on_chat_longpress)
+        self.chat_listbox.add_controller(lp)
+
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sw.set_vexpand(True)
+        sw.set_child(self.chat_listbox)
+        sb.append(sw)
+
+        # A Tao Te Ching line under the chat list -- a different one is chosen
+        # each time the app launches (this runs once at window build).
+        import random as _rnd
+        _tao_lines = [
+            "The Tao that can be spoken is not the eternal Tao.",
+            "The journey of a thousand miles begins beneath one's feet.",
+            "He who knows others is wise; he who knows himself is enlightened.",
+            "He who conquers others is strong; he who conquers himself is mighty.",
+            "He who is contented is rich.",
+            "The soft and the yielding overcome the hard and the strong.",
+            "Nothing is softer than water, yet nothing is better at wearing down the hard.",
+            "He who knows does not speak; he who speaks does not know.",
+            "Do the difficult while it is easy; do the great while it is small.",
+            "The tree that fills a man's arms grew from a tiny sprout.",
+            "To know that you do not know is best.",
+            "The more the sage gives to others, the more he has.",
+            "Govern a great nation as you would cook a small fish.",
+            "The highest good is like water: it benefits all things and does not contend.",
+            "Fill your bowl to the brim and it will spill.",
+            "He who stands on tiptoe does not stand firm.",
+            "Manifest plainness, embrace simplicity, reduce selfishness, have few desires.",
+            "Returning to the root is stillness.",
+            "The sage puts himself last, and so finds himself in front.",
+            "Act without striving; work without meddling.",
+            "Knowing constancy is insight.",
+            "The way of Heaven is to benefit, and not to harm.",
+            "When the work is done, withdraw -- such is the way of Heaven.",
+            "A good traveler has no fixed plans and is not intent upon arriving.",
+        ]
+        _tao_lbl = Gtk.Label(label=_rnd.choice(_tao_lines))
+        _tao_lbl.add_css_class("tao-quote")
+        _tao_lbl.set_wrap(True)
+        _tao_lbl.set_justify(Gtk.Justification.CENTER)
+        _tao_lbl.set_xalign(0.5)
+        _tao_lbl.set_margin_top(10)
+        _tao_lbl.set_margin_bottom(12)
+        _tao_lbl.set_margin_start(14)
+        _tao_lbl.set_margin_end(14)
+        sb.append(_tao_lbl)
+
+        return sb
+
+    def _build_main(self):
+        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        # Header
+        hb = Adw.HeaderBar()
+        # Only our own dragon toggle belongs at the top-left — suppress the
+        # compositor's start-side title button so there aren't two icons there.
+        hb.set_show_start_title_buttons(False)
+        # Custom window controls as clean glyph buttons (no PNG art). Always
+        # shown — glyphs are always available, so we take over the compositor
+        # buttons and never leave the window unclosable.
+        hb.set_show_end_title_buttons(False)
+        _close_btn = _glyph_button("\u2715", "Close", css_extra="winctl-close")
+        _close_btn.connect("clicked", lambda *_: self.close())
+        hb.pack_end(_close_btn)                # far right
+        _exp_btn = _glyph_button("\u2750", "Expand / restore", css_extra="winctl")
+        _exp_btn.connect(
+            "clicked",
+            lambda *_: (self.unmaximize() if self.is_maximized()
+                        else self.maximize()))
+        hb.pack_end(_exp_btn)                  # left of close
+        _min_btn = _glyph_button("\u2500", "Minimise", css_extra="winctl")
+        _min_btn.connect("clicked", lambda *_: self.minimize())
+        hb.pack_end(_min_btn)                  # leftmost of the three
+        # The sidebar toggle IS the dragon logo now — tap the emblem to show/hide
+        # the sidebar (one branded button instead of a plain toggle + a logo).
+        sb_toggle = Gtk.Button()
+        sb_toggle.add_css_class("header-icon-button")
+        sb_toggle.add_css_class("logo-toggle")
+        sb_toggle.set_tooltip_text("Toggle sidebar")
+        if _AVATAR_PNG_PATH:
+            _logo_img = Gtk.Image.new_from_file(_AVATAR_PNG_PATH)
+            _logo_img.set_pixel_size(24)
+            sb_toggle.set_child(_logo_img)
+        else:
+            sb_toggle.set_icon_name("sidebar-show-symbolic")
+        sb_toggle.connect("clicked", lambda *_:
+                          self.split.set_show_sidebar(
+                              not self.split.get_show_sidebar()))
+        hb.pack_start(sb_toggle)
+
+        self.title_widget_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                         spacing=0)
+        self.chat_title_lbl = Gtk.Label(label="New chat", xalign=0.5)
+        self.chat_title_lbl.add_css_class("chat-title")
+        # Subtitle label kept for code that references it, but never shown.
+        self.chat_subtitle_lbl = Gtk.Label(label="", xalign=0.5)
+        self.chat_subtitle_lbl.add_css_class("chat-subtitle")
+        self.title_widget_box.append(self.chat_title_lbl)
+        # Header centre shows a SMALL BASILISK death-metal wordmark instead of the
+        # tiny "New chat" title text. (chat_title_lbl is kept, un-shown, so rename/
+        # title code still works.)
+        # IMPORTANT: scale the source DOWN to a small intrinsic size and never let
+        # it expand — otherwise the wide title area makes a CONTAIN Picture fill
+        # the width and blow the header up to hundreds of px tall.
+        _hdr_title = None
+        _H = 24   # target wordmark height in px — keeps the header its normal size
+        if _LOGO_PNG_PATH:
+            try:
+                _pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                    _LOGO_PNG_PATH, -1, _H, True)   # height=_H, width auto, keep aspect
+                _t2 = Gdk.Texture.new_for_pixbuf(_pb)
+                _hdr_title = Gtk.Picture.new_for_paintable(_t2)
+                _hdr_title.set_content_fit(Gtk.ContentFit.SCALE_DOWN)  # never upscale
+                _hdr_title.set_can_shrink(True)
+                _hdr_title.set_hexpand(False)
+                _hdr_title.set_vexpand(False)
+                _hdr_title.set_halign(Gtk.Align.CENTER)
+                _hdr_title.set_valign(Gtk.Align.CENTER)
+                _hdr_title.set_size_request(_pb.get_width(), _H)
+                _hdr_title.set_tooltip_text(APP_NAME)
+            except Exception:
+                _hdr_title = None
+        hb.set_title_widget(_hdr_title if _hdr_title is not None
+                            else self.title_widget_box)
+
+        # (Provider + online status used to live here as pills; the operator
+        # knows their provider, so that's gone — connectivity is now just the
+        # green/red dot next to BASILISK in the sidebar header.)
+
+        menu_btn = Gtk.MenuButton()
+        _gear = Gtk.Label(label="\u2699")   # gear
+        _gear.add_css_class("glyph-btn-label")
+        menu_btn.set_child(_gear)
+        menu_btn.add_css_class("glyph-btn")
+        menu_btn.set_valign(Gtk.Align.CENTER)
+        menu = Gio.Menu()
+        menu.append("Pin chat", "win.pin-chat")
+        menu.append("Rename chat", "win.rename-chat")
+        menu.append("Delete chat", "win.delete-chat")
+        menu.append("Settings", "win.settings")
+        menu.append("About", "win.about")
+        menu_btn.set_menu_model(menu)
+        hb.pack_end(menu_btn)
+
+        # Notification bell — opens the in-app inbox of things Basilisk flagged.
+        # An overlaid badge shows the unread count. Use a text glyph rather than a
+        # themed icon name: Kali's icon theme doesn't ship the notifications
+        # symbolic icon, so set_icon_name rendered a blank button. A bell glyph
+        # renders in any font.
+        self.notif_btn = Gtk.MenuButton()
+        # Geometric, not emoji: a colour-font bell renders bright yellow
+        # and ignores every colour rule in the stylesheet.
+        _bell = Gtk.Label(label="\u25c9")   # ringed dot
+        _bell.add_css_class("glyph-btn-label")
+        self.notif_btn.set_child(_bell)
+        self.notif_btn.add_css_class("glyph-btn")
+        self.notif_btn.set_valign(Gtk.Align.CENTER)
+        self.notif_btn.set_tooltip_text("Notifications from Basilisk")
+        notif_pop = Gtk.Popover()
+        notif_pop.set_size_request(340, 420)
+        _pop_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        _pop_box.set_margin_top(8)
+        _pop_box.set_margin_bottom(8)
+        _pop_box.set_margin_start(6)
+        _pop_box.set_margin_end(6)
+        _pop_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        _pop_title = Gtk.Label(label="Notifications", xalign=0.0)
+        _pop_title.add_css_class("title-4")
+        _pop_title.set_hexpand(True)
+        _clear_btn = Gtk.Button(label="Clear")
+        _clear_btn.add_css_class("flat")
+        _clear_btn.connect("clicked", self._clear_notifications)
+        _pop_head.append(_pop_title)
+        _pop_head.append(_clear_btn)
+        _pop_box.append(_pop_head)
+        _scroll = Gtk.ScrolledWindow()
+        _scroll.set_vexpand(True)
+        _scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.notif_list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                      spacing=2)
+        _scroll.set_child(self.notif_list_box)
+        _pop_box.append(_scroll)
+        notif_pop.set_child(_pop_box)
+        self.notif_btn.set_popover(notif_pop)
+        # opening the inbox marks everything read (clears the badge)
+        notif_pop.connect("show", lambda *_: self._mark_notifications_read())
+
+        # unread badge overlaid on the bell
+        _bell_overlay = Gtk.Overlay()
+        _bell_overlay.set_valign(Gtk.Align.CENTER)
+        _bell_overlay.set_child(self.notif_btn)
+        self.notif_badge_lbl = Gtk.Label(label="")
+        self.notif_badge_lbl.add_css_class("notif-badge")
+        self.notif_badge_lbl.set_halign(Gtk.Align.END)
+        self.notif_badge_lbl.set_valign(Gtk.Align.START)
+        self.notif_badge_lbl.set_can_target(False)  # clicks pass through to the bell
+        self.notif_badge_lbl.set_visible(False)
+        _bell_overlay.add_overlay(self.notif_badge_lbl)
+        hb.pack_end(_bell_overlay)
+
+        # Terminal/log toggle — moved up here from the composer toolbar. A clean
+        # '>_' prompt glyph on the glass frame, the most hacker-legible mark for
+        # "show the live shell log". Same handler and CSS-state classes as before
+        # (_toggle_terminal_panel toggles .active), so nothing downstream changes.
+        self.terminal_toggle_btn = _glyph_button(
+            ">_", "Show/hide live terminal log", css_extra="term-glyph")
+        self.terminal_toggle_btn.connect("clicked", self._toggle_terminal_panel)
+        hb.pack_end(self.terminal_toggle_btn)
+        # initial paint of badge/list
+        GLib.idle_add(self._refresh_notifications)
+
+        main.append(hb)
+
+        # Watcher event banner
+        self.banner_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                   spacing=0)
+        main.append(self.banner_box)
+
+        # "Working..." status row, shown while assistant is generating or
+        # a tool is running.  Hidden by default.
+        self.working_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                    spacing=12)
+        self.working_row.add_css_class("working-row")
+        self.working_row.set_halign(Gtk.Align.CENTER)
+        self.working_row.set_margin_top(8)
+        self.working_row.set_margin_bottom(8)
+        self.working_spinner = Gtk.Spinner()
+        self.working_spinner.add_css_class("working-spinner")
+        self.working_label = Gtk.Label(label="working…")
+        self.working_label.add_css_class("working-label")
+        self.working_row.append(self.working_spinner)
+        self.working_row.append(self.working_label)
+        self.working_row.set_visible(False)
+        # NOTE: working_row is appended just above the composer input (see the
+        # tail of _build_input_area) so the burning status bar sits directly
+        # over the Send button instead of up under the banner.
+
+        # Messages
+        self.msg_scroll = Gtk.ScrolledWindow()
+        self.msg_scroll.set_policy(Gtk.PolicyType.NEVER,
+                                    Gtk.PolicyType.AUTOMATIC)
+        self.msg_scroll.set_vexpand(True)
+        # Force kinetic (swipe) scrolling — needed for phone touch input
+        self.msg_scroll.set_kinetic_scrolling(True)
+        self.msg_scroll.set_overlay_scrolling(True)
+        self.msg_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        # ── PIN THE COLUMN TO THE TOP ──
+        # A ScrolledWindow whose content is shorter than the viewport hands the
+        # child the FULL viewport height, and a vertical GtkBox defaults to
+        # valign=FILL — so the box stretched to the viewport and the last
+        # bubble was allocated the leftover vertical space, drawing its
+        # background hundreds of px past the end of the text. That is the
+        # "bubble is five screens tall" report. START makes the column take
+        # only the height its messages need; the scroller still scrolls once
+        # they exceed the viewport.
+        self.msg_box.set_valign(Gtk.Align.START)
+        self.msg_box.set_margin_top(12)
+        self.msg_box.set_margin_bottom(12)
+        self.msg_box.set_margin_start(8)
+        self.msg_box.set_margin_end(8 + self._SCROLLBAR_GUTTER)
+        self.msg_scroll.set_child(self.msg_box)
+        self.msg_scroll.add_css_class("chat-scroll")
+        self._wire_scroll_stickiness()
+
+        # The backdrop art is NOT built here any more. It used to be an
+        # overlay wrapped around this scroller alone, which stopped the
+        # artwork dead at the chat pane's edges; _build_ui now hangs it
+        # behind the whole window instead, so the sidebar and header sit on
+        # the same image. This scroller just draws on top of it, transparent.
+        # ── THE FLOATING-PANEL SLOT ──
+        # The activity feed's step list is drawn HERE, over the conversation,
+        # rather than in a panel that permanently reserves a strip of layout
+        # above the composer.
+        #
+        # It is an Overlay and NOT a Gtk.Popover, and that is a deliberate
+        # correctness choice, not a style one. A popover is its own native
+        # surface: on X11 with no compositing manager it cannot be
+        # translucent, so the whole glass system collapses and its shadow
+        # paints as a hard black rectangle. Everything else in this app is
+        # translucent INSIDE an opaque window precisely so it never depends on
+        # a compositor (see the OBSIDIAN GLASS notes in the stylesheet), and
+        # the feed has to keep that property like every other surface.
+        self.chat_overlay = Gtk.Overlay()
+        self.chat_overlay.set_hexpand(True)
+        self.chat_overlay.set_vexpand(True)
+        self.chat_overlay.set_child(self.msg_scroll)
+        main.append(self.chat_overlay)
+
+        main.append(self._build_input_area())
+
+        # Terminal log panel — hidden by default, shown when user taps the log button
+        self._terminal_visible = False
+        self.terminal_panel = self._build_terminal_panel()
+        self.terminal_panel.set_visible(False)
+        main.append(self.terminal_panel)
+
+        return main
+
+    # Backdrop brightness: the scrim is a black box over the ember/castle
+    # background; lowering its opacity lets more of the image through
+    # (brighter), raising it dims the backdrop (darker). Driven by the
+    # `backdrop_brightness` setting (0..100), 50 = the default look. Applied
+    # with a per-widget CSS provider so it overrides the static .chat-scrim
+    # rule live, with no full-stylesheet reload.
+    _BACKDROP_PROVIDER = None
+
+    def _apply_backdrop_brightness(self):
+        scrim = getattr(self, "_chat_scrim", None)
+        if scrim is None:
+            return
+        try:
+            b = int(self.settings.get("backdrop_brightness", 50))
+        except (TypeError, ValueError):
+            b = 50
+        b = max(0, min(100, b))
+        # brightness 0 -> heavy scrim (0.78 opaque, darkest);
+        # brightness 100 -> almost no scrim (0.06, brightest);
+        # 50 -> ~0.40, the shipped default. Linear between the ends.
+        opacity = 0.78 - (b / 100.0) * (0.78 - 0.06)
+        css = (".chat-scrim { background-color: rgba(0, 0, 0, %.3f); }"
+               % opacity).encode("ascii")
+        try:
+            prov = self._BACKDROP_PROVIDER
+            if prov is None:
+                prov = Gtk.CssProvider()
+                self._BACKDROP_PROVIDER = prov
+                scrim.get_style_context().add_provider(
+                    prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 10)
+            prov.load_from_data(css)
+        except Exception as e:
+            log(f"backdrop brightness apply failed: {e}")
+
+    def _build_chat_watermark(self):
+        """A large, faint dragon watermark for behind the chat.  Loads either a
+        PNG (the dragon emblem, already alpha-baked) or an SVG.  Non-interactive
+        (never grabs touch/clicks), scaled to fit, low opacity so it sets the
+        mood without fighting the text.  Returns None if the art isn't on disk."""
+        path = _WATERMARK_SVG_PATH
+        if not path:
+            return None
+        try:
+            if path.lower().endswith(".png"):
+                # BOUNDED, AND SHARED. Full resolution is 1672x941, i.e. a 6MB
+                # RGBA texture that COVER rescales behind the chat on every
+                # repaint — and the chat repaints on every scroll frame and
+                # every streamed token. At 10% opacity behind text, nothing
+                # above ~1100px wide is perceivable, so the cost was bought for
+                # nothing. Goes through the shared cache too, so switching
+                # chats does not re-decode it.
+                tex = _cached_texture(path, 1100)
+                if tex is None:
+                    try:
+                        tex = Gdk.Texture.new_from_filename(path)
+                    except Exception:
+                        from gi.repository import Gio
+                        tex = Gdk.Texture.new_from_file(
+                            Gio.File.new_for_path(path))
+                # WHY THIS IS NO LONGER A WATERMARK'S 0.10.
+                # It used to be, and it had to be: the art was an overlay
+                # directly behind the MESSAGE TEXT, so anything you could
+                # actually see was something the reply had to be read
+                # through, and it lost. The OBSIDIAN GLASS theme changed
+                # what sits between the two - every message now lands on a
+                # tinted glass panel with its own gloss, border and text
+                # shadow, and the art shows through the GAPS between those
+                # panels rather than through the words. So the ceiling that
+                # protected legibility is being paid by the panels instead,
+                # and the backdrop is allowed to be a backdrop.
+                # Still not 1.0: the scrim above (brightness slider) and
+                # this value together are what keep the neon lines in the
+                # art from competing with the UI's own red.
+                opacity = 0.48
+            else:
+                tex = _svg_texture(path, 720)
+                opacity = 0.2
+            if tex is None:
+                return None
+            pic = Gtk.Picture.new_for_paintable(tex)
+            pic.set_can_target(False)
+            pic.set_hexpand(True)
+            pic.set_vexpand(True)
+            pic.set_halign(Gtk.Align.FILL)
+            pic.set_valign(Gtk.Align.FILL)
+            pic.set_opacity(opacity)
+            try:
+                # COVER, not CONTAIN. Contain letterboxes a landscape image
+                # inside a tall chat pane, so the art appeared as a bright
+                # BAND across the middle with plain background above and
+                # below it — which is what made it read as content rather
+                # than as backdrop. Cover fills the pane evenly.
+                pic.set_content_fit(Gtk.ContentFit.COVER)
+            except Exception:
+                pass
+            pic.add_css_class("chat-watermark")
+            return pic
+        except Exception as e:
+            log(f"watermark build failed: {e}")
+            return None
+
+    def _build_terminal_panel(self):
+        """Live terminal output panel — shows exactly what tools are doing."""
+        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        panel.add_css_class("terminal-panel")
+        panel.set_size_request(-1, _scaled(360, floor=240))
+
+        # Header row
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        header.add_css_class("terminal-panel-header")
+
+        title_lbl = Gtk.Label(label="▶ TERMINAL LOG", xalign=0.0)
+        title_lbl.add_css_class("terminal-panel-title")
+        title_lbl.set_hexpand(True)
+        header.append(title_lbl)
+
+        self.terminal_status_lbl = Gtk.Label(label="idle", xalign=1.0)
+        self.terminal_status_lbl.add_css_class("tool-indicator-label")
+        header.append(self.terminal_status_lbl)
+
+        clear_btn = Gtk.Button(label="clear")
+        clear_btn.add_css_class("terminal-toggle-btn")
+        clear_btn.connect("clicked", self._clear_terminal_log)
+        header.append(clear_btn)
+
+        close_btn = Gtk.Button.new_from_icon_name("window-close-symbolic")
+        close_btn.add_css_class("icon-button")
+        close_btn.connect("clicked", self._toggle_terminal_panel)
+        header.append(close_btn)
+
+        panel.append(header)
+
+        # Log view
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        sw.set_vexpand(True)
+        sw.set_kinetic_scrolling(True)
+
+        self.terminal_log_view = Gtk.TextView()
+        self.terminal_log_view.set_editable(False)
+        self.terminal_log_view.set_cursor_visible(False)
+        self.terminal_log_view.set_monospace(True)
+        self.terminal_log_view.set_wrap_mode(Gtk.WrapMode.CHAR)
+        self.terminal_log_view.add_css_class("terminal-log-view")
+        self.terminal_log_buf = self.terminal_log_view.get_buffer()
+
+        # Colour tags
+        self.terminal_log_buf.create_tag("cmd",    foreground="#2a8cca", weight=700)
+        self.terminal_log_buf.create_tag("stdout", foreground="#9aa3ad")
+        self.terminal_log_buf.create_tag("stderr", foreground="#e5484d")
+        self.terminal_log_buf.create_tag("info",   foreground="#185277")
+        self.terminal_log_buf.create_tag("error",  foreground="#e5484d", weight=700)
+        self.terminal_log_buf.create_tag("ok",     foreground="#2ecc71", weight=700)
+        self.terminal_log_buf.create_tag("dim",    foreground="#7d8794")
+
+        sw.set_child(self.terminal_log_view)
+        panel.append(sw)
+        return panel
+
+    def _model_button_label(self) -> str:
+        key = self.settings.get("active_provider", "siliconflow")
+        spec = PROVIDERS_BY_KEY.get(key)
+        plabel = spec.label if spec else key
+        model = self.settings.get(
+            f"{key}_model", spec.default_model if spec else "")
+        short = model.split("/")[-1] if "/" in model else model
+        return f"⮂  {plabel}  ·  {short or 'pick a model'}"
+
+    def _update_model_button(self):
+        btn = getattr(self, "model_btn", None)
+        if btn is not None:
+            btn.set_label(self._model_button_label())
+        self._refresh_effort_pill()
+
+    def _active_model_id(self):
+        """The model id the next turn will actually use."""
+        key = self.settings.get("active_provider", "siliconflow")
+        return (self.settings.get(f"{key}_model", "") or "").strip()
+
+    def _next_chain_model_after(self, current):
+        """The next model AFTER `current` in the active provider's fallback
+        chain, or "" if there is none (current is last, unknown, or the chain
+        is unavailable). Used by the degraded/empty escape to walk to a
+        different model on the SAME provider — never a cross-cloud hop. Fully
+        defensive: any missing backend or empty chain yields "" and the caller
+        just retries the same model, so this can only ever add an escape, never
+        remove the existing behaviour.
+        """
+        try:
+            cur = (current or "").strip()
+            backend, _key = self.router.active_cloud()
+            chain = list(getattr(backend, "fallback_chain", None) or [])
+            if not chain:
+                return ""
+            if cur in chain:
+                i = chain.index(cur)
+                return chain[i + 1] if i + 1 < len(chain) else ""
+            # current is off-chain (a hand-typed id): start walking at the top,
+            # skipping anything equal to it.
+            for m in chain:
+                if m and m != cur:
+                    return m
+            return ""
+        except Exception:
+            return ""
+
+    # ══════════════════════════════════════════════════════════════
+    # REASONING DEPTH BELONGS TO THE CHAT, NOT TO THE MOMENT
+    # ══════════════════════════════════════════════════════════════
+    # The level is chosen in Settings while a chat is still empty, LATCHED on
+    # to that chat the instant its first message is sent, and read back for
+    # the rest of the chat's life - including after a relaunch, which is why
+    # it is persisted rather than kept on the session record. settings[
+    # "reasoning_effort"] stays what it always was, the value the backend
+    # reads; opening a chat points it at that chat's latched level, so no
+    # change to basilisk_core was needed.
+
+    def _chat_effort_map(self) -> Dict[str, str]:
+        m = self.settings.get("chat_effort")
+        if not isinstance(m, dict):
+            m = {}
+            self.settings["chat_effort"] = m
+        return m
+
+    def _effective_effort(self) -> str:
+        """The depth the current chat runs at: its latched level if it has
+        started, otherwise the level the next chat would start from."""
+        cid = self.current_chat_id
+        if cid is not None:
+            lvl = self._chat_effort_map().get(str(cid))
+            if lvl in _REASONING_EFFORT_LEVELS:
+                return lvl
+        lvl = (self.settings.get("reasoning_effort", "low") or "low").strip().lower()
+        return lvl if lvl in _REASONING_EFFORT_LEVELS else "low"
+
+    def _effort_locked(self) -> bool:
+        """True once the current chat has started. A chat with no messages is
+        still choosable; one message in, the dial is part of the transcript."""
+        cid = self.current_chat_id
+        if cid is None:
+            return False
+        if str(cid) in self._chat_effort_map():
+            return True
+        try:
+            return self.store.count_messages(cid) > 0
+        except Exception:
+            return False
+
+    def _latch_effort(self, chat_id):
+        """Freeze the current depth on to this chat. Called from the send path
+        on the first message; a no-op every time after that."""
+        if chat_id is None:
+            return
+        m = self._chat_effort_map()
+        if str(chat_id) in m:
+            return
+        m[str(chat_id)] = self._effective_effort()
+        try:
+            save_settings(self.settings)
+        except Exception:
+            pass
+
+    def _apply_chat_effort(self, chat_id):
+        """Point the backend's dial at this chat's latched level."""
+        if chat_id is None:
+            return
+        lvl = self._chat_effort_map().get(str(chat_id))
+        if lvl in _REASONING_EFFORT_LEVELS:
+            self.settings["reasoning_effort"] = lvl
+
+    def _forget_chat_effort(self, chat_id):
+        if self._chat_effort_map().pop(str(chat_id), None) is not None:
+            try:
+                save_settings(self.settings)
+            except Exception:
+                pass
+
+    def _refresh_effort_pill(self):
+        """Re-sync whatever is currently displaying the reasoning depth.
+
+        The composer pill this was named for is gone - a dial that changes how
+        the model thinks does not belong on a control the operator can nudge
+        between two messages of the same conversation. The depth now lives in
+        Settings and is fixed per chat, so all this has left to do is keep an
+        OPEN Settings dialog honest when the chat or the model changes under
+        it. Kept under the old name because several call sites fire it as
+        "the model or chat changed, refresh the depth display"."""
+        dlg = getattr(self, "_settings_dialog", None)
+        if dlg is not None:
+            try:
+                dlg._sync_effort_row(self)
+            except Exception:
+                pass
+
+    def _provider_has_key(self, key: str) -> bool:
+        return bool((self.settings.get(f"{key}_api_key", "") or "").strip())
+
+    _TIER_ORDER = ("flagship", "workhorse", "budget")
+    _TIER_LABEL = {
+        "flagship":  "FLAGSHIP  \u00b7  hard targets",
+        "workhorse": "WORKHORSE  \u00b7  everyday",
+        "budget":    "BUDGET  \u00b7  triage & bulk",
+    }
+
+    def _models_priced_high_to_low(self, spec):
+        """Order a provider's models best/most-capable first.
+
+        WAS: parse the largest 'NNb' number out of the model id and sort on
+        it, on the theory that bigger == better == pricier.  That silently
+        failed on every id that doesn't carry a parameter count in its name
+        -- DeepSeek-V4-Flash, GLM-5.2, Kimi-K3, Hy3 all scored 0.0 and sank
+        to the BOTTOM of the operator's own picker, underneath a 72B legacy
+        model, while an MoE's total-parameter count told you nothing about
+        what it costs to run anyway.
+
+        NOW: a provider with a catalogue is already ordered by hand (tier,
+        then capability), so use that.  The regex survives only for
+        live-fetched ids we have no metadata for.
+
+        Kept under the old name because the popover calls it; see
+        `_models_by_tier` for the grouped view.
+        """
+        if spec.catalogue:
+            return list(spec.pick_ids)
+        import re as _re
+
+        def size_of(m):
+            nums = _re.findall(r"(\d+(?:\.\d+)?)\s*[bB]\b", m)
+            return max((float(n) for n in nums), default=0.0)
+        ordered = sorted(
+            list(enumerate(spec.chain)),
+            key=lambda im: (-size_of(im[1]), im[0]))
+        return [m for _i, m in ordered]
+
+    def _models_by_tier(self, spec):
+        """[(tier_heading_or_None, [model_id, ...]), ...] for the popover.
+        A provider with no catalogue gets one unlabelled group, i.e. exactly
+        the old flat list."""
+        if not spec.catalogue:
+            return [(None, self._models_priced_high_to_low(spec))]
+        groups = []
+        for tier in self._TIER_ORDER:
+            ids = [m.id for m in spec.catalogue if m.tier == tier]
+            if ids:
+                groups.append((self._TIER_LABEL.get(tier, tier.upper()), ids))
+        # Any tier string that isn't one of the three known ones still shows.
+        stray = [m.id for m in spec.catalogue
+                 if m.tier not in self._TIER_ORDER]
+        if stray:
+            groups.append(("OTHER", stray))
+        return groups
+
+    @staticmethod
+    def _model_detail(spec, model_id):
+        """'1M ctx  .  $0.13/$0.28 per Mtok' — the two numbers that actually
+        decide a pick.  Empty string for an id with no metadata."""
+        info = spec.info(model_id) if hasattr(spec, "info") else None
+        if info is None:
+            return ""
+        ctx = (f"{info.ctx_k / 1024:.0f}M" if info.ctx_k >= 1000
+               else f"{info.ctx_k}K")
+        if info.in_usd <= 0 and info.out_usd <= 0:
+            price = "free"
+        else:
+            price = f"${info.in_usd:g}/${info.out_usd:g} per Mtok"
+        eye = "  \u00b7  vision" if info.vision else ""
+        return f"{ctx} ctx  \u00b7  {price}{eye}"
+
+    def _open_model_switcher(self, *_):
+        pop = Gtk.Popover()
+        pop.set_parent(self.model_btn)
+        pop.add_css_class("model-switch-pop")
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        outer.set_margin_top(8)
+        outer.set_margin_bottom(8)
+        outer.set_margin_start(8)
+        outer.set_margin_end(8)
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sw.set_max_content_height(440)
+        sw.set_min_content_width(240)
+        sw.set_propagate_natural_height(True)
+        listbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+
+        cur_key = self.settings.get("active_provider", "siliconflow")
+        cur_model = self.settings.get(f"{cur_key}_model", "")
+        any_provider = False
+        for spec in PROVIDERS:
+            if not self._provider_has_key(spec.key):
+                continue
+            any_provider = True
+            hdr = Gtk.Label(label=spec.label.upper(), xalign=0.0)
+            hdr.add_css_class("model-group-header")
+            listbox.append(hdr)
+            for tier_label, ids in self._models_by_tier(spec):
+                if tier_label:
+                    sub = Gtk.Label(label="   " + tier_label, xalign=0.0)
+                    sub.add_css_class("model-group-header")
+                    sub.add_css_class("dim-label")
+                    listbox.append(sub)
+                for model in ids:
+                    info = spec.info(model) if hasattr(spec, "info") else None
+                    short = (info.label if info is not None
+                             else (model.split("/")[-1] if "/" in model
+                                   else model))
+                    detail = self._model_detail(spec, model)
+                    # Two-line row: name, then the ctx/price line that makes
+                    # the pick an informed one rather than a guess.
+                    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                  spacing=0)
+                    name_lbl = Gtk.Label(label=short, xalign=0.0)
+                    name_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+                    box.append(name_lbl)
+                    if detail:
+                        det_lbl = Gtk.Label(label=detail, xalign=0.0)
+                        det_lbl.add_css_class("dim-label")
+                        det_lbl.add_css_class("caption")
+                        det_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+                        box.append(det_lbl)
+                    b = Gtk.Button()
+                    b.set_child(box)
+                    b.add_css_class("model-pick-row")
+                    b.set_halign(Gtk.Align.FILL)
+                    if info is not None and info.note:
+                        b.set_tooltip_text(f"{model}\n{info.note}")
+                    else:
+                        b.set_tooltip_text(model)
+                    if spec.key == cur_key and model == cur_model:
+                        b.add_css_class("model-pick-active")
+                    b.connect(
+                        "clicked",
+                        lambda _w, k=spec.key, m=model: self._switch_model(
+                            k, m, pop))
+                    listbox.append(b)
+
+        if not any_provider:
+            hint = Gtk.Label(
+                label="No API keys yet.\nAdd one in Settings → Providers.",
+                xalign=0.0)
+            hint.add_css_class("model-group-header")
+            listbox.append(hint)
+
+        sw.set_child(listbox)
+        outer.append(sw)
+        pop.set_child(outer)
+        pop.connect("closed", lambda p: p.unparent())
+        pop.popup()
+
+    def _switch_model(self, provider, model, pop=None):
+        self.settings["active_provider"] = provider
+        self.settings[f"{provider}_model"] = model
+        save_settings(self.settings)
+        self._update_model_button()
+        self.update_status_pills()
+        spec = PROVIDERS_BY_KEY.get(provider)
+        info = spec.info(model) if spec is not None else None
+        short = (info.label if info is not None
+                 else (model.split("/")[-1] if "/" in model else model))
+        detail = self._model_detail(spec, model) if spec is not None else ""
+        msg = f"Now using {spec.label if spec else provider} · {short}"
+        self._show_toast(f"{msg}  ({detail})" if detail else msg)
+        if pop is not None:
+            pop.popdown()
+
+    def _build_input_area(self):
+        area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        area.add_css_class("input-area")
+
+        # Model switcher — shows the active provider · model, click to switch.
+        # Now sits INLINE in the action-button row below, not on its own line.
+        self.model_btn = Gtk.Button()
+        self.model_btn.add_css_class("model-switch-btn")
+        self.model_btn.set_valign(Gtk.Align.CENTER)
+        self.model_btn.set_tooltip_text("Switch model / provider")
+        self.model_btn.connect("clicked", self._open_model_switcher)
+        self._update_model_button()
+
+        # Action chips
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        actions.set_margin_start(4)
+        actions.set_margin_end(4)
+
+        # Agent-mode toggle: the widget still exists (it drives all the
+        # agent-mode side effects) but it lives in Settings now, not above the
+        # chat. Kept un-parented here so Settings' switch can flip it.
+        self.agent_toggle = Gtk.ToggleButton()
+        self.agent_toggle.set_icon_name("applications-system-symbolic")
+        self.agent_toggle.add_css_class("icon-button")
+        self.agent_toggle.set_tooltip_text("Agent mode (system tools)")
+        self.agent_toggle.set_active(self.current_agent_mode)
+        if self.current_agent_mode:
+            self.agent_toggle.add_css_class("toggled")
+        self.agent_toggle.connect("toggled", self._on_agent_toggled)
+
+        # ── UNLEASH button (the big red dragon) ──
+        # The operator's one-tap "go full send" control. Armed → Basilisk
+        # confirms the target and runs relentlessly until the mission is done.
+        # Disarmed → one answer per message, then stop. Rendered a touch larger
+        # than the other toolbar icons so the emblem reads, with its own glow.
+        # It was a round PNG plaque - a red sticker sitting next to a row of
+        # chamfered glass buttons, in nobody's visual language but its own,
+        # and with the mode it controls written nowhere on it. Now it is a
+        # labelled pill built from the same parts as every other control:
+        # glyph + word, one glass frame, and a state you can read across the
+        # room. The word is the point - a toggle whose entire job is arming
+        # an autonomous agent should say what it is.
+        self.unleash_toggle = Gtk.ToggleButton()
+        _ul_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        _ul_box.set_valign(Gtk.Align.CENTER)
+        # NOT an emoji. The dragon codepoint renders from the system colour
+        # font, so it arrived as a bright green-and-orange sticker sitting in
+        # the middle of a red-and-black control - the one thing on the bar
+        # that could not be themed. A geometric glyph takes the CSS colour
+        # and lights up with the rest of the button when it arms.
+        _ul_glyph = Gtk.Label(label="\u25c6")          # solid diamond
+        _ul_glyph.add_css_class("unleash-glyph")
+        _ul_box.append(_ul_glyph)
+        _ul_label = Gtk.Label(label="UNLEASH")
+        _ul_label.add_css_class("unleash-label")
+        _ul_box.append(_ul_label)
+        self.unleash_toggle.set_child(_ul_box)
+        # _paint_unleash rewrites this label on arm/disarm and on every chat
+        # switch, so it has to be reachable from the button itself.
+        self.unleash_toggle._unleash_label = _ul_label
+        self.unleash_toggle.add_css_class("unleash-button")
+        self.unleash_toggle.set_active(self._unleashed)
+        self._paint_unleash(self.unleash_toggle, self._unleashed)
+        self.unleash_toggle.connect("toggled", self._on_unleash_toggled)
+        actions.append(self.unleash_toggle)
+
+        # (The Low|Med|High reasoning pill used to sit here. It moved to
+        # Settings and became a per-chat, start-of-chat decision - see
+        # _effective_effort / _effort_locked. A dial that changes how the model
+        # reasons cannot be a mid-conversation control: half the transcript
+        # would come from one setting and half from another with nothing on
+        # screen to say which. The composer is for composing.)
+
+        # Attach — a clean paperclip glyph on the glass frame (no PNG plaque).
+        attach_btn = _glyph_button("+", "Attach a file")
+        attach_btn.connect("clicked", lambda *_: self._pick_attachment())
+        actions.append(attach_btn)
+
+        # (The Suggestion button was removed — while Basilisk is working, just
+        # type your nudge and press Enter and it's sent as a mid-run suggestion
+        # without stopping. The mouse Stop control is unchanged. The Camera
+        # button was removed too. The Terminal toggle moved UP to the header.)
+
+        # Speaker toggle — read assistant replies aloud.  Only shown when
+        # a TTS engine is actually available on the box. Clean speaker glyph.
+        self.tts_toggle = None
+        if self.tts is not None and self.tts.available():
+            self.tts_toggle = _glyph_button(
+                "\u25b6", f"Read replies aloud — {self.tts.engine_name()}",
+                toggle=True)
+            on = bool(self.settings.get("tts_enabled"))
+            self.tts_toggle.set_active(on)
+            if on:
+                self.tts_toggle.add_css_class("toggled")
+            self.tts_toggle.connect("toggled", self._on_tts_toggled)
+            actions.append(self.tts_toggle)
+
+        # (The Terminal/log toggle moved UP to the header bar — built there as
+        # a clean glyph button, next to Settings and Notifications.)
+
+        # The chips live in a horizontal scroller so a phone too narrow to fit
+        # them all can't be forced wider than the screen — they scroll instead.
+        actions.set_margin_start(0)
+        actions.set_margin_end(0)
+        chips_scroll = Gtk.ScrolledWindow()
+        chips_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        chips_scroll.set_hexpand(True)
+        chips_scroll.set_propagate_natural_height(True)
+        chips_scroll.set_kinetic_scrolling(True)
+        chips_scroll.set_overlay_scrolling(True)
+        chips_scroll.add_css_class("chips-scroll")
+        chips_scroll.set_child(actions)
+
+        actions_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        actions_row.set_margin_start(4)
+        actions_row.set_margin_end(4)
+        # Buttons on the LEFT (chips_scroll is hexpand so it fills), model name
+        # pushed to the RIGHT edge.
+        actions_row.append(chips_scroll)
+        self.model_btn.set_halign(Gtk.Align.END)
+        actions_row.append(self.model_btn)
+
+        # The idle/thinking status pill was removed — the chat itself now shows
+        # exactly what each turn did, so a persistent "idle" pill was redundant.
+        # The pill objects are still created (kept un-parented) so _set_working /
+        # update_status_pills keep working; they just aren't shown.
+        self.status_pill_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                       spacing=6)
+        self.status_pill_box.add_css_class("status-pill")
+        self.status_pill_spinner = Gtk.Spinner()
+        self.status_pill_label = Gtk.Label(label="idle")
+        self.status_pill_box.append(self.status_pill_spinner)
+        self.status_pill_box.append(self.status_pill_label)
+
+        # ── THE ACTIVITY FEED RIDES ON THE BUTTON TRAY ──
+        # It started inside the message list, where after two or three more
+        # messages the one widget telling you what Basilisk is doing had
+        # scrolled off the top of the screen; a status surface you have to go
+        # looking for is not a status surface. So it was pinned into a dock of
+        # its own above this row — which fixed that and introduced a worse
+        # problem: a full-width panel with its own border and its own margins
+        # sitting permanently between the last message and the composer, with
+        # a gap on either side of it, present whether anything was running or
+        # not.
+        #
+        # It belongs HERE, on the same tray as Unleash, attach and the speaker
+        # — the same size as them, in the same material, reading as one bar of
+        # controls. The detail opens in a popover over the conversation (see
+        # ActivityFeedWidget._build), so the tray never changes height and
+        # there is no hole to leave behind.
+        #
+        # It goes AFTER the chip scroller (which is hexpand, so it holds the
+        # left edge) and BEFORE the model button: that way the buttons on the
+        # left never shift when a turn starts and the chip appears.
+        self.activity_dock = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                     spacing=0)
+        self.activity_dock.add_css_class("activity-dock")
+        self.activity_dock.set_valign(Gtk.Align.CENTER)
+        self.activity_dock.set_visible(False)
+        actions_row.insert_child_after(self.activity_dock, chips_scroll)
+
+        area.append(actions_row)
+
+        # Staged attachments sit HERE — between the action chips and the
+        # composer — so they are visible above the box you type in rather
+        # than pasted inside it.
+        area.append(self._build_attach_tray())
+
+        # Input
+        ibox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        ibox.add_css_class("input-frame")
+        ibox.set_margin_start(4)
+        ibox.set_margin_end(4)
+
+        in_scroll = Gtk.ScrolledWindow()
+        in_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        in_scroll.set_min_content_height(_scaled(64, floor=52))
+        in_scroll.set_max_content_height(_scaled(200, floor=150))
+        in_scroll.set_propagate_natural_height(True)
+        in_scroll.set_hexpand(True)
+        in_scroll.set_valign(Gtk.Align.FILL)
+
+        self.input_view = Gtk.TextView()
+        self.input_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.input_view.set_top_margin(10)
+        self.input_view.set_bottom_margin(10)
+        self.input_view.set_left_margin(4)
+        self.input_view.set_right_margin(4)
+        in_scroll.set_child(self.input_view)
+        ibox.append(in_scroll)
+
+        kc = Gtk.EventControllerKey()
+        kc.connect("key-pressed", self._on_input_key)
+        self.input_view.add_controller(kc)
+
+        # ── MIC / speech-to-text button ──
+        # Tap to record, tap again to stop → the clip is transcribed
+        # (SiliconFlow SenseVoice or Groq Whisper, per Settings → Voice) and
+        # dropped into the composer; with Auto-send on it sends straight away.
+        # Always shown so the feature is discoverable; if no recorder or key is
+        # configured, tapping it shows exactly what to install/set (see
+        # _on_mic_clicked → stt.unavailable_reason). The whole record→transcribe
+        # flow lives in _on_mic_clicked / _transcribe_worker / _apply_transcript
+        # and SpeechToText in basilisk_voice.
+        self.mic_btn = Gtk.Button()
+        self.mic_btn.add_css_class("mic-button")
+        self.mic_btn.set_valign(Gtk.Align.CENTER)
+        self.mic_btn.set_vexpand(False)
+        self.mic_btn.set_hexpand(False)
+        self.mic_btn.set_icon_name("audio-input-microphone-symbolic")
+        self.mic_btn.set_tooltip_text("Speak (tap to start, tap to send)")
+        self.mic_btn.connect("clicked", lambda *_: self._on_mic_clicked())
+        ibox.append(self.mic_btn)
+        # Reflect whether a recorder is actually available right now.
+        try:
+            self._set_mic_visual("idle")
+        except Exception:
+            pass
+
+        # Big Send button wearing the dragon logo.  It glows while Basilisk is
+        # working (a tap then stops her) rather than turning into a stop icon.
+        self.send_btn = Gtk.Button()
+        self.send_btn.add_css_class("send-button")
+        self.send_btn.set_valign(Gtk.Align.CENTER)
+        self.send_btn.set_vexpand(False)
+        self.send_btn.set_hexpand(False)
+        self.send_btn.set_tooltip_text("Send")
+        if _AVATAR_PNG_PATH:
+            # Small fixed-size emblem, same size it always was.  The button hugs
+            # it (min-width:0, tiny padding, no border in CSS) so no dark gutter
+            # shows around it; the emblem art is already cropped flush to its
+            # frame so there's no transparent margin either.
+            _send_img = Gtk.Image.new_from_file(_AVATAR_PNG_PATH)
+            _send_img.set_pixel_size(_scaled(40, floor=30))
+            self.send_btn.set_child(_send_img)
+        else:
+            self.send_btn.set_icon_name("send-to-symbolic")
+        self.send_btn.connect("clicked", lambda *_: self._on_send_or_stop())
+        ibox.append(self.send_btn)
+
+        # Burning status bar sits directly above the composer / Send button.
+        area.append(self.working_row)
+        area.append(ibox)
+        # Now that the pill exists, set its initial visibility from the active
+        # model (the earlier _update_model_button ran before it was built).
+        self._refresh_effort_pill()
+        return area
+
+    # ── actions ────────────────────────────────────────────────
+
+    def _wire_actions(self):
+        def add(name, cb):
+            a = Gio.SimpleAction.new(name, None)
+            a.connect("activate", lambda *_: cb())
+            self.add_action(a)
+        add("settings", self._open_settings)
+        add("about", self._open_about)
+        add("rename-chat", self._rename_current_chat)
+        add("delete-chat", self._delete_current_chat)
+        add("pin-chat", self._toggle_pin_current)
+        add("new-chat", self._new_chat)
+        add("focus-composer", self._focus_composer)
+        add("toggle-sidebar", self._toggle_sidebar)
+        add("stop", self._stop_if_busy)
+        self._wire_shortcuts()
+        GLib.timeout_add_seconds(10, self._poll_status)
+        self._poll_status()
+
+    # ══════════════════════════════════════════════════════════════
+    # KEYBOARD: the part every desktop app has and this one did not
+    # ══════════════════════════════════════════════════════════════
+    # Five actions were registered and NONE of them had an accelerator, so
+    # settings, rename, delete and pin were mouse-only - and "new chat" was
+    # not even an action, just a click handler on the wordmark. Escape was
+    # wired to the composer's own key controller, which means it stopped a
+    # running turn only while the cursor happened to be in the text box;
+    # click a message first and the app had no stop key at all.
+    #
+    # These are the standard bindings, not invented ones: an operator who
+    # has used any other desktop app already knows them.
+    _ACCELS = (
+        ("win.new-chat",       ("<Primary>n",)),
+        ("win.settings",       ("<Primary>comma",)),
+        ("win.focus-composer", ("<Primary>l",)),
+        ("win.toggle-sidebar", ("F9",)),
+        ("win.rename-chat",    ("F2",)),
+    )
+
+    def _wire_shortcuts(self):
+        app = self.get_application()
+        if app is not None:
+            for action, keys in self._ACCELS:
+                try:
+                    app.set_accels_for_action(action, list(keys))
+                except Exception as e:
+                    log(f"accel {action} failed: {e}")
+        # Escape is NOT in the table above on purpose. An application-level
+        # accelerator would swallow it before dialogs and popovers get it,
+        # and Escape closing the Settings dialog matters more than Escape
+        # stopping a turn. A BUBBLE-phase controller on the window is the
+        # correct place: everything that wants Escape has already had it by
+        # the time this runs, so it only fires when nothing else claimed it.
+        try:
+            kc = Gtk.EventControllerKey()
+            kc.set_propagation_phase(Gtk.PropagationPhase.BUBBLE)
+            kc.connect("key-pressed", self._on_window_key)
+            self.add_controller(kc)
+        except Exception as e:
+            log(f"window key controller failed: {e}")
+
+    def _on_window_key(self, controller, keyval, keycode, state):
+        """The shortcut handler of last resort.
+
+        The accelerators registered above go through GtkApplication, and
+        GtkApplication only dispatches them to the window it considers ACTIVE
+        - which on X11 means a window manager has sent it a focus-in. Run
+        Basilisk on a bare X server, a kiosk session, or anything else without
+        a WM and every one of those bindings silently does nothing, while
+        typing still works because key delivery to the focused widget is a
+        different path entirely.
+
+        So the same combinations are handled here as well. There is no
+        double-fire: if the accelerator did dispatch, it consumed the event
+        and this controller is never reached. BUBBLE phase is deliberate -
+        the focused widget and any open dialog get first refusal, which is
+        what keeps Escape closing a dialog instead of stopping a turn behind
+        it, and keeps Ctrl+A selecting text inside the composer."""
+        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        alt = bool(state & Gdk.ModifierType.ALT_MASK)
+        if keyval == Gdk.KEY_Escape:
+            if self._is_busy():
+                self._request_stop()
+                return True
+            return False
+        if ctrl and not alt:
+            if keyval in (Gdk.KEY_n, Gdk.KEY_N):
+                self._new_chat()
+                return True
+            if keyval in (Gdk.KEY_l, Gdk.KEY_L):
+                self._focus_composer()
+                return True
+            if keyval in (Gdk.KEY_comma,):
+                self._open_settings()
+                return True
+        if keyval == Gdk.KEY_F9:
+            self._toggle_sidebar()
+            return True
+        if keyval == Gdk.KEY_F2:
+            self._rename_current_chat()
+            return True
+        return False
+
+    def _stop_if_busy(self):
+        """Escape, from anywhere in the window.
+
+        Deliberately a no-op when idle rather than closing the window: this
+        app runs long autonomous jobs, and a stop key that sometimes quits
+        instead is a stop key nobody will trust enough to press."""
+        if self._is_busy():
+            self._request_stop()
+
+    def _focus_composer(self):
+        view = getattr(self, "input_view", None)
+        if view is not None:
+            view.grab_focus()
+
+    def _toggle_sidebar(self):
+        split = getattr(self, "split", None)
+        if split is None:
+            return
+        try:
+            split.set_show_sidebar(not split.get_show_sidebar())
+        except Exception as e:
+            log(f"sidebar toggle failed: {e}")
+
+    def _poll_status(self):
+        def _bg():
+            on = is_online(timeout=0.8)
+            GLib.idle_add(self.update_status_pills, on)
+        threading.Thread(target=_bg, daemon=True).start()
+        return True
+
+    def update_status_pills(self, online: Optional[bool] = None):
+        # Connectivity is now a single green/red dot next to BASILISK in the
+        # sidebar header (the old provider/online pills were removed).
+        if online is None:
+            online = is_online(max_age=15)
+        dot = getattr(self, "online_dot", None)
+        if dot is None:
+            return False
+        if online:
+            dot.remove_css_class("offline")
+            dot.add_css_class("online")
+            dot.set_tooltip_text("Online")
+        else:
+            dot.remove_css_class("online")
+            dot.add_css_class("offline")
+            dot.set_tooltip_text("Offline")
+        return False
+
+    # ── chat list ───────────────────────────────────────────────
+
+    def _refresh_sidebar(self, query: str = ""):
+        child = self.chat_listbox.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            self.chat_listbox.remove(child)
+            child = nxt
+
+        chats = self.store.list_chats()
+        if query:
+            ql = query.lower()
+            chats = [c for c in chats if ql in c.title.lower()]
+        if not chats:
+            empty = Gtk.Label(
+                label="No matches." if query else "No chats yet.")
+            empty.add_css_class("empty-state")
+            self.chat_listbox.append(empty)
+            return False
+        for c in chats:
+            row = ChatRow(c)
+            self.chat_listbox.append(row)
+            if c.id == self.current_chat_id:
+                self.chat_listbox.select_row(row)
+        return False
+
+    def _on_search(self, entry):
+        self._refresh_sidebar(entry.get_text().strip())
+
+    def _on_chat_selected(self, _lb, row):
+        if isinstance(row, ChatRow) and row.chat.id != self.current_chat_id:
+            self._load_chat(row.chat.id)
+
+    def _on_chat_rightclick(self, gesture, n_press, x, y):
+        row = self.chat_listbox.get_row_at_y(int(y))
+        if isinstance(row, ChatRow):
+            self.chat_listbox.select_row(row)
+            self._load_chat(row.chat.id)
+            self._show_chat_context_menu(row, x, y)
+
+    def _on_chat_longpress(self, gesture, x, y):
+        row = self.chat_listbox.get_row_at_y(int(y))
+        if isinstance(row, ChatRow):
+            self.chat_listbox.select_row(row)
+            self._load_chat(row.chat.id)
+            self._show_chat_context_menu(row, x, y)
+
+    def _show_chat_context_menu(self, row, x, y):
+        menu = Gio.Menu()
+        menu.append("Pin / unpin", "win.pin-chat")
+        menu.append("Rename", "win.rename-chat")
+        menu.append("Delete", "win.delete-chat")
+        popover = Gtk.PopoverMenu.new_from_model(menu)
+        # The gesture coords (x, y) are relative to the LISTBOX, so the popover
+        # must be parented to the listbox for them to line up — parenting to the
+        # row (its own coordinate space) is what made it appear at a random spot.
+        popover.set_parent(self.chat_listbox)
+        popover.set_has_arrow(False)
+        popover.add_css_class("context-menu")
+        rect = Gdk.Rectangle()
+        rect.x, rect.y, rect.width, rect.height = int(x), int(y), 1, 1
+        popover.set_pointing_to(rect)
+        # Unparent when dismissed so it doesn't leak / warn.
+        popover.connect("closed", lambda p: p.unparent())
+        popover.popup()
+
+    # ── chat load / new ─────────────────────────────────────────
+
+    # ══════════════════════════════════════════════════════════════
+    # PER-CHAT SESSION STATE
+    # ══════════════════════════════════════════════════════════════
+    # The name of every field that belongs to ONE conversation rather than
+    # to the window, with the value a brand-new chat starts from. A callable
+    # default is called (so no two chats can end up sharing one list).
+    #
+    # Unleash is deliberately in here and deliberately starts OFF. It used to
+    # be a global read from settings at startup, so arming it for one target
+    # left it armed for every chat opened afterwards, including chats opened
+    # days later. Arming is a decision about THIS engagement; a new chat is a
+    # new engagement and starts stood down.
+    _SESSION_FIELDS = (
+        ("_unleashed",                 False),
+        ("_mission_active",            False),
+        ("_mission_objective",         ""),
+        ("_mission_kicks",             0),
+        ("_mission_directive",         ""),
+        ("_mission_verify_pending",    False),
+        ("_mission_no_action_streak",  0),
+        ("_mission_ever_acted",        False),
+        ("_recent_commands",           list),
+        ("_tool_chain_depth",          0),
+        ("_tools_locked",              False),
+        ("_error_retries",             0),
+        ("_bad_propose_retries",       0),
+        ("_promise_pushes",            0),
+        ("_forced_fetch_done",         False),
+        ("_forced_followthrough",      0),
+        ("_last_web_result",           ""),
+        ("_forced_verify_done",        False),
+        ("_leash_work_turn",           False),
+        ("_fabricated_this_turn",      0),
+        ("_tools_used_this_request",   frozenset),
+        ("_stop_requested",            False),
+    )
+
+    def _session_defaults(self) -> Dict[str, Any]:
+        return {name: (dflt() if callable(dflt) else dflt)
+                for name, dflt in self._SESSION_FIELDS}
+
+    def _session_snapshot(self) -> Dict[str, Any]:
+        out = {}
+        for name, dflt in self._SESSION_FIELDS:
+            val = getattr(self, name, dflt() if callable(dflt) else dflt)
+            # Copy the containers. Handing the live list to the snapshot
+            # would let the next chat's loop-detection append into the
+            # previous chat's history.
+            if isinstance(val, list):
+                val = list(val)
+            elif isinstance(val, (set, frozenset)):
+                val = frozenset(val)
+            out[name] = val
+        return out
+
+    def _session_restore(self, state: Dict[str, Any]):
+        """Put a chat's session back on the window, then re-sync the two
+        widgets that display it. Guarded so the toggles' own handlers - which
+        save settings, toast, and stand a mission down - do not fire for what
+        is only a redraw."""
+        self._restoring_session = True
+        try:
+            for name, dflt in self._SESSION_FIELDS:
+                setattr(self, name, state.get(
+                    name, dflt() if callable(dflt) else dflt))
+            btn = getattr(self, "unleash_toggle", None)
+            if btn is not None and btn.get_active() != self._unleashed:
+                btn.set_active(self._unleashed)
+            if btn is not None:
+                self._paint_unleash(btn, self._unleashed)
+        finally:
+            self._restoring_session = False
+
+    def _switch_session(self, new_chat_id):
+        """Leave the current chat's session and enter another's.
+
+        A turn in flight belongs to the chat that started it, so leaving that
+        chat ENDS it rather than letting it run on into a conversation the
+        operator is no longer looking at. That is the whole point: two chats
+        are two sessions, and only the one on screen is live."""
+        prev = self.current_chat_id
+        if prev == new_chat_id:
+            return
+        if prev is not None:
+            if self._is_busy():
+                # _request_stop tears the turn down through the normal path
+                # (partial reply committed to the chat it belongs to), so
+                # nothing is lost - it just stops here instead of following
+                # the operator into the next chat.
+                self._request_stop()
+                self._show_toast(
+                    "Stopped the run in the chat you left - each chat is its "
+                    "own session.", timeout=4)
+            self._sessions[prev] = self._session_snapshot()
+        self._session_restore(
+            self._sessions.get(new_chat_id) or self._session_defaults())
+
+    def _forget_session(self, chat_id):
+        self._sessions.pop(chat_id, None)
+
+    def _new_chat(self):
+        # Don't leave an unused 'New chat' behind when starting another.
+        if (self.settings.get("discard_empty_chats", True)
+                and self.current_chat_id is not None):
+            try:
+                if self.store.count_messages(self.current_chat_id) == 0:
+                    self.store.delete_chat(self.current_chat_id)
+                    self._forget_session(self.current_chat_id)
+                    self._forget_chat_effort(self.current_chat_id)
+            except Exception:
+                pass
+        backend, model = self.router.pick()
+        cid = self.store.create_chat(
+            title="New chat", model=model,
+            agent_mode=self.settings.get("agent_mode_default", True))
+        # A new chat starts locked down: the sudo password and any community-
+        # source grants from the previous chat are wiped — each must be
+        # re-authorised in the new chat.
+        self._clear_sudo_pw()
+        self._web_grants = set()
+        self._load_chat(cid)
+        self._refresh_sidebar()
+        return False
+
+    def _load_chat(self, chat_id: int):
+        # Sessions swap BEFORE anything else: _switch_session may stop a turn
+        # that is still holding self.streaming_msg_widget, and that widget is
+        # one of the children the clear-out below unparents.
+        self._switch_session(chat_id)
+        self.current_chat_id = chat_id
+        # The dial the backend reads follows the chat, so a chat latched at
+        # HIGH keeps thinking at HIGH when you come back to it tomorrow.
+        self._apply_chat_effort(chat_id)
+        chat = self.store.get_chat(chat_id)
+        if not chat:
+            return
+        self.current_agent_mode = bool(chat.agent_mode)
+        self.agent_toggle.set_active(self.current_agent_mode)
+        if self.current_agent_mode:
+            self.agent_toggle.add_css_class("toggled")
+        else:
+            self.agent_toggle.remove_css_class("toggled")
+        self.chat_title_lbl.set_text(chat.title)
+        # The window title said "Basilisk" and nothing else, for every chat,
+        # forever - so the taskbar, the alt-tab switcher and a screenshot all
+        # showed the same thing whichever conversation was open. Every other
+        # document-shaped app puts the document in the title.
+        try:
+            self.set_title(f"{chat.title} - {APP_NAME}")
+        except Exception:
+            pass
+        self._refresh_subtitle()
+
+        child = self.msg_box.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            # A live feed keeps a GLib timeout running. Unparenting it is not
+            # enough — the clock would keep ticking against a widget nothing
+            # can see, forever, once per chat switch. Dispose stops it.
+            # DISPOSE THE BUBBLES TOO, not just the feeds.
+            # Only ActivityFeedWidget was disposed here, so every chat switch
+            # unparented its MessageWidgets with their signal handlers still
+            # connected -- and a handler's C-side closure holds the widget, so
+            # unparenting frees nothing. Measured: 20 chats visited 3 times
+            # went 270 -> 452 -> 634 live bubbles. The rolling trim already
+            # disposes; the chat switch has to as well, or it is the larger
+            # leak of the two.
+            if isinstance(child, (ActivityFeedWidget, MessageWidget)):
+                if child is not self.streaming_msg_widget \
+                        and child is not getattr(self, "_speaking_widget", None):
+                    try:
+                        child.dispose_widget()
+                    except Exception:
+                        pass
+            self.msg_box.remove(child)
+            child = nxt
+        # Switching chats abandons the visible feed; the turn it belonged to
+        # keeps running and keeps writing to the store, it just has nowhere to
+        # draw. The dock is OUTSIDE the message list, so clearing the list does
+        # not clear it — it has to be emptied explicitly or the previous
+        # conversation's status strip stays pinned over the new one.
+        self._clear_activity_dock()
+        # Selecting a chat in the sidebar leaves focus on the sidebar row, so
+        # the next thing typed went nowhere. Opening a conversation means you
+        # are about to type in it.
+        GLib.idle_add(self._focus_composer)
+
+        msgs = self.store.list_messages(chat_id)
+
+        # ── HISTORY MUST LOOK LIKE THE RUN LOOKED ──
+        # Tool rows are stored (`⚙ tool: name({...})`, meta kind=call) and were
+        # dropped outright on reload, while the bare-tool-step assistant rows
+        # around them rendered as `(working…)` bubbles. So a reopened chat
+        # showed several near-identical stub replies and no sign of the work
+        # that produced the real one. Rebuild it the way the live view drew it:
+        # the tool calls of a turn collapse into ONE folded feed, and the stub
+        # bubbles they belong to are not drawn at all.
+        items: List[Any] = []
+        pending: List[Any] = []
+
+        def _flush_pending():
+            if pending:
+                items.append(("feed", list(pending)))
+                pending.clear()
+
+        for m in msgs:
+            meta = m.meta or {}
+            if meta.get("kind") == "tool_result":
+                continue
+            if m.role == "tool":
+                if meta.get("kind") == "call":
+                    pending.append(m)
+                continue
+            if m.role == "assistant":
+                if not m.content.strip():
+                    continue
+                if _reply_is_tool_only(m.content):
+                    continue
+                _flush_pending()
+            else:
+                # An empty USER row was not filtered, only the assistant one,
+                # so a whitespace-only message rendered as a padded capsule
+                # with nothing in it. `"\n\n"` produced a 210px tall blank
+                # bubble under "YOU" -- it reads as a message that failed to
+                # load rather than one that was never really sent.
+                if not (m.content or "").strip():
+                    continue
+                _flush_pending()
+            items.append(("msg", m))
+        _flush_pending()
+
+        if not items:
+            self._show_empty_state()
+        else:
+            # Only build widgets for the most recent window. Older messages stay
+            # safe in the store (and would be trimmed on append anyway) — not
+            # building them means opening a long conversation is fast and never
+            # spikes RAM, instead of constructing then destroying hundreds of
+            # heavy widgets.
+            # Same budget, same reason: walk back until MAX_CHAT_ROWS
+            # MESSAGES have been claimed, and keep whatever feeds fall
+            # between them. `items[-MAX_CHAT_ROWS:]` counted feeds against
+            # the budget, so reopening an agentic chat showed roughly half
+            # the exchanges a plain one did.
+            _kept = 0
+            _start = len(items)
+            for _i in range(len(items) - 1, -1, -1):
+                _start = _i
+                if items[_i][0] == "msg":
+                    _kept += 1
+                    if _kept >= MAX_CHAT_ROWS:
+                        break
+            for kind, payload in items[_start:]:
+                if kind == "feed":
+                    self._append_history_feed(payload)
+                else:
+                    self._append_message_widget(
+                        payload.role, payload.content, payload.meta)
+
+        # ── THE REPLY IN FLIGHT BELONGS BACK ON SCREEN ──
+        # The clear loop above unparents everything, including the bubble the
+        # live stream is writing into, and the rebuild cannot replace it: its
+        # stored row is still "" at this point and the loop above skips empty
+        # assistant rows on purpose. So switching away from a chat mid-reply
+        # and back showed NOTHING in flight, and when the stream finished it
+        # wrote the finished answer into a widget with no parent -- the answer
+        # was in the database and invisible until the operator happened to
+        # switch chats again. Measured: rows 11 -> 10 on leaving, still 10 on
+        # returning, and the completed reply nowhere on screen.
+        #
+        # Re-attaching is the whole fix: the widget is intact, it just needs
+        # its place back, and only in the chat that actually owns the stream.
+        _live = self.streaming_msg_widget
+        if _live is not None and self.streaming_chat_id == chat_id:
+            try:
+                if _live.get_parent() is None:
+                    self.msg_box.append(_live)
+                elif _live.get_parent() is not self.msg_box:
+                    _live.get_parent().remove(_live)
+                    self.msg_box.append(_live)
+            except Exception:
+                log("re-attach of in-flight bubble failed: "
+                    + traceback.format_exc())
+
+        GLib.idle_add(self._force_scroll_to_bottom)
+
+    def _show_empty_state(self):
+        """The hero card a new chat opens on.
+
+        This was deliberately blank for a long time, on the reasoning that the
+        backdrop art said enough. It did not: an empty chat pane gives the
+        operator no confirmation of the four things they are about to commit a
+        conversation to - which model is answering, whether the tools are
+        armed, how hard it is going to think, and how much context it has.
+        Those were each two clicks away in different places. The card puts
+        them on the page they are already looking at, and disappears the
+        moment the first message lands.
+
+        Everything here is READ-ONLY. It is a nameplate, not a control panel:
+        the moment you can change the model from it, it becomes another place
+        that has to be kept in sync with Settings and the switcher."""
+        key = self.settings.get("active_provider", "siliconflow")
+        spec = PROVIDERS_BY_KEY.get(key)
+        model_id = self._active_model_id()
+        info = spec.info(model_id) if spec else None
+        short = (info.label if info
+                 else (model_id.split("/")[-1] if model_id else "not set"))
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        card.add_css_class("hero-card")
+        card.set_halign(Gtk.Align.CENTER)
+        card.set_valign(Gtk.Align.CENTER)
+
+        # Emblem
+        if _EMBLEM_PNG_PATH:
+            try:
+                tex = _cached_texture(_EMBLEM_PNG_PATH, 232)
+                if tex is not None:
+                    pic = Gtk.Picture.new_for_paintable(tex)
+                    pic.set_can_target(False)
+                    pic.set_size_request(_scaled(104, floor=72),
+                                         _scaled(104, floor=72))
+                    pic.set_content_fit(Gtk.ContentFit.CONTAIN)
+                    pic.add_css_class("hero-emblem")
+                    pic.set_halign(Gtk.Align.CENTER)
+                    card.append(pic)
+            except Exception as e:
+                log(f"hero emblem failed: {e}")
+
+        eyebrow = Gtk.Label(label="THE PRIEST'S")
+        eyebrow.add_css_class("hero-eyebrow")
+        card.append(eyebrow)
+
+        title = Gtk.Label(label="BASILISK")
+        title.add_css_class("hero-title")
+        card.append(title)
+
+        rule = Gtk.Box()
+        rule.add_css_class("hero-rule")
+        rule.set_halign(Gtk.Align.CENTER)
+        rule.set_size_request(_scaled(300, floor=180), _scaled(3, floor=3))
+        card.append(rule)
+
+        # ── WHAT IT SAYS IT IS ──
+        # This used to read "AUTONOMOUS SECURITY ASSISTANT", which is the one
+        # thing Basilisk is NOT until you arm it. Out of the box it is a
+        # general and coding assistant: it reads the live web, opens a repo,
+        # edits it and runs your tests. The autonomous pentest agent is a MODE
+        # you switch on deliberately, with a target you confirm - and the
+        # first thing an operator sees should not overstate what is running.
+        sub = Gtk.Label(label="GENERAL & CODING ASSISTANT")
+        sub.add_css_class("hero-subtitle")
+        card.append(sub)
+
+        arm = Gtk.Label(label="Unleash arms the autonomous pentest agent.")
+        arm.add_css_class("hero-armline")
+        card.append(arm)
+
+        # Live model chip
+        chip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=9)
+        chip.add_css_class("hero-chip")
+        chip.set_halign(Gtk.Align.CENTER)
+        dot = Gtk.Label(label="\u25cf")
+        dot.add_css_class("hero-chip-dot")
+        chip.append(dot)
+        chip_lbl = Gtk.Label(label=short)
+        chip_lbl.add_css_class("hero-chip-label")
+        chip.append(chip_lbl)
+        card.append(chip)
+
+        # ── The four facts ──
+        # Read off the same places the turn will read them from, so the card
+        # cannot drift from what actually happens when you press send.
+        rows = [("Model", short),
+                ("Provider", spec.label if spec else key)]
+        rows.append(("Mode", "Agent \u00b7 system tools"
+                     if self.current_agent_mode else "Chat \u00b7 no tools"))
+        if supports_reasoning_effort(model_id):
+            rows.append(("Reasoning", self._effective_effort().capitalize()))
+        if info is not None and getattr(info, "ctx_k", 0):
+            rows.append(("Context", f"{info.ctx_k}K tokens"))
+
+        grid = Gtk.Grid()
+        grid.add_css_class("hero-specs")
+        grid.set_row_spacing(_scaled(6, floor=3))
+        grid.set_column_spacing(_scaled(18, floor=10))
+        for r, (k, v) in enumerate(rows):
+            kl = Gtk.Label(label=k)
+            kl.add_css_class("hero-spec-key")
+            kl.set_xalign(0.0)
+            grid.attach(kl, 0, r, 1, 1)
+            vl = Gtk.Label(label=v)
+            vl.add_css_class("hero-spec-val")
+            vl.set_xalign(0.0)
+            grid.attach(vl, 1, r, 1, 1)
+        card.append(grid)
+
+        hint = Gtk.Label(label="Ask a question, or point it at a repo. Enter sends.")
+        hint.add_css_class("hero-hint")
+        card.append(hint)
+
+        # NOT vexpand-centred. self.msg_box is valign=START on purpose (see
+        # the long note where it is built: a FILL column hands its last child
+        # the leftover viewport height, which is the "bubble is five screens
+        # tall" bug). So the card is placed with a margin instead of asking
+        # for vertical space the column is deliberately not giving out.
+        card.set_margin_top(_scaled(46, floor=20))
+        card.set_margin_bottom(_scaled(24, floor=10))
+        self.msg_box.append(card)
+
+    def _refresh_subtitle(self):
+        # Model + agent indicator removed from the header by request: the model
+        # is visible in the composer switcher, and agent state shows as the
+        # green-lit toggle.  Keep the label empty so the header stays slim.
+        if hasattr(self, "chat_subtitle_lbl") and self.chat_subtitle_lbl:
+            self.chat_subtitle_lbl.set_text("")
+
+    # ── messages ────────────────────────────────────────────────
+
+    # Overlay scrollbars float ON TOP of the content, so the rightmost thing
+    # in a row — the user's avatar — was drawn underneath the scrollbar. The
+    # message box reserves the gutter instead.
+    _SCROLLBAR_GUTTER = 14
+
+    def _append_message_widget(self, role, content, meta=None):
+        # Clear empty state if present. The feed is a first-class row in this
+        # box now, so "not a MessageWidget" is no longer a safe test for "this
+        # is the empty-state placeholder" — it would delete the activity feed
+        # of the turn currently running.
+        first = self.msg_box.get_first_child()
+        if first is not None and not isinstance(
+                first, (MessageWidget, ActivityFeedWidget)):
+            self.msg_box.remove(first)
+        w = MessageWidget(role, content, meta,
+                          on_run_command=self._run_proposed_command,
+                          on_apply_edit=self._run_proposed_edit,
+                          on_speak=self._on_message_speak,
+                          show_thoughts=self.settings.get("show_thoughts", True))
+        self.msg_box.append(w)
+        # Rolling window: keep only the most recent MessageWidgets in the view.
+        # The full transcript is in the SQLite ChatStore and the model's history
+        # is rebuilt from there — these widgets are display only, so trimming the
+        # oldest frees GTK memory (and speeds layout) without touching context,
+        # autonomy, or behaviour. Only trims from the FRONT, never the live tail.
+        # Each trimmed bubble is DISPOSED (its refs broken) so it's reclaimed
+        # promptly, not just unparented; a throttled gc sweep collects any cycles.
+        try:
+            trimmed = 0
+            extra = self._count_msg_rows() - MAX_CHAT_ROWS
+            while extra > 0:
+                old = self.msg_box.get_first_child()
+                if old is None or old is w:
+                    break
+                if isinstance(old, ActivityFeedWidget):
+                    # Same reason as the chat-switch teardown: a trimmed feed
+                    # that is still live keeps a 200ms timeout running against
+                    # a widget nobody can see.
+                    if old is not getattr(self, "_activity_feed", None):
+                        try:
+                            old.dispose_widget()
+                        except Exception:
+                            pass
+                if isinstance(old, MessageWidget):
+                    # Never dispose a bubble the WINDOW still holds a live
+                    # reference to. The view's rolling trim and the window's
+                    # streaming/speaking pointers are independent, so trimming
+                    # could null the containers out from under a widget that is
+                    # still receiving tokens or TTS state changes. Unparent it
+                    # (frees the layout cost) but leave its innards intact.
+                    if old is not self.streaming_msg_widget \
+                            and old is not self._speaking_widget:
+                        try:
+                            old.dispose_widget()
+                        except Exception:
+                            pass
+                self.msg_box.remove(old)
+                trimmed += 1
+                extra -= 1
+            if trimmed:
+                # Reclaim the freed widgets' memory. Throttled so a fast burst of
+                # messages doesn't pay a gc pause on every single one.
+                self._trim_since_gc = getattr(self, "_trim_since_gc", 0) + trimmed
+                if self._trim_since_gc >= 8:
+                    self._trim_since_gc = 0
+                    gc.collect()
+        except Exception:
+            pass
+        # ── FORCE ONLY FOR WHAT THE OPERATOR HIMSELF DID ──
+        # This was unconditional, so a new ASSISTANT bubble slammed the view
+        # to the bottom and re-armed the stick -- discarding the position
+        # _on_vadj_value_changed had just correctly recorded. Measured while
+        # reading history at the top of a 30-message chat: an assistant
+        # append moved the view 4769px and flipped stick False -> True, and
+        # with the rolling trim the row being read was unparented out from
+        # under the cursor.
+        #
+        # Sending a message is a request to see it, so a user row still
+        # forces. An arriving reply is not: it follows the tail only if the
+        # operator was already at the tail, which is exactly what the
+        # streamed TOKENS of that same reply have always done. The two now
+        # agree.
+        if role == "user":
+            GLib.idle_add(self._force_scroll_to_bottom)
+        else:
+            GLib.idle_add(self._scroll_to_bottom)
+        return w
+
+    def _attach_streaming_bubble(self):
+        """Attach the deferred streaming bubble to the chat the first time real
+        text arrives. Before this, the turn may run tool calls (web search,
+        recon) with no visible text — and we keep the bubble out of the chat so
+        it doesn't flicker in and back out. Idempotent: only the first call
+        attaches; the rest are no-ops."""
+        if getattr(self, "_streaming_attached", True):
+            return
+        w = self.streaming_msg_widget
+        if w is None:
+            return
+        # Same empty-state clear as _append_message_widget: drop a non-message
+        # first child (the empty-state placeholder), but never the activity feed.
+        first = self.msg_box.get_first_child()
+        if first is not None and not isinstance(
+                first, (MessageWidget, ActivityFeedWidget)):
+            self.msg_box.remove(first)
+        self.msg_box.append(w)
+        self._streaming_attached = True
+        GLib.idle_add(self._force_scroll_to_bottom)
+
+    _HIST_CALL_RE = re.compile(r"tool:\s*([a-zA-Z_0-9]+)\s*\((.*)\)\s*$", re.S)
+
+    def _append_history_feed(self, rows):
+        """One folded feed for the tool calls of a finished turn.
+
+        Parsed from the stored `⚙ tool: name({json})` line rather than from a
+        second, tidier column, because that line is what actually exists in
+        every chat already on disk — a new column would show history only for
+        chats recorded after this build."""
+        try:
+            # INLINE: this one lives in the transcript, so its step list opens
+            # underneath it rather than floating over the conversation from
+            # the window overlay. See ActivityFeedWidget.__init__.
+            feed = ActivityFeedWidget(inline=True)
+        except Exception:
+            return
+        added = 0
+        for m in rows:
+            name, args = "tool", None
+            try:
+                mt = self._HIST_CALL_RE.search(m.content or "")
+                if mt:
+                    name = mt.group(1)
+                    try:
+                        args = json.loads(mt.group(2))
+                    except Exception:
+                        args = None
+            except Exception:
+                pass
+            try:
+                feed.replay_step(name, _feed_detail(name, args))
+                added += 1
+            except Exception:
+                pass
+        if not added:
+            try:
+                feed.dispose_widget()
+            except Exception:
+                pass
+            return
+        try:
+            feed.finish_history()
+        except Exception:
+            pass
+        self.msg_box.append(feed)
+
+    def _count_msg_rows(self) -> int:
+        """How many CONVERSATION rows are on screen.
+
+        Activity feeds are deliberately not counted. MAX_CHAT_ROWS exists to
+        bound how many message bubbles are built, and a feed is a folded
+        status strip, not an exchange -- counting them spent the budget on
+        the tool log. Measured on a 12-turn agentic chat: 13 bubbles + 7
+        feeds = 20 rows, so a conversation with 24 user/assistant messages
+        showed thirteen of them. The more tools a run uses, the less of the
+        conversation survives, which is backwards.
+        """
+        n = 0
+        c = self.msg_box.get_first_child()
+        while c is not None:
+            if isinstance(c, MessageWidget):
+                n += 1
+            c = c.get_next_sibling()
+        return n
+
+    # ── STICKY BOTTOM ───────────────────────────────────────────
+    # A ONE-SHOT SCROLL CANNOT REACH THE BOTTOM OF A MESSAGE IT HAS NOT
+    # MEASURED YET. Every scroll here used to be `GLib.idle_add(...)` then
+    # `adj.set_value(adj.get_upper())`, and `upper` at that moment is still the
+    # value from BEFORE the new bubble was laid out — GTK has not re-measured.
+    # So the view jumped to the old bottom and the newest message sat below the
+    # fold, half-hidden behind the composer. It got worse the taller the new
+    # message was, which is why it looked like a "long conversation" bug: a
+    # one-line reply happened to fit, a reply with a table or a code block did
+    # not. Anything that changes height AFTER layout — an image finishing its
+    # load, a table reflowing, streamed text rewrapping — reopened the same gap.
+    #
+    # The fix is not a longer timeout, it is to stop guessing when layout is
+    # done: hold a STICK flag and re-snap on the adjustment's own `changed`
+    # signal, which GTK emits every time upper/page-size move. The flag clears
+    # when the operator scrolls up himself and re-arms when he comes back down,
+    # so following the tail never fights him.
+
+    _STICK_SLACK = 120        # px from the bottom that still counts as "at the bottom"
+
+    def _wire_scroll_stickiness(self):
+        adj = self.msg_scroll.get_vadjustment()
+        if adj is None:
+            return
+        self._stick_bottom = True
+        self._scroll_self = False
+        adj.connect("changed", self._on_vadj_changed)
+        adj.connect("value-changed", self._on_vadj_value_changed)
+
+    def _snap_bottom(self, adj=None):
+        adj = adj or self.msg_scroll.get_vadjustment()
+        if adj is None:
+            return
+        # ── set_value() IS A NO-OP WHEN THE VALUE IS ALREADY THE VALUE ──
+        #
+        # This is the bug behind "the answer is there but I'm looking at the
+        # top of it, and the scrollbar says I'm at the bottom".
+        #
+        # GtkAdjustment::set_value only emits ::value-changed when the number
+        # actually MOVES. GtkViewport does not hold a scroll offset of its
+        # own -- it applies one when that signal tells it to. So if the
+        # adjustment already reads `upper - page_size` at the moment we snap
+        # (which is exactly what happens when a chat is loaded: `upper` grows
+        # during the measure pass and the adjustment is clamped up to the new
+        # bottom BEFORE the viewport has been allocated), the set is silently
+        # dropped, the viewport never learns, and it keeps painting from
+        # offset 0.
+        #
+        # Nothing corrects it afterwards, because a value that never changes
+        # never emits again -- the view stays stuck until the operator
+        # scrolls by hand. Meanwhile GtkScrollbar reads the ADJUSTMENT, so
+        # its thumb sits confidently at the bottom of a view showing the top.
+        # Verified in the real app: value=1174.0, upper=1702.0, page=528.0 --
+        # a numerically perfect bottom -- rendering offset 0.
+        #
+        # Measured, not assumed: bouncing through 0 and back forces the
+        # notify, and the same frame then paints the true bottom.
+        target = max(0.0, adj.get_upper() - adj.get_page_size())
+        self._scroll_self = True
+        try:
+            if abs(adj.get_value() - target) < 0.5:
+                # The plain set would be dropped. Bounce so it cannot be.
+                # No paint can land between these two calls -- they run
+                # inside one main-loop callback -- so there is no flicker.
+                adj.set_value(0.0)
+            adj.set_value(target)
+        finally:
+            self._scroll_self = False
+        self._arm_snap_reassert()
+
+    # A snap issued before the scroller has been allocated computes its
+    # target from an `upper` that is still growing. Re-assert it for a few
+    # frames so the final measure wins, then stop -- a permanent tick
+    # callback would repaint forever, which is the lag this session already
+    # removed once by deleting an always-on CSS animation.
+    _SNAP_REASSERT_FRAMES = 4
+
+    def _arm_snap_reassert(self):
+        if getattr(self, "_snap_tick_id", 0):
+            return                       # already armed
+        self._snap_frames_left = self._SNAP_REASSERT_FRAMES
+        try:
+            self._snap_tick_id = self.msg_scroll.add_tick_callback(
+                self._snap_tick)
+        except Exception:
+            self._snap_tick_id = 0
+
+    def _snap_tick(self, _widget, _clock):
+        self._snap_frames_left = getattr(self, "_snap_frames_left", 0) - 1
+        if not getattr(self, "_stick_bottom", True):
+            self._snap_tick_id = 0
+            return GLib.SOURCE_REMOVE
+        adj = self.msg_scroll.get_vadjustment()
+        if adj is not None:
+            target = max(0.0, adj.get_upper() - adj.get_page_size())
+            if abs(adj.get_value() - target) > 0.5:
+                self._scroll_self = True
+                try:
+                    adj.set_value(target)
+                finally:
+                    self._scroll_self = False
+        if self._snap_frames_left <= 0:
+            self._snap_tick_id = 0
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def _on_vadj_changed(self, adj):
+        """upper / page-size moved: the content was re-measured."""
+        if getattr(self, "_stick_bottom", True):
+            self._snap_bottom(adj)
+
+    def _on_vadj_value_changed(self, adj):
+        """The view moved. If the operator did it, his position wins."""
+        if getattr(self, "_scroll_self", False):
+            return
+        at_bottom = (adj.get_value() + adj.get_page_size()
+                     >= adj.get_upper() - self._STICK_SLACK)
+        self._stick_bottom = at_bottom
+
+    def _scroll_to_bottom(self):
+        """Follow the tail during streaming, but only if he is already there."""
+        adj = self.msg_scroll.get_vadjustment()
+        if adj is None:
+            return False
+        if (adj.get_value() + adj.get_page_size()
+                >= adj.get_upper() - self._STICK_SLACK):
+            self._stick_bottom = True
+            self._snap_bottom(adj)
+        return False
+
+    def _force_scroll_to_bottom(self):
+        """Unconditional — a new user message, or opening a chat. Re-arms the
+        stick so the snap survives the layout passes that follow it."""
+        self._stick_bottom = True
+        self._snap_bottom()
+        return False
+
+    # ── sending ─────────────────────────────────────────────────
+
+    def _on_input_key(self, controller, keyval, keycode, state):
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
+            if not shift:
+                # While Basilisk is working, Enter sends the typed text as a
+                # mid-run SUGGESTION (nudge without stopping) instead of being
+                # refused. Idle, it's a normal send. The Stop control is the
+                # send/stop button (mouse) and Escape — Enter never stops, so
+                # the operator can steer a running mission by just typing and
+                # hitting Enter.
+                if self._is_busy():
+                    self._send_suggestion()
+                else:
+                    self._send_user_message()
+                return True
+        # Escape stops Basilisk mid-reply.
+        if keyval == Gdk.KEY_Escape and self._is_busy():
+            self._request_stop()
+            return True
+        return False
+
+    def _on_send_or_stop(self):
+        """The primary button is Send when idle, Stop when Basilisk is working."""
+        if self._is_busy():
+            self._request_stop()
+        else:
+            self._send_user_message()
+
+    def _set_send_mode(self, working: bool):
+        """Keep the dragon logo at all times.  While Basilisk is working the button
+        GLOWS (and a tap stops her); idle, it's the normal Send button."""
+        if working:
+            self.send_btn.set_tooltip_text("Working… tap to stop")
+            self.send_btn.add_css_class("working")
+        else:
+            self.send_btn.set_tooltip_text("Send")
+            self.send_btn.remove_css_class("working")
+        self.send_btn.set_sensitive(True)
+
+    def _request_stop(self):
+        """Operator pressed Stop.  Cancel the in-flight stream and make
+        sure the tool chain doesn't kick another turn behind our back."""
+        self._stop_requested = True
+        # Stop is the one true off-switch: end any autonomous mission so no
+        # continuation or error-retry can kick another turn behind our back.
+        # A queued kick is exactly such a continuation, and setting the flag
+        # was not enough to stop it -- _send_user_message clears the flag
+        # again on the operator's next message, so the orphan fired anyway.
+        self._cancel_pending_kick()
+        self._mission_active = False
+        self._mission_kicks = 0
+        self._recent_commands = []
+        self._mission_verify_pending = False
+        self._mission_directive = ""
+        self._error_retries = 0
+        self._mission_ever_acted = False
+        if self.streaming_cancel:
+            self.streaming_cancel.set()
+        if self.tts:
+            self.tts.stop()
+        self._show_toast("Stopping…")
+        # If a stream is live, the backend will fire on_done({cancelled})
+        # and _on_stream_done tears everything down.  If we're between
+        # tool turns (no live stream), tear down here so we don't hang.
+        if not (self.streaming_thread and self.streaming_thread.is_alive()):
+            self._finish_turn_cleanup(mark_partial=True)
+
+    def _finish_turn_cleanup(self, mark_partial: bool = False):
+        """Single teardown path for the end of an assistant turn —
+        whether it finished, errored, or was stopped."""
+        if mark_partial and self.streaming_msg_widget is not None:
+            # Canonicalise before this partial reply is stored and replayed as
+            # history — a stopped turn is still a turn the model will be shown.
+            partial = (self.streaming_msg_widget.canonical_content() or "").strip()
+            final_text = partial if partial else "*(stopped)*"
+            try:
+                self.streaming_msg_widget.set_content(final_text)
+            except Exception:
+                pass
+            if self.streaming_msg_db_id:
+                self.store.update_message(self.streaming_msg_db_id, final_text)
+        # If the turn produced visible text but the bubble was never attached
+        # (e.g. text arrived only at finish, or a card was rendered), attach it
+        # now so the reply isn't lost. If it's still empty — a pure tool-only
+        # turn (web search then a tool chain, no text) — leave it detached; it
+        # gets nulled below and never flickered into view.
+        if (not getattr(self, "_streaming_attached", True)
+                and self.streaming_msg_widget is not None):
+            try:
+                body = (self.streaming_msg_widget.canonical_content()
+                        or "").strip()
+            except Exception:
+                body = ""
+            # ...and only if it will actually be SEEN. A bare tool step also
+            # has a non-empty body (the tool markup itself) but set_content has
+            # already hidden it, so attaching it here would put an invisible
+            # widget in the chat for every step of a chain. A propose turn is
+            # the case this branch exists for: its display text is empty too,
+            # but its approval card is drawn into that same bubble and the
+            # operator has to be able to click it.
+            try:
+                _will_show = self.streaming_msg_widget.get_visible()
+            except Exception:
+                _will_show = True
+            if body and _will_show:
+                self._attach_streaming_bubble()
+        self.streaming_msg_widget = None
+        self.streaming_msg_db_id = None
+        self.streaming_chat_id = None
+        self._tool_chain_depth = 0
+        self._tools_locked = False
+        self._turn_active = False
+        self._set_working(False)
+        self._set_send_mode(False)
+        # Settle the feed LAST: stop_running inside finish() marks anything
+        # still open as stopped rather than leaving a spinner running over a
+        # turn that has already ended.
+        self._activity_finish()
+
+    def _mission_continue(self, verify: bool = False):
+        """Chain another turn of the active mission instead of stopping.  Tears
+        down the settled turn's widget refs but stays in the working state.  On
+        repeated no-progress settles it applies a bounded exponential backoff so
+        a stuck model can't hammer the API.  Once the mission has ACTED (run a
+        tool), it never gives up on its own — only Stop or a verified completion
+        ends it, and a running tool resets the backoff (see _on_stream_done).  A
+        mission that has never acted (a pure-text task) is idle-capped here so it
+        can't spin re-kicking forever."""
+        if (self._stop_requested or not self._mission_active
+                or not self.current_agent_mode):
+            self._mission_active = False
+            self._finish_turn_cleanup()
+            return
+        self.streaming_msg_widget = None
+        self.streaming_msg_db_id = None
+        self.streaming_chat_id = None
+        self._tool_chain_depth = 0     # fresh tool budget for the continuation
+        self._tools_locked = False
+        self._turn_active = False
+        if verify:
+            self.terminal_log("🔎 completion claimed — forcing re-verify", "dim")
+            delay = 200
+        else:
+            # A mission that has NEVER acted (no tool has run) is a pure-text
+            # task; if the model neither acts nor emits the completion token, it
+            # must not spin re-kicking forever.  Cap the idle re-kicks and finish
+            # cleanly.  Once it HAS acted (_mission_ever_acted), this cap never
+            # applies — a real pentest runs tools constantly and stays truly
+            # relentless until it's done or you press Stop.
+            # Only STALLS (a reply that keeps intending action without ever
+            # calling a tool) reach here now — a never-acted reply that reads as
+            # a finished answer is stopped immediately in _on_stream_done via
+            # reply_intends_action. So this cap just bounds a model that only
+            # ever talks about acting; 2 nudges is plenty.
+            idle_cap = self.settings.get("mission_max_idle_kicks", 2)
+            if (not self._mission_ever_acted
+                    and self._mission_kicks >= idle_cap):
+                self._mission_active = False
+                self.terminal_log(
+                    "✅ mission settled — nothing left to act on", "ok")
+                self._finish_turn_cleanup()
+                return
+            # Circuit breaker: if the model has fired the EXACT same command 6
+            # times in a row (despite the loop-breaker nudge at 3), it's stuck —
+            # e.g. re-running an uncached-sudo command that never completes. Stop
+            # cleanly rather than spin forever burning API calls; the operator can
+            # resume with a new message. (Distinct from the idle cap, which only
+            # covers missions that never acted.)
+            _tail = [c for c in getattr(self, "_recent_commands", []) if c]
+            if len(_tail) >= 6 and len(set(_tail[-6:])) == 1:
+                self._mission_active = False
+                self.terminal_log(
+                    "■ stopped — same command 6× in a row with no progress; "
+                    "ending to avoid an infinite loop (send a message to resume)",
+                    "error")
+                self._finish_turn_cleanup()
+                return
+            self._mission_kicks += 1
+            # Backoff grows ONLY while the model keeps settling without acting
+            # (0.15s, then 0.5→1→2→4→8s, capped at 15s).  Progress resets it.
+            if self._mission_kicks <= 1:
+                delay = 150
+            else:
+                delay = min(15000, 500 * (2 ** min(self._mission_kicks - 2, 5)))
+            self.terminal_log(
+                f"↻ mission continues — objective not done "
+                f"[{self._mission_kicks}]", "dim")
+        self._set_working(True, "continuing…")
+        self._schedule_kick(delay)
+
+    def _send_user_message(self):
+        if self._is_busy():
+            self._show_toast("Already replying — hit stop first.")
+            return
+        # Fresh turn — clear any leftover stop flag.
+        self._stop_requested = False
+        # Fresh turn — reset the guard that stops a malformed propose/edit
+        # from being bounced back to the model forever.
+        self._bad_propose_retries = 0
+        buf = self.input_view.get_buffer()
+        text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(),
+                            False).strip()
+        # An attachment with no typed text IS a message ("here, look at this")
+        # — the old code returned early on empty text, which with the tray in
+        # place would silently discard a staged file.
+        if not text and not self._attachments:
+            return
+        buf.set_text("")
+
+        # Staged attachments join the message here, in the exact form the old
+        # in-composer version produced. Drained (and the tray cleared) only on
+        # a real send, so a cancelled or empty send never loses them.
+        _att = self._drain_attachments()
+        if _att:
+            text = (text + "\n\n" + _att) if text else _att
+
+        # (#3) /panic — jump straight to tool-first triage: no preamble, run
+        # a batched health-check sweep, report what's abnormal.  Expands into
+        # a directive the model acts on (the read-only checks batch into one
+        # round-trip via the parallel executor).
+        if text.lower().split() and text.lower().split()[0] in ("/panic",):
+            text = ("[PANIC MODE] Fast triage — skip ALL preamble and "
+                    "questions. In ONE turn, fire these read-only checks "
+                    "together: quick_facts, system_info, disk_usage, "
+                    "processes, network_status, service_status, and "
+                    "journal_tail (recent errors). Then give a tight bullet "
+                    "summary of anything abnormal and the single most likely "
+                    "problem. Look first, report second.")
+            self._show_toast("Panic mode — running health sweep.", timeout=4)
+
+        # A new message means stop reading the previous reply out loud.
+        if self.tts:
+            self.tts.stop()
+
+        if self.current_chat_id is None:
+            self._new_chat()
+        cid = self.current_chat_id
+        # First message of this chat freezes its reasoning depth. Done BEFORE
+        # the message is stored, so _effort_locked (which counts messages) is
+        # still answering for an unstarted chat when the level is read.
+        self._latch_effort(cid)
+        self.store.add_message(cid, "user", text)
+        self._append_message_widget("user", text)
+        # ONE feed for this whole turn, however many round-trips it takes.
+        self._activity_new_turn()
+        self._maybe_set_title_from_first(cid, text)
+
+        # ── Mission latch: driven by UNLEASH ──
+        # Unleashed → THIS message is the objective and Basilisk works it until
+        # MISSION_COMPLETE or you stand down; even a question becomes "go find
+        # out and don't stop" (that's what unleashed means). A bare greeting is
+        # never a mission. Not unleashed → never a mission (the mode block below
+        # forces answer-once). The old agent-mode/question gating no longer
+        # drives this — Unleash is the single control.
+        if (self._unleashed and text.strip()
+                and not conversational_turn(text)):
+            self._mission_active = True
+            self._mission_objective = text
+            self._mission_kicks = 0
+            self._recent_commands = []      # fresh objective — clear loop history
+            self._reset_action_log()
+            self._mission_verify_pending = False
+            self._mission_no_action_streak = 0
+            self._mission_directive = ""
+            self._error_retries = 0
+            # Relentlessness is unbounded ONLY once it has actually acted (run a
+            # tool).  A mission that never acts (pure-text task) is idle-capped
+            # in _mission_continue so it can't spin forever — real pentests run
+            # tools constantly, so they stay truly relentless.
+            self._mission_ever_acted = False
+        else:
+            self._mission_active = False
+
+        self._kick_assistant_turn()
+
+    def _send_suggestion(self):
+        """Send a suggestion to Basilisk WITHOUT stopping it. While it's working,
+        the note is added to the conversation and picked up on its NEXT step (the
+        model's history is rebuilt from the store each step, so it appears there
+        automatically). When idle, this just behaves like a normal Send."""
+        buf = self.input_view.get_buffer()
+        text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(),
+                            False).strip()
+        if not text:
+            self._show_toast("Type a suggestion first.")
+            return
+        if not self._is_busy():
+            self._send_user_message()      # idle → ordinary send
+            return
+        # ROUTE TO THE CHAT THAT IS WORKING, not the one being looked at.
+        # This used to write to current_chat_id. The running loop reads
+        # streaming_chat_id, and those differ the moment the operator scrolls
+        # back to another conversation while a mission runs — so the suggestion
+        # landed in the wrong transcript, the mission never saw it, and the
+        # toast still said it had been delivered. A silently discarded
+        # instruction is worse than a refused one.
+        cid = self.streaming_chat_id or self.current_chat_id
+        if cid is None:
+            self._show_toast("No chat is running — nothing to suggest to.")
+            return
+        buf.set_text("")
+        # Stored with a tag so the model reads it as a live operator nudge, not a
+        # brand-new request. No _kick_assistant_turn — the running loop picks it
+        # up on its next step; the model is NOT interrupted.
+        try:
+            self.store.add_message(cid, "user",
+                                   "[operator suggestion, mid-run — weave this "
+                                   "in without stopping]: " + text)
+        except Exception as e:
+            log(f"suggestion not stored: {e}")
+            self._show_toast("Couldn't deliver that suggestion — try again.",
+                             timeout=5)
+            buf.set_text(text)             # don't eat what he typed
+            return
+        # Only draw the bubble if he is actually looking at the chat it went to;
+        # otherwise it would appear in an unrelated conversation.
+        if cid == self.current_chat_id:
+            self._append_message_widget("user", text)
+            self._show_toast("Suggestion sent — Basilisk will fold it in on "
+                             "its next step (still working).", timeout=4)
+        else:
+            self._show_toast("Suggestion sent to the running chat (you're "
+                             "viewing a different one).", timeout=5)
+
+    # ── voice (speech in / speech out) ──────────────────────────
+    def _on_tts_toggled(self, btn):
+        on = btn.get_active()
+        self.settings["tts_enabled"] = on
+        save_settings(self.settings)
+        if on:
+            btn.add_css_class("toggled")
+        else:
+            btn.remove_css_class("toggled")
+            # Turning it off should also shut it up right now.
+            if self.tts:
+                self.tts.stop()
+
+    # ── per-message playback (play / pause / resume / replay) ──
+    def _on_message_speak(self, widget):
+        """The speaker button on a single assistant message was tapped."""
+        if not (self.tts and self.tts.available()):
+            self._show_toast(
+                "No voice engine — set one up in Settings → Voice.", timeout=5)
+            return
+        content = (getattr(widget, "_content", "") or "").strip()
+        if not content:
+            self._show_toast("Nothing to read yet.")
+            return
+        if widget is self._speaking_widget:
+            # Toggle this message's playback.
+            if self.tts.is_paused():
+                self.tts.resume()
+            elif self.tts.is_speaking():
+                self.tts.pause()
+            else:
+                # Finished already — replay from the top.
+                self._start_speaking_widget(widget)
+            return
+        # A different message — take over.
+        self._start_speaking_widget(widget)
+
+    def _start_speaking_widget(self, widget):
+        prev = self._speaking_widget
+        if prev is not None and prev is not widget:
+            prev.set_speak_state("idle")
+        # Manual playback shouldn't be re-read by the streamer.
+        self._turn_active = False
+        self.tts.stop()
+        self._speaking_widget = widget
+        widget.set_speak_state("speaking")
+        # Third consumer of model output, same transform as the other two.
+        # This one read `_content` raw, so replaying any message that contained
+        # a non-canonical tool call recited the markup — including after a
+        # chat reload, where `_content` comes straight back out of the store.
+        self.tts.speak_all(speakable_text(getattr(widget, "_content", "") or ""))
+
+    def _on_tts_state(self, state):
+        """Driven from the TTS worker (marshalled here): keep the owning
+        message's button in sync with what the speaker is doing."""
+        w = self._speaking_widget
+        if state == "idle":
+            # Ignore a stale idle: either the speaker is busy again, or
+            # we're still streaming a live reply that will queue more.
+            if self.tts and self.tts.is_speaking():
+                return False
+            if self._turn_active and w is self.streaming_msg_widget:
+                return False
+            if w is not None:
+                w.set_speak_state("idle")
+            self._speaking_widget = None
+        elif state == "speaking":
+            if w is not None:
+                w.set_speak_state("speaking")
+        elif state == "paused":
+            if w is not None:
+                w.set_speak_state("paused")
+        return False
+
+    def _set_mic_visual(self, state: str):
+        """state: 'idle' | 'recording' | 'busy'."""
+        if not self.mic_btn:
+            return
+        self.mic_btn.remove_css_class("mic-recording")
+        if state == "recording":
+            self.mic_btn.set_icon_name("media-playback-stop-symbolic")
+            self.mic_btn.add_css_class("mic-recording")
+            self.mic_btn.set_tooltip_text("Listening… tap to stop & send")
+            self.mic_btn.set_sensitive(True)
+        elif state == "busy":
+            self.mic_btn.set_icon_name("content-loading-symbolic")
+            self.mic_btn.set_tooltip_text("Transcribing…")
+            self.mic_btn.set_sensitive(False)
+        else:  # idle
+            self.mic_btn.set_icon_name("audio-input-microphone-symbolic")
+            self.mic_btn.set_tooltip_text("Speak (tap to start, tap to send)")
+            self.mic_btn.set_sensitive(True)
+
+    def _on_mic_clicked(self):
+        if not self.stt:
+            return
+        # Already recording → stop and transcribe.
+        if self._recording:
+            self._recording = False
+            self._set_mic_visual("busy")
+            threading.Thread(target=self._transcribe_worker,
+                             daemon=True).start()
+            return
+
+        # Not recording → check we can, then start.
+        reason = self.stt.unavailable_reason()
+        if reason:
+            self._show_toast(reason, timeout=5)
+            return
+        # Don't let Basilisk talk over the operator.
+        if self.tts:
+            self.tts.stop()
+        if self.stt.start():
+            self._recording = True
+            self._set_mic_visual("recording")
+        else:
+            why = self.stt.last_error()
+            self._show_toast(
+                f"Couldn't start the microphone — {why}." if why
+                else "Couldn't start the microphone.", timeout=5)
+
+    def _transcribe_worker(self):
+        """Runs off the UI thread: stop the recorder, send to Groq, hand
+        the result back to the UI thread."""
+        wav = self.stt.stop()
+        if not wav:
+            reason = self.stt.last_error()
+            probe = self.stt.probe_inputs()
+            if reason:
+                msg = f"No audio — {reason}"
+                if not probe:
+                    msg += " (no mic visible to PipeWire/PulseAudio)"
+            elif probe:
+                msg = f"No audio captured. Inputs seen: {probe}"
+            else:
+                msg = ("No audio — no mic visible to PipeWire/PulseAudio. "
+                       "Check it's plugged in and unmuted.")
+            GLib.idle_add(self._apply_transcript, "", msg)
+            return
+        text, err = self.stt.transcribe(wav)
+        GLib.idle_add(self._apply_transcript, text, err)
+
+    def _apply_transcript(self, text: str, err: Optional[str]):
+        self._set_mic_visual("idle")
+        if err:
+            self._show_toast(err, timeout=5)
+            return
+        if not text:
+            self._show_toast("Didn't catch that — try again.")
+            return
+        buf = self.input_view.get_buffer()
+        existing = buf.get_text(buf.get_start_iter(),
+                                buf.get_end_iter(), False)
+        # Append to whatever's already typed rather than clobbering it.
+        if existing.strip():
+            buf.set_text((existing.rstrip() + " " + text).strip())
+        else:
+            buf.set_text(text)
+        if self.settings.get("voice_autosend", True):
+            self._send_user_message()
+        else:
+            self.input_view.grab_focus()
+        return False
+
+    # ── LIVE ACTIVITY FEED ──────────────────────────────────────
+    # One feed per operator turn.  These seven methods are the ONLY way the
+    # window talks to it, for the same reason speakable_text() is the only
+    # transform on the speech path: thirty instrumented call sites is how two
+    # views of the same run drift into disagreeing about what happened.
+    #
+    # Every one of them is total — a missing feed, a disposed feed or a
+    # torn-down turn is a no-op, never an exception.  The feed is DISPLAY.  If
+    # it ever raises it would do so inside a GLib callback in the middle of a
+    # tool chain and strand the turn, which is a far worse bug than a missing
+    # row.
+
+    def _activity_new_turn(self):
+        """Retire the previous turn's feed and open a fresh one, attached under
+        the user's message.  Called from _send_user_message only: a tool chain
+        spanning ten round-trips is ONE turn and shares ONE feed."""
+        try:
+            old = getattr(self, "_activity_feed", None)
+            if old is not None:
+                try:
+                    old.finish()
+                except Exception:
+                    pass
+            feed = ActivityFeedWidget()
+            self._activity_feed = feed
+            self._activity_sid = 0
+            self._activity_batch_sids = []
+            self._dock_feed(feed)
+            GLib.idle_add(self._force_scroll_to_bottom)
+        except Exception:
+            self._activity_feed = None
+
+    def _dock_feed(self, feed):
+        """Put `feed`'s chip on the button tray and float its step panel over
+        the conversation, retiring whatever was there.
+
+        TWO widgets, one owner. The chip goes in the tray; the panel goes in
+        the chat overlay. Both have to be torn down together or a chat switch
+        leaves an orphaned panel hanging over the new conversation with the
+        old one's steps in it."""
+        dock = getattr(self, "activity_dock", None)
+        if dock is None:
+            return
+        old = dock.get_first_child()
+        while old is not None:
+            nxt = old.get_next_sibling()
+            # The outgoing feed's 200ms clock must stop with it, or every turn
+            # leaves another timer running for the life of the process.
+            if isinstance(old, ActivityFeedWidget):
+                try:
+                    self._undock_feed_panel(old)
+                except Exception:
+                    pass
+                try:
+                    old.dispose_widget()
+                except Exception:
+                    pass
+            dock.remove(old)
+            old = nxt
+        if feed is not None:
+            dock.append(feed)
+            ov = getattr(self, "chat_overlay", None)
+            panel = getattr(feed, "_panel", None)
+            # An INLINE feed parents its own panel; adopting it here would
+            # reparent it out of the transcript. And a panel that somehow
+            # already has a parent must never be added twice — GTK warns and
+            # the second add silently wins.
+            if (ov is not None and panel is not None
+                    and not getattr(feed, "_inline", False)
+                    and panel.get_parent() is None):
+                try:
+                    ov.add_overlay(panel)
+                except Exception as e:
+                    log(f"feed panel overlay failed: {e}")
+        dock.set_visible(feed is not None)
+
+    def _undock_feed_panel(self, feed):
+        """Remove a retired feed's floating panel from the chat overlay.
+
+        Total, like every other feed hook: a panel that was never added, an
+        overlay that has gone, or a raise from GTK must all end as a no-op.
+        Display must never be able to strand a turn."""
+        ov = getattr(self, "chat_overlay", None)
+        panel = getattr(feed, "_panel", None)
+        if ov is None or panel is None or getattr(feed, "_inline", False):
+            return
+        try:
+            panel.set_reveal_child(False)
+            ov.remove_overlay(panel)
+        except Exception:
+            pass
+
+    def _clear_activity_dock(self):
+        self._dock_feed(None)
+        self._activity_feed = None
+
+    def _activity(self):
+        f = getattr(self, "_activity_feed", None)
+        if f is None or getattr(f, "_disposed", False):
+            return None
+        return f
+
+    def _activity_phase(self, text: str):
+        f = self._activity()
+        if f is None:
+            return
+        try:
+            f.set_phase(text)
+        except Exception:
+            pass
+
+    def _activity_begin(self, name: str, args: Any = None,
+                        kind: str = "tool") -> int:
+        f = self._activity()
+        if f is None:
+            return 0
+        try:
+            return f.begin_step(name, _feed_detail(name, args), kind)
+        except Exception:
+            return 0
+
+    def _activity_end(self, sid: int, ok: bool = True, preview: str = ""):
+        f = self._activity()
+        if f is None or not sid:
+            return
+        try:
+            f.end_step(sid, ok=ok, preview=preview)
+        except Exception:
+            pass
+
+    def _activity_note(self, text: str, kind: str = "note"):
+        f = self._activity()
+        if f is None:
+            return
+        try:
+            f.note(text, kind)
+        except Exception:
+            pass
+
+    def _activity_finish(self, summary: str = "", ok: bool = True):
+        f = self._activity()
+        if f is None:
+            return
+        try:
+            f.finish(summary=summary, ok=ok)
+        except Exception:
+            pass
+
+    def _activity_close_result(self, result_text: str):
+        """Close whatever step is open with the result that just came back.
+
+        Hung off _feed_tool_result because that is the single choke point every
+        tool result passes through — the same hook ACTION RECALL uses, and for
+        the same reason.  A result whose text says it did not run closes the
+        step as a FAILURE: `✓ done` printed unconditionally is exactly the lie
+        the v9.6.0 log told, and a green tick over a refusal is worse than no
+        row at all."""
+        sid = getattr(self, "_activity_sid", 0)
+        if not sid:
+            return
+        self._activity_sid = 0
+        txt = (result_text or "")
+        head = txt.lstrip()[:220].lower()
+        _h400 = txt[:400]
+        bad = (head.startswith("not run")
+               or head.startswith("error")
+               or head.startswith("unknown tool")
+               or head.startswith("batch error")
+               or '"ok": false' in _h400
+               or '"ok":false' in _h400)
+        try:
+            self._activity_end(sid, ok=not bad, preview=_feed_preview(txt))
+        except Exception:
+            pass
+
+    def _set_working(self, working: bool, label: str = "working…"):
+        """Update the permanent status pill in the button row (and the shared
+        action phrase). Called from the UI thread. The pill lives in the bottom
+        button row, always visible — it reads the action title while working and
+        'idle' when not, and never reflows the other buttons."""
+        global _CURRENT_ACTION
+        if working:
+            # Only LOG on a change. _set_working is called from more than one
+            # place per tool (the chain step and the tool's own start), so an
+            # unchanged label printed the same line twice in a row — which in a
+            # long run makes the terminal look like it is stuttering and buries
+            # the lines that matter. The pill still updates every call; only
+            # the duplicate log line is suppressed.
+            _changed = (_CURRENT_ACTION != label)
+            _CURRENT_ACTION = label
+            # The feed header reads the SAME phrase the status pill does, from
+            # the same call, so the two can never disagree about what is
+            # happening. set_phase only claims the title while no tool step is
+            # in flight, so a live tool row is never overwritten by a stale
+            # chain-level label.
+            self._activity_phase(label.rstrip("\u2026 ."))
+            if hasattr(self, "status_pill_label"):
+                self.status_pill_label.set_text(label)
+                self.status_pill_spinner.set_visible(True)
+                self.status_pill_spinner.start()
+                self.status_pill_box.add_css_class("busy")
+            if _changed:
+                self.terminal_log(f"── {label}", "dim")
+        else:
+            _CURRENT_ACTION = ""
+            if hasattr(self, "status_pill_label"):
+                self.status_pill_label.set_text("idle")
+                self.status_pill_spinner.stop()
+                self.status_pill_spinner.set_visible(False)
+                self.status_pill_box.remove_css_class("busy")
+
+    # Friendly present-tense phrases for the working banner, so a tool chain
+    # reads "searching the web… → reading a page… → cross-checking sources…"
+    # instead of a bare tool name or a flat "working…".
+    _TOOL_STATUS = {
+        "web_read":         "checking a trusted source",
+        "web_sources":      "checking available sources",
+        "image_search":     "finding images",
+        "analyze_image":    "looking at the image",
+        "capture_photo":    "taking a photo",
+        "detect_faces":     "finding faces",
+        "tooling_check":    "checking installed tools",
+        "pentest_plan":     "planning recon",
+        "cve_lookup":       "looking up CVEs",
+        "parse_output":     "parsing scan output",
+        "methodology":      "pulling up methodology",
+        "wordlist_find":    "finding wordlists",
+        "cheatsheet":       "pulling up syntax",
+        "report_findings":  "building the report",
+        "nuclei_template":  "writing a nuclei template",
+        "reflect_findings": "double-checking the findings",
+        "attack_writeup":     "writing the exploitation narrative",
+        "workspace_import":   "unpacking the repo",
+        "workspace_status":   "checking the workspace",
+        "workspace_overview": "sizing up the repo",
+        "workspace_tree":     "listing the repo",
+        "workspace_search":   "searching the repo",
+        "workspace_read":     "reading repo code",
+        "workspace_replace":  "editing repo code",
+        "workspace_write":    "writing repo code",
+        "workspace_delete":   "removing a repo file",
+        "workspace_diff":     "diffing the changes",
+        "workspace_revert":   "reverting changes",
+        "workspace_export":   "zipping the repo back up",
+        "workspace_close":    "closing the workspace",
+        "workspace_test_command": "finding the test runner",
+        "workspace_baseline": "running the tests (baseline)",
+        "workspace_verify":   "re-running the tests",
+        "workspace_health":   "sweeping the repo for bugs",
+        "code_tooling_check": "checking code scanners",
+        "code_scan_plan":     "planning the code scan",
+        "parse_scan":         "parsing scanner output",
+        "triage_findings":    "triaging findings",
+        "remediation_hint":   "looking up the fix",
+        "scope_set":          "recording authorised scope",
+        "scope_check":        "checking scope",
+        "scope_exclude":      "recording exclusions",
+        "scope_window":       "recording testing window",
+        "scope_authorisation": "recording authorisation",
+        "scope_show":         "showing scope",
+        "asset_record":       "updating the engagement graph",
+        "engagement_graph":   "reading the engagement graph",
+        "loot_record":        "recording loot",
+        "loot_list":          "listing loot",
+        "loot_reuse":         "checking credential reuse",
+        "graph_ingest":       "updating the engagement graph",
+        "sqlmap_plan":        "building the sqlmap command",
+        "benchmark_targets":  "loading benchmark targets",
+        "benchmark_score":    "scoring the run",
+        "benchmark_report":   "building the scorecard",
+        "benchmark_compare":  "comparing runs",
+        "load_tools":         "loading tools",
+        "juiceshop_score":    "reading the scoreboard",
+        "juiceshop_report":   "building the scorecard",
+        "juiceshop_next":     "picking the next targets",
+        "juiceshop_diff":     "confirming what solved",
+        "juiceshop_source":   "reading the source",
+        "jwt_forge":          "forging a JWT",
+        "nosql_injection":    "building a NoSQL payload",
+        "xxe_payload":        "building an XXE payload",
+        "coupon_forge":       "forging a coupon",
+        "ssti_payload":       "building an SSTi payload",
+        "ssrf_payload":       "building an SSRF payload",
+        "deserialization_payload": "building a deserialization payload",
+        "prototype_pollution": "building a prototype-pollution payload",
+        "path_traversal":     "building a traversal payload",
+        "xss_payload":        "building an XSS payload",
+        "sqli_payload":       "building a SQLi payload",
+        "payload_encoder":    "encoding the payload",
+        "tech_fingerprint":   "fingerprinting the stack",
+        "waf_detect":         "analysing the filter",
+        "trick_detect":       "scanning for hidden tricks",
+        "payload_mutate":     "mutating the request structure",
+        "session_flow":       "threading session state",
+        "oracle_analyze":     "measuring the blind oracle",
+        "captcha_solve":      "reading the captcha",
+        "reset_password":     "attacking the reset flow",
+        "business_logic":     "hunting business-logic flaws",
+        "command_injection":  "building a command-injection payload",
+        "idor_probe":         "planning IDOR enumeration",
+        "race_condition":     "building a race-condition blast",
+        "upload_bypass":      "building an upload bypass",
+        "graphql_probe":      "probing GraphQL",
+        "open_redirect":      "building open-redirect payloads",
+        "cors_probe":         "probing CORS",
+        "ldap_injection":     "building an LDAP-injection payload",
+        "xpath_injection":    "building an XPath-injection payload",
+        "crlf_injection":     "building a CRLF payload",
+        "host_header_injection": "building a host-header attack",
+        "ssi_injection":      "building an SSI/ESI payload",
+        "csv_injection":      "checking for formula injection",
+        "request_smuggling":  "building a request-smuggling probe",
+        "csrf_poc":           "building a CSRF proof-of-concept",
+        "clickjacking":       "checking clickjacking",
+        "mass_assignment":    "building a mass-assignment probe",
+        "auth_bypass_headers": "building a 403 bypass",
+        "auth_attack":        "planning a credential attack",
+        "jwt_attack":         "attacking the JWT",
+        "api_test":           "attacking the API surface",
+        "cache_poisoning":    "probing cache poisoning",
+        "email_header_injection": "building an email-header injection",
+        "websocket_probe":    "probing WebSockets",
+        "oauth_probe":        "probing the OAuth flow",
+        "attack_surface":     "mapping the attack surface",
+        "verify_solve":       "confirming the solve against ground truth",
+        "webapp_recon":       "sweeping the app",
+        "submit_flag":        "submitting the flag",
+        "xbow_score":         "scoring the benchmark",
+        "xbow_report":        "building the scorecard",
+        "read_file":        "reading a file",
+        "write_file":       "writing a file",
+        "list_dir":         "listing files",
+        "find_file":        "searching files",
+        "path_info":        "checking a path",
+        "make_dir":         "making a folder",
+        "copy_path":        "copying files",
+        "move_path":        "moving files",
+        "delete_path":      "deleting files",
+        "system_info":      "checking the system",
+        "disk_usage":       "checking disk usage",
+        "processes":        "listing processes",
+        "network_status":   "checking the network",
+        "recent_downloads": "checking downloads",
+        "service_status":   "checking a service",
+        "journal_tail":     "reading the journal",
+        "desktop_info":     "checking the desktop",
+        "list_apps":        "listing apps",
+        "list_windows":     "listing windows",
+        "launch_app":       "launching an app",
+        "open_url":         "opening a link",
+        "focus_window":     "switching windows",
+        "close_window":     "closing a window",
+        "type_text":        "typing",
+        "press_key":        "pressing keys",
+        "media_control":    "controlling media",
+        "screenshot":       "taking a screenshot",
+        "read_screen":      "reading the screen",
+        "notify":           "sending a notification",
+        "quick_facts":      "checking the system",
+    }
+
+    def _status_for_call(self, call) -> str:
+        """One short human phrase describing what a single tool call does."""
+        n = (getattr(call, "name", "") or "").strip()
+        a = getattr(call, "args", None) or {}
+        if n == "run":
+            cmd = str(a.get("command", "")).strip()
+            head = cmd.split()[0] if cmd else ""
+            return f"running {head}" if head else "running a command"
+        if n.startswith("memory_"):
+            return "checking memory"
+        if n.startswith("skill"):
+            return "using a skill"
+        return self._TOOL_STATUS.get(n, f"running {n}" if n else "working")
+
+    def _status_for_batch(self, calls) -> str:
+        """Summarise what a parallel batch of read-only tools is doing."""
+        if not calls:
+            return "running tools"
+        labels = [self._status_for_call(c) for c in calls]
+        extra = len(labels) - 1
+        return f"{labels[0]} + {extra} more" if extra > 0 else labels[0]
+
+    def _ext_complete(self, system: str, user: str) -> str:
+        """Short, synchronous, non-streaming completion for the sidecar
+        (memory consolidation; the optional foresight model pass).  Routes
+        through the existing BackendRouter so it inherits the operator's pinned
+        provider.  Blocks the CALLING thread — the sidecar only ever calls this
+        from a background thread, never the UI thread.  Tolerant of failure:
+        returns "" on any error or timeout, so a flaky model degrades a feature
+        instead of wedging it.
+
+        THE TIMEOUT IS REAL NOW.  The previous version called
+        `router.stream_chat(...)` and then `done.wait(timeout=30)` — but
+        stream_chat is SYNCHRONOUS: it does not return until the stream is
+        finished, so `done` was already set by the time we waited on it and the
+        30s bound was dead code.  The true bound was the provider's own idle
+        timeout times the fallback chain length, i.e. minutes.  The call now
+        runs on a worker, the wait carries the deadline, and blowing it SETS THE
+        CANCEL EVENT so the socket is actually abandoned rather than left to
+        finish into a buffer nobody reads.
+
+        Sidecar calls also ask for what they need — a short JSON object — rather
+        than the full chat token budget, and take ONE attempt instead of walking
+        the fallback chain.  Nothing here is a conversation."""
+        try:
+            if not self.router.any_available():
+                return ""
+            deadline = max(1.0, float(
+                self.settings.get("ext_complete_timeout_s",
+                                  EXT_COMPLETE_TIMEOUT_S)
+                or EXT_COMPLETE_TIMEOUT_S))
+            msgs = [{"role": "system", "content": system},
+                    {"role": "user", "content": user}]
+            buf = {"t": ""}
+            done = threading.Event()
+            cancel = threading.Event()
+
+            def _run():
+                try:
+                    self.router.stream_chat(
+                        msgs,
+                        lambda tok: buf.__setitem__("t", buf["t"] + tok),
+                        lambda meta: done.set(),
+                        lambda err: done.set(),
+                        cancel,
+                        max_tokens_override=self.settings.get(
+                            "ext_complete_max_tokens",
+                            EXT_COMPLETE_MAX_TOKENS),
+                        single_model=True)
+                except Exception as e:
+                    log(f"ext_complete: {type(e).__name__}: {e}")
+                finally:
+                    done.set()
+
+            t = threading.Thread(target=_run, daemon=True)
+            t.start()
+            if not done.wait(timeout=deadline):
+                cancel.set()
+                log(f"ext_complete: timed out after {deadline:.0f}s")
+                return ""
+            return buf["t"]
+        except Exception:
+            return ""
+
+    def _ext_embed(self, texts):
+        """Embed strings for semantic memory recall via the SiliconFlow
+        embeddings endpoint (OpenAI-compatible, same key chat already uses).
+        Returns a list of float vectors.  Raises on ANY failure so the memory
+        layer falls back to keyword recall — a flaky or offline embedder must
+        never break recall, only make that one call keyword-only."""
+        key = (self.settings.get("siliconflow_api_key") or "").strip()
+        if not key or not texts:
+            raise RuntimeError("no embedding backend")
+        base = (self.settings.get("siliconflow_base_url")
+                or "https://api.siliconflow.com/v1").rstrip("/")
+        model = ((self.settings.get("memory_embed_model") or "").strip()
+                 or "BAAI/bge-m3")
+        payload = json.dumps({"model": model,
+                              "input": list(texts)}).encode("utf-8")
+        req = urllib.request.Request(
+            base + "/embeddings", data=payload,
+            headers={"Authorization": f"Bearer {key}",
+                     "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            data = json.loads(r.read())
+        items = data.get("data") or []
+        vecs = [it.get("embedding") for it in items
+                if isinstance(it, dict) and it.get("embedding")]
+        if len(vecs) != len(texts):
+            raise RuntimeError("embedding count mismatch")
+        return vecs
+
+    def _start_memory_backfill(self):
+        """One-shot background pass that embeds any memories stored before
+        semantic recall was enabled, so they become searchable by meaning too.
+        Bounded loop on a daemon thread; stops the moment there's nothing left."""
+        def _run():
+            try:
+                ext = getattr(self, "_ext", None)
+                if ext is None:
+                    return
+                while ext.backfill_memory(64) > 0:
+                    pass
+            except Exception:
+                pass
+        threading.Thread(target=_run, daemon=True).start()
+
+    # ══════════════════════════════════════════════════════════════
+    # A DELAYED KICK IS PART OF THE TURN, AND HAS TO BE CANCELLABLE
+    # ══════════════════════════════════════════════════════════════
+    # Three places used to schedule the next turn with a bare
+    # `GLib.timeout_add(delay, lambda: self._kick_assistant_turn())` and throw
+    # the source id away -- after having just nulled streaming_msg_widget,
+    # streaming_msg_db_id and streaming_chat_id, which are the ONLY three
+    # things _is_busy() looks at. For the length of that delay (up to 15s for
+    # a mission continue, up to 60s for an error back-off) the app reported
+    # itself idle while a turn was definitely still coming.
+    #
+    # Two ways that produced a duplicate answer, both reachable by hand:
+    #
+    #   · the operator types a follow-up during the window. _is_busy() says
+    #     no, the message is accepted and kicks a turn -- then the orphan
+    #     timeout fires and kicks a SECOND one. Two live streams write
+    #     through the same self.streaming_msg_widget, so the tokens
+    #     interleave and both finalisers commit.
+    #
+    #   · the operator presses Stop and then sends. _request_stop set
+    #     _stop_requested, which is the only thing _kick_assistant_turn
+    #     checks -- but _send_user_message clears that flag on entry, so the
+    #     orphan timeout sails through the one guard that would have caught
+    #     it. Stop did not stop it.
+    #
+    # Routing every delayed kick through here fixes both: the id is kept, so
+    # it can be cancelled, and _is_busy() counts a pending kick as busy.
+
+    def _schedule_kick(self, delay_ms: int):
+        """Queue the next assistant turn, cancellably."""
+        self._cancel_pending_kick()
+        if self._stop_requested:
+            return
+        def _fire():
+            self._pending_kick_id = 0
+            if self._stop_requested:
+                return False
+            self._kick_assistant_turn()
+            return False
+        self._pending_kick_id = GLib.timeout_add(max(1, int(delay_ms)), _fire)
+
+    def _cancel_pending_kick(self):
+        kid = getattr(self, "_pending_kick_id", 0)
+        if kid:
+            try:
+                GLib.source_remove(kid)
+            except Exception:
+                pass
+        self._pending_kick_id = 0
+
+    def _kick_assistant_turn(self):
+        self._mark_turn_progress()
+        # If the operator hit stop between tool turns, don't start another.
+        if self._stop_requested:
+            self._finish_turn_cleanup()
+            return
+
+        if not self.router.any_available():
+            self._show_toast(
+                "No provider ready.  Add an API key in Settings → Backends.")
+            self.streaming_chat_id = None
+            self._tool_chain_depth = 0
+            self._set_working(False)
+            self._set_send_mode(False)
+            return
+
+        # Preserve streaming_chat_id across a tool chain.  Only snapshot
+        # when starting a fresh turn (not continuing from a tool result).
+        if self.streaming_chat_id is None:
+            self.streaming_chat_id = self.current_chat_id
+            self._tool_chain_depth = 0
+            self._tools_locked = False
+            self._force_answer_tries = 0
+            self._forged_retries = 0
+            self._bad_propose_retries = 0
+            # Per-request, like the counters above: a stall on the LAST question
+            # must not spend this question's nudges.
+            self._answer_stall_nudges = 0
+            self._answer_stall_total = 0
+            self._tool_ran_this_request = False
+            self._tools_used_this_request = set()
+            self._promise_pushes = 0
+            self._forced_fetch_done = False
+            self._forced_followthrough = 0
+            self._last_web_result = ""
+            self._forced_verify_done = False
+            # A fresh question starts on the operator's OWN model: forget any
+            # degraded/empty chain-walk from the previous request and its
+            # one-shot override, so an escalation to V4-Flash never silently
+            # pins the next unrelated question to it.
+            self._degraded_retries = 0
+            self._degraded_escalated_to = ""
+            self._next_model_override = ""
+            # THE LEDGER IS PER REQUEST. See _plan_reset for why it is not
+            # per chat.
+            self._plan_reset()
+            self._verify_red = ""
+            self._verify_pushes = 0
+            self._gate_forced = ""
+
+        # Limit how many model round-trips a turn may chain.  Rather than
+        # dead-ending with "chain too long" and no answer (annoying), once
+        # the budget is spent we lock tools and take ONE more turn to answer
+        # with whatever was gathered.  The directive below tells the model
+        # to stop calling tools; _after_stream ignores any it emits anyway.
+        self._tool_chain_depth += 1
+        _budget = self.settings.get("max_tool_steps", MAX_TOOL_CHAIN)
+        # Autonomous walk-away mode (no per-command approval — the default) runs
+        # UNCAPPED: it keeps going until the task is actually finished (the model
+        # stops calling tools) or you press Stop. Stop and the catastrophic-
+        # command hard block fire regardless of depth, so uncapped never means an
+        # unsupervised risky run. The max_tool_steps cap only applies in a
+        # supervised (per-command approval) mode.
+        if self.settings.get("approval_mode", "none") == "none":
+            _budget = 0  # 0 == unlimited: run to completion
+        if _budget and self._tool_chain_depth > _budget and not self._tools_locked:
+            self._tools_locked = True
+            self.terminal_log("── tool budget reached; finalizing answer", "dim")
+            try:
+                fin_chat = self.streaming_chat_id or self.current_chat_id
+                self.store.add_message(
+                    fin_chat, "user",
+                    "<tool_result>\n[system note: tool-step budget reached. "
+                    "Do not call any more tools. Give your best final answer "
+                    "now using everything gathered so far.]\n</tool_result>",
+                    meta={"kind": "tool_result"})
+            except Exception:
+                pass
+            # fall through — this turn runs with tools locked.
+
+        chat_id = self.streaming_chat_id
+
+        history = self._build_history_for_model(chat_id)
+        addendum = self.settings.get("system_prompt", "")
+
+        # ── IS THIS THE TURN THAT ANSWERS, OR A STEP ON THE WAY? ──
+        # _tool_chain_depth is incremented once per model round-trip and reset
+        # when a fresh operator message starts a turn, so depth 1 is "replying
+        # to the operator" and depth 2+ is "continuing after a tool result".
+        #
+        # Everything below used to ignore that distinction, and it is the whole
+        # reason the operator saw the same conclusion four times in a row.  The
+        # directives are properties of his REQUEST — "he is in a hurry, lead
+        # with the answer", "deliver ONE complete answer, then stop" — but they
+        # were rebuilt from `history` on EVERY round-trip.  `last_user` scans
+        # back PAST tool results to find his message, so it found the same
+        # urgent question every time and re-armed the same instruction.  The
+        # model was told "lead with the answer" and "deliver one complete
+        # answer" immediately after every single tool result, and it did
+        # exactly that, every time.  Four web_reads, four complete answers,
+        # each one rendered as its own message.
+        #
+        # The model was not being repetitive. It was being obedient.
+        # A CONTINUATION for the purpose of the "start here / answer now"
+        # framing is a re-kick after a tool RESULT — not merely a re-kick.
+        # The answer-mode stall nudge re-kicks with NO tool having run, and if
+        # that counted as a continuation the model was told "you already read
+        # a source, don't re-read" when it had read nothing, and "don't restate
+        # your conclusion" when it had reached none — steering it to stop
+        # exactly when it needed to go fetch. So: chain depth advanced AND a
+        # tool actually ran.
+        _continuation = (self._tool_chain_depth > 1
+                         and getattr(self, "_tool_ran_this_request", False))
+
+        # (#3) Urgency fast-path: if the operator's latest message reads as
+        # urgent, tell the model to skip preamble and go straight to the most
+        # likely fix.  FIRST TURN ONLY — "lead with the answer" is advice about
+        # how to open a reply to him, and repeating it mid-chain is an
+        # instruction to answer again from scratch after every tool result.
+        if (self.settings.get("urgency_fast_path", True)
+                and not self._tools_locked and not _continuation):
+            try:
+                last_user = ""
+                for m in reversed(history):
+                    if m.get("role") == "user" \
+                            and "<tool_result>" not in (m.get("content") or ""):
+                        last_user = m.get("content", "")
+                        break
+                u = detect_urgency(last_user)
+                if u.get("urgent"):
+                    addendum = (addendum + "\n\n[URGENT: the operator is in a "
+                                "hurry (markers: "
+                                + ", ".join(u["markers"]) + "). Skip pleasantries "
+                                "and context-gathering. Lead with the single most "
+                                "likely fix or answer, then offer detail.]").strip()
+                    self.terminal_log("⚡ urgency fast-path engaged", "dim")
+            except Exception:
+                pass
+        if getattr(self, "_ext", None):
+            try:
+                extra = self._ext.system_prompt_block()
+                if extra:
+                    addendum = (addendum + "\n\n" + extra).strip()
+            except Exception:
+                pass
+        # Autonomous posture (approval_mode 'none', the default): act over plan,
+        # keep going, NO cards. When the operator has opted into confirming
+        # commands, drop this so it reasons/plans more carefully.
+        #
+        # BUT: a fresh QUESTION (or a greeting) with no active mission must NOT
+        # get the never-stop directive — that's what dropped "how does X work?"
+        # into a relentless tool-firing loop it couldn't exit. On such a turn we
+        # still act directly (no approval cards), but the directive tells it to
+        # answer concisely, use at most one tool, and STOP. During a real mission
+        # (a task is being worked, _mission_active) the full autonomous push
+        # applies as before.
+        _opening_user = next(
+            (m.get("content", "") for m in reversed(history)
+             if m.get("role") == "user"
+             and "<tool_result>" not in (m.get("content", "") or "")), "")
+        # ── UNLEASH decides the mode for THIS turn ──
+        # Unleashed WITH an active mission → relentless: never answer-only, keep
+        # firing until MISSION_COMPLETE. Unleashed with no mission yet (arming
+        # asked for the target, or we're idle between missions) → answer once and
+        # wait for the objective. Not unleashed → always answer once and stop;
+        # missions never grind. This is the whole two-mode contract, in one place.
+        if not self._unleashed:
+            self._mission_active = False
+            _answer_only = True
+        else:
+            _answer_only = not self._mission_active
+        # ── LEASHED SPLITS IN TWO ──
+        # "Research it, verify it, answer once, then STOP" is the right
+        # contract for a QUESTION and the wrong one for WORK. Told to fix a
+        # repo, a model reading that instruction literally writes an ANSWER
+        # about the fix instead of landing it, and "answer once then stop"
+        # fights every multi-file edit that needs read → edit → test → repeat.
+        # So leashed now classifies the turn once, here, and the addendum
+        # below branches on it. Classifier defaults to 'question', which is
+        # the historical behaviour, so an unrecognised turn behaves exactly
+        # as it always did.
+        _leash_kind = "question"
+        if _answer_only:
+            try:
+                _leash_kind = leashed_intent(_opening_user)
+            except Exception:
+                _leash_kind = "question"
+        _leash_work = _answer_only and _leash_kind == "task"
+        self._leash_work_turn = bool(_leash_work)
+        # The operator's actual question for THIS request, kept where the
+        # end-of-turn promise gate can read it. It is already computed here
+        # (correctly — it skips past tool_result envelopes), and recomputing
+        # it in _on_stream_done_body from a different history slice is how two
+        # views of "what did he ask" drift apart.
+        self._turn_question = _opening_user or ""
+        if not _continuation:
+            if _leash_work:
+                self._activity_note(
+                    "LEASHED - work mode: do the work, verify it, report what "
+                    "changed", "note")
+            elif _answer_only:
+                self._activity_note(
+                    "LEASHED - answer mode: research, verify, answer once, stop",
+                    "note")
+            else:
+                self._activity_note(
+                    "UNLEASHED - mission active: running until complete",
+                    "note")
+        # (Unleash no longer fires a kickoff turn on arming — it arms and waits
+        # for the operator's objective, which latches the mission via _submit.
+        # The old one-shot "confirm the target / ask once" addendum lived here
+        # and is gone with the auto-kick that set its flag.)
+        # ANSWER MODE (leashed) is a research-and-confirm SINGLE answer, not a
+        # one-shot memory dump: it may chain web_search / web_read / github as
+        # many times as it needs to actually find and verify the answer, then
+        # give ONE reply and stop. Only a runaway (a model that keeps calling
+        # tools without converging) needs breaking, so the cap is generous — lock
+        # tools and force the answer only after answer_tool_budget round-trips.
+        _ans_cap = _as_int(self.settings.get("answer_tool_budget", 40), 40)
+        if _ans_cap < 1:
+            _ans_cap = 40
+        if _leash_work:
+            # A question converges in a handful of reads. REAL WORK on a repo
+            # does not: every file is a read, an edit and a test run, so a
+            # ten-file refactor is comfortably past 40 round-trips before it
+            # has even started iterating. 40 was not a safety limit here, it
+            # was a wall the coding assistant hit mid-job and then had to
+            # "answer" from — which is exactly the "it can't finish a repo"
+            # complaint. Stays under MAX_TOOL_CHAIN so the hard loop-breaker
+            # is still the outer bound.
+            _ans_cap = max(_ans_cap, min(120, MAX_TOOL_CHAIN - 20))
+        if _answer_only and self._tool_chain_depth > _ans_cap and not self._tools_locked:
+            self._tools_locked = True
+            if _leash_work:
+                addendum = (addendum + "\n\n[You've used a lot of tool steps on "
+                            "this job without finishing. Do NOT call any more — "
+                            "STOP here and report honestly: what you changed, "
+                            "what is verified working, what is still broken or "
+                            "untouched, and the exact next step. Do not claim it "
+                            "is done if it is not.]").strip()
+                self.terminal_log("── work tool-cap reached; reporting state", "dim")
+                self._activity_note(
+                    "work budget reached (%d steps) - reporting what changed and "
+                    "what is left" % _ans_cap, "gate")
+            else:
+                addendum = (addendum + "\n\n[You've used a lot of tools on this "
+                            "question without converging. Do NOT call any more — give "
+                            "your best, complete answer NOW from what you've gathered, "
+                            "and say plainly if any part is still unverified.]"
+                            ).strip()
+                self.terminal_log("── answer tool-cap reached; answering now", "dim")
+                self._activity_note(
+                    "research budget reached (%d steps) - answering from what is "
+                    "gathered" % _ans_cap, "gate")
+        if _answer_only and not _leash_work:
+            if _needs_web_verification(_opening_user):
+                if not _continuation:
+                    self._activity_note(
+                        "checkable claim - reading a primary source before "
+                        "answering (memory not trusted here)", "note")
+                    addendum = (addendum + "\n\n[!!! CHECK ONLINE FIRST -- this "
+                        "question is about current or checkable facts, and your "
+                        "training data may be OUT OF DATE. You are FORBIDDEN from "
+                        "answering it from memory. Your FIRST action MUST be to "
+                        "web_read a primary source (or web_read a search-results "
+                        "page and follow the best link), READ it, then answer from "
+                        "what you actually read and cite it. Do NOT state a version, "
+                        "date, price, name, score, or 'latest' anything from memory. "
+                        "If after searching you still cannot confirm it, say plainly "
+                        "that you could not verify it -- never guess. A confident "
+                        "answer from memory here is a hallucination and is wrong.]"
+                        ).strip()
+                else:
+                    # SAME RULE, RESTATED FROM MID-CHAIN.
+                    # The first-turn wording is an imperative about the opening
+                    # move — "your FIRST action MUST be to web_read". Re-sending
+                    # it after a tool result tells a model that has ALREADY read
+                    # a source that its first action must be to read one, so it
+                    # reads another, and another: four web_reads for one
+                    # question, each followed by a fresh complete answer.
+                    # What still needs saying at this point is only the part
+                    # about not inventing facts.
+                    addendum = (addendum + "\n\n[STILL VERIFY, DON'T RECALL — you "
+                        "have already read at least one source this turn. Keep "
+                        "stating only what you actually read, and cite it. Do NOT "
+                        "re-read a page you have already read, and do NOT open "
+                        "another source to re-confirm something that already came "
+                        "back clean — one successful read IS the confirmation. "
+                        "Fetch again ONLY for a fact you genuinely do not have "
+                        "yet; otherwise answer from what you have, marking "
+                        "anything you could not verify.]").strip()
+            addendum = (addendum + "\n\n[ANSWER MODE (leashed) — THIS turn is a "
+                "QUESTION / request, not an autonomous operation. Deliver ONE "
+                "complete, correct, verified answer, then STOP.\n"
+                "- CONFIRM, don't recall. Do NOT answer from memory for anything "
+                "that can change or is checkable: news, current events, prices, "
+                "software versions/releases, who currently holds a role, dates, "
+                "statistics, documentation, or anything about a specific project "
+                "or repo (including your own). SEARCH and READ the primary source "
+                "before you state it; if you can't verify something, say so "
+                "instead of guessing.\n"
+                "- You have UNRESTRICTED web here (no approval needed in this "
+                "mode): web_read fetches ANY public page in full — read the "
+                "primary source, docs, a GitHub page, a vendor blog, a news "
+                "article, anything. When you don't already have a URL, SEARCH by "
+                "reading a results page and following its links: web_read "
+                "\"https://html.duckduckgo.com/html/?q=YOUR+QUERY\" (or Wikipedia, "
+                "or the site's own search), then web_read the best result links in "
+                "full. Use image_search to show pictures. Chain as many reads as it "
+                "takes — there is NO small tool limit to stop short for. Keep going "
+                "until you've actually found and confirmed the answer.\n"
+                "- CITE what you used: name the source or paste the link so the "
+                "operator can check it, and prefer the most recent authoritative "
+                "one.\n"
+                "- Act directly, never via `propose`/`propose_edit` cards.\n"
+                "- When you have the verified answer, give it once — technical and "
+                "direct for an expert operator, no padding — and END your turn. Do "
+                "NOT latch a mission or keep grinding after answering; there is no "
+                "completion token here, just answer and stop.]").strip()
+            if _continuation:
+                # "Deliver ONE complete answer, then STOP" is correct advice for
+                # the turn that replies to the operator and actively harmful on
+                # the turns after it: read literally, after every tool result it
+                # says "answer now, completely".  So on a continuation the same
+                # rule has to be restated from where the model actually is —
+                # mid-chain, having already written prose the operator can see.
+                addendum = (addendum + "\n\n[CONTINUATION TURN — you are partway "
+                    "through answering. The prose you already wrote this turn IS "
+                    "ON SCREEN; the operator has read it.\n"
+                    "- Do NOT restate, re-verify or re-summarise a conclusion you "
+                    "have already given. Saying \"web reading is confirmed "
+                    "working\" a second time tells him nothing and reads as a "
+                    "stutter.\n"
+                    "- You have exactly two useful moves: call the next tool with "
+                    "NO preamble, or give the FINAL answer covering only what is "
+                    "still unsaid, and stop.\n"
+                    "- If everything you set out to check is now checked, stop. "
+                    "Re-confirming something that already succeeded is not "
+                    "thoroughness, it is a loop.]").strip()
+            # Log ONCE per chain, not once per round-trip. These two lines were
+            # printed before every continuation, which is why the terminal log
+            # showed the same pair eleven times for one question — the log was
+            # accurately reporting the bug above, and doubling its noise.
+            if not _continuation:
+                self.terminal_log(
+                    "💬 answer mode: research, confirm, answer once", "dim")
+        elif _leash_work:
+            # ── GROUND TRUTH ABOUT THE BUDGET ──
+            # The model is told to iterate until it passes and is given a
+            # large budget to do it with — and is never told where in that
+            # budget it actually is. So it cannot pace itself: it either wraps
+            # up far too early or walks into the cap mid-edit and has to
+            # "report" from a half-finished state.
+            #
+            # Anthropic's multi-agent write-up puts effort rules in the prompt
+            # for exactly this reason ("simple fact-finding requires just 1
+            # agent with 3-10 tool calls... complex research might use more
+            # than 10 subagents"), to stop both under- and over-investment.
+            # This is the same idea grounded in a real number rather than a
+            # guess: the step count is a fact the host already has, and the
+            # agent-loop guidance is explicit that the agent should "gain
+            # ground truth from the environment at each step".
+            #
+            # Only on continuations — on turn 1 the number is always "1 of N"
+            # and says nothing, and the long-form contract is already the
+            # expensive part of that message.
+            _budget_line = ""
+            if _continuation:
+                _used = int(getattr(self, "_tool_chain_depth", 0) or 0)
+                _left = max(0, _ans_cap - _used)
+                if _left <= 8:
+                    _budget_line = (
+                        "\n- BUDGET: step %d of %d — you are nearly out. Land "
+                        "what you have: finish the edit you are mid-way "
+                        "through, run the check once, and report. Do not start "
+                        "anything new." % (_used, _ans_cap))
+                elif _left <= 25:
+                    _budget_line = (
+                        "\n- BUDGET: step %d of %d. Enough left to finish and "
+                        "verify, not enough to explore. Converge."
+                        % (_used, _ans_cap))
+                else:
+                    _budget_line = (
+                        "\n- BUDGET: step %d of %d — plenty. Do not rush the "
+                        "job or hand back a partial fix to save steps."
+                        % (_used, _ans_cap))
+            # ── WORK MODE (leashed) ──
+            # Same leash — no offensive posture, no mission latch, no
+            # never-stop directive — but the turn is a JOB, so the model is
+            # told to do the job with its hands instead of describing it.
+            #
+            # ── AND IT IS PAID FOR ONCE PER ROUND TRIP ──
+            # The addendum rides the VOLATILE trailing message, which is the
+            # one part of the request the provider's prompt cache cannot
+            # reuse (the ~12k system prompt above it is byte-stable and IS
+            # cached — see assemble_messages). So every token here is billed
+            # in full on every step, and a repo job is a hundred steps: the
+            # full contract is ~745 tokens, which is ~74k tokens of repeated
+            # instruction across one job.
+            #
+            # Turn 1 needs the whole contract. Turn 40 does not — it needs
+            # the rules that are still live, not the onboarding. So the long
+            # form is sent once and continuations get a compact restatement,
+            # exactly as the web-verification directive above already does
+            # for the same reason. The rules that survive are the ones a
+            # mid-job model actually breaks: partial writes, unverified
+            # "done", and narrating instead of calling.
+            if _continuation:
+                addendum = (addendum + "\n\n[WORK MODE (leashed) — still doing "
+                    "the job, not describing it.\n"
+                    "- The next move is a TOOL CALL with no preamble. A fenced "
+                    "code block changes no file and runs nothing.\n"
+                    "- Write COMPLETE files. Never `# ... rest unchanged ...` "
+                    "or a truncated tail — that DELETES the omitted code.\n"
+                    "- Anything you already wrote this turn is ON SCREEN; do "
+                    "not repeat it, and do not re-read a file you already have "
+                    "or re-run a check that just passed.\n"
+                    "- You stop when the change is made AND something you ran "
+                    "proves it, or when you are genuinely blocked — and then "
+                    "you say exactly what blocked you. If it is not verified, "
+                    "say so rather than claiming done.%s]" % _budget_line).strip()
+            else:
+                addendum = (addendum + "\n\n[WORK MODE (leashed) — THIS turn is a "
+                    "piece of WORK, not a question. The operator wants the change "
+                    "MADE, not explained. You are a senior engineer with a "
+                    "workspace, a shell and tests. Do the job.\n"
+                    "- ACT WITH TOOLS, DON'T DESCRIBE. A fix you narrated is not a "
+                    "fix. Edits land through `workspace_write` / "
+                    "`workspace_replace` (or `write_file` outside a workspace); "
+                    "commands run through `run`. NEVER put code or a command in a "
+                    "``` block and call it done — a fenced block changes nothing "
+                    "on disk and executes nothing. If you want a file changed, "
+                    "call the write tool.\n"
+                    "- READ BEFORE YOU WRITE. Never edit a file you have not read "
+                    "this turn. `workspace_overview` / `workspace_tree` to find "
+                    "your way, `workspace_search` to locate the symbol, "
+                    "`workspace_read` to see the real current text. Guessing at "
+                    "code you have not read is how you write a patch that does not "
+                    "apply.\n"
+                    "- WRITE WHOLE, COMPLETE FILES. When you write a file, emit "
+                    "its ENTIRE final content — every import, every function, top "
+                    "to bottom, syntactically complete. NEVER write `# ... rest "
+                    "unchanged ...`, `// existing code here`, an ellipsis "
+                    "placeholder, or a truncated tail: that DELETES the omitted "
+                    "code. Big files are fine — write the whole thing in one call "
+                    "rather than splitting one file across several partial "
+                    "writes. For a small surgical change to a big file, prefer "
+                    "`workspace_replace` with enough surrounding context to be "
+                    "unique.\n"
+                    "- ONE FILE PER WRITE CALL, and finish each file before "
+                    "starting the next.\n"
+                    "- VERIFY, DON'T ASSUME. After changing code, RUN something "
+                    "that proves it: the test suite, the linter, the program "
+                    "itself, a targeted import. `workspace_test_command` and "
+                    "`workspace_verify` exist for this. 'It should work now' is "
+                    "not verification.\n"
+                    "- ITERATE UNTIL IT ACTUALLY PASSES. If the tests fail, read "
+                    "the real error, fix the real cause, and run them AGAIN. Keep "
+                    "going round that loop — you have a large tool budget here "
+                    "precisely so you can. Do not stop at the first red run, and "
+                    "do not hand back a half-finished edit.\n"
+                    "- DON'T BREAK WHAT WORKED. Change the least that does the "
+                    "job. If a test that passed before now fails, that is YOUR "
+                    "regression — fix it before moving on.\n"
+                    "- RESEARCH IS ALLOWED AND UNRESTRICTED. If an API, a library "
+                    "version or an error message is unfamiliar, `web_read` the "
+                    "docs (any public page, no approval needed here) rather than "
+                    "inventing a signature.\n"
+                    "- Act directly, never via `propose`/`propose_edit` cards.\n"
+                    "- FINISH, THEN REPORT ONCE: what you changed (files and why), "
+                    "what you ran, what the result actually was. If something is "
+                    "still broken or you could not verify it, SAY SO plainly — a "
+                    "false 'done' is worse than an honest 'this part still "
+                    "fails'. Then stop; do not latch a mission.%s]"
+                    % _budget_line).strip()
+            if not _continuation:
+                self.terminal_log(
+                    "🔧 work mode: read, edit, run, iterate until green", "dim")
+        elif self.settings.get("approval_mode", "none") == "none":
+            addendum = (addendum + "\n\n[AUTONOMOUS MODE — THIS OVERRIDES ANY "
+                "CONFLICTING INSTRUCTION ABOVE. The operator turned this on to "
+                "start a job, walk away, and come back hours later to find it "
+                "still working or finished. Obey these rules exactly:\n"
+                "- NEVER use the `propose` or `propose_edit` tools. Never put a "
+                "card on screen for the operator to click — there is no operator "
+                "watching. Run shell commands DIRECTLY with the `run` tool; write "
+                "files DIRECTLY with `write_file`. They execute immediately in "
+                "this mode; do not wait for approval.\n"
+                "- To run a command you MUST emit a `run` tool call. NEVER write "
+                "the command inside a ``` code block or as prose text — a command "
+                "shown in a code block does NOT execute, it just displays as a "
+                "useless copyable banner. If you want a command to run, the ONLY "
+                "way is the run tool. Same for files: use write_file, never a "
+                "fenced block.\n"
+                "- IGNORE any guidance to 'reason WITH him and propose', 'let him "
+                "decide', 'have a conversation not a runaway', or to 'stop and ask "
+                "how he wants to proceed'. Those are OFF now. You decide and you "
+                "act.\n"
+                "- NEVER stop to check in, summarise-and-wait, or ask a question. "
+                "Do NOT end your turn with a question or a 'let me know'. If you're "
+                "about to write a summary and stop — DON'T; do the next action "
+                "instead. The ONLY reasons to stop are: the whole task is finished, "
+                "or you are truly blocked on something only the operator can do "
+                "(and even then, try every alternative first).\n"
+                "- ACT, don't plan. No long option lists, no multi-step plan "
+                "narration, no lengthy reasoning. Pick the single most likely path, "
+                "try it; if it fails, try the next single option. Every turn must "
+                "DO something (a tool call), never just think or list.\n"
+                "- Keep firing tool calls until the objective is met (e.g. the "
+                "whole board solved / the target fully tested) or you're stopped. "
+                "Chain step after step without pausing.\n"
+                "- Destructive/system-destroying commands are hard-blocked (refused) "
+                "— don't attempt them. sudo: if a credential is cached it's used "
+                "silently; you never see the password.\n"
+                "- COMPLETION: the run does NOT end when you stop talking — it "
+                "keeps going. The ONLY way to end it cleanly is to output the exact "
+                "token " + MISSION_COMPLETE_TOKEN + " on its own line, and ONLY "
+                "when the whole objective is genuinely achieved and verified (if it "
+                "was just a question, answer it fully, then output the token). "
+                "Never output it for partial or assumed completion.\n"
+                "- Be terse. One short status line per step, not essays. Save "
+                "tokens.]").strip()
+            self.terminal_log("🔥 autonomous mode: unleashed", "dim")
+        # ── Loop breaker ──
+        # Once the mission has ACTED, the idle cap no longer applies (a real
+        # engagement runs tools constantly and must stay relentless). The failure
+        # mode that leaves is the model firing the SAME command over and over —
+        # re-running `sudo systemctl start docker` when Docker already started, or
+        # an uncached sudo prompt failing silently — with nothing to break it out.
+        # If the last 3 executed commands are identical, inject a hard nudge to
+        # STOP repeating and VERIFY state with a different command instead. This
+        # doesn't stop the mission (legit relentless work continues); it only
+        # redirects a provably-stuck repeat.
+        _rc = getattr(self, "_recent_commands", [])
+        if (len(_rc) >= 3 and _rc[-1] and len(set(_rc[-3:])) == 1):
+            _stuck = _rc[-1]
+            if len(_stuck) > 160:
+                _stuck = _stuck[:157] + "…"
+            addendum = (addendum + "\n\n[LOOP BREAKER — you have now run this EXACT "
+                "command 3 times in a row:\n    " + _stuck + "\nRepeating it is NOT "
+                "making progress. It has almost certainly ALREADY succeeded, or it "
+                "is failing silently (an uncached `sudo` password prompt that never "
+                "gets answered in autonomous mode, or the service/target is already "
+                "in the desired state). Do NOT run that command again. Instead, on "
+                "this turn: VERIFY the real state with a DIFFERENT command (e.g. "
+                "`docker ps`, `systemctl status docker --no-pager`, "
+                "`curl -s -o /dev/null -w '%{http_code}' http://localhost:3000`), "
+                "READ the result, and then either advance to the next step or, if "
+                "the objective is already met, finish. If it needs sudo and sudo "
+                "isn't cached, say so plainly and move on — don't loop.]").strip()
+            self.terminal_log("⛔ loop breaker: same command ×3 — forcing a "
+                              "verify/redirect", "error")
+        # Lean-chat: on a plainly conversational OPENING turn (a greeting,
+        # thanks, an opinion question — no hint of an action), skip the ~8K-token
+        # tool catalog. "Just talking" shouldn't ship 100+ tool specs. Only the
+        # first step of a turn, never mid-tool-chain; conservative detector keeps
+        # the full toolset the moment a message hints at any action.
+        _lean = False
+        if (self.settings.get("lean_chat", True)
+                and self.current_agent_mode
+                and self._tool_chain_depth == 1 and not self._tools_locked):
+            # Only skip the toolset while the conversation is still PURELY
+            # social. The moment ANY tool has run in this chat, a short follow-up
+            # ("do it", "the next one", "yeah go on") is operational and NEEDS
+            # the toolset — stripping it there is what left a long conversation
+            # suddenly unable to act for several turns. So: lean is allowed only
+            # before the first tool call; after that the full toolset always
+            # ships. (Trimmed tool_results keep their <tool_result> head, so this
+            # detects operational history even deep into a long chat.)
+            _operational = any("<tool_result>" in (m.get("content") or "")
+                               for m in history)
+            if not _operational:
+                _last_user = next(
+                    (m.get("content", "") for m in reversed(history)
+                     if m.get("role") == "user"
+                     and "<tool_result>" not in m.get("content", "")), "")
+                _lean = conversational_turn(_last_user)
+
+        # ── Effort ladder ────────────────────────────────────────────
+        # Light on a plainly conversational turn (fast, cheap); heavy once
+        # we're several tool-steps deep in a live engagement (the router
+        # escalates the model + reasoning budget, and the directive below
+        # tells the model to slow down and think).  Standard otherwise.
+        # All of it collapses to flat behaviour if adaptive_effort is off.
+        # A genuinely complex request should think hard from step 1, not only
+        # after several tool-steps. Conservative security-engagement markers so
+        # ordinary chat never trips it; still gated behind adaptive_effort.
+        _hard_now = False
+        if (self.settings.get("adaptive_effort", True)
+                and self.current_agent_mode and not self._tools_locked
+                and not _lean):
+            try:
+                _hu = next(
+                    (m.get("content", "") for m in reversed(history)
+                     if m.get("role") == "user"
+                     and "<tool_result>" not in m.get("content", "")),
+                    "").lower()
+                _hard_now = any(mk in _hu for mk in (
+                    "pentest", "penetration test", "exploit",
+                    "privilege escalation", "priv esc", "full scan",
+                    "full audit", "vulnerability scan", "vuln scan",
+                    "enumerate", "attack surface", "brute force", "brute-force",
+                    "reverse engineer", "map the network", "recon on ",
+                    "recon of ", "analyse the codebase", "analyze the codebase"))
+            except Exception:
+                _hard_now = False
+
+        # ── EFFORT: match it to the JOB, not to elapsed steps ──
+        # The old rule escalated to "hard engagement" as soon as the tool chain
+        # reached depth 3.  Depth is a proxy for TIME SPENT, not for DIFFICULTY:
+        # a plain diagnosis that happened to need four cheap reads got the same
+        # "think before you move, reason through the current state" push as a
+        # live exploitation run, three steps into a job that was nearly done.
+        # That is a direct driver of overcomplication — the turn where the model
+        # should be concluding is the exact turn it was being told to deliberate.
+        #
+        # Escalate on EVIDENCE of a hard problem instead:
+        #   · the operator's own words say it is hard (_hard_now), or
+        #   · it is deep AND the recent results show it is actually struggling.
+        # Going deep while things keep working is not struggling, it is progress.
+        _struggling = False
+        if self._tool_chain_depth >= self.settings.get("hard_effort_step", 6):
+            try:
+                _last = [m.get("content", "") for m in history
+                         if "<tool_result>" in (m.get("content") or "")][-3:]
+                _struggling = sum(
+                    1 for tr in _last
+                    if ('"ok": false' in tr.lower() or '"ok":false' in tr.lower()
+                        or "error" in tr.lower()[:400]
+                        or "(rc=1)" in tr or "not found" in tr.lower()[:400])
+                ) >= 2
+            except Exception:
+                _struggling = False
+        if _lean:
+            _effort = "light"
+        elif (self.current_agent_mode and not self._tools_locked
+              and (_hard_now or _struggling)):
+            _effort = "heavy"
+            addendum = (addendum + "\n\n[HARD ENGAGEMENT: this one is not "
+                        "going smoothly, so slow the aim down (not the pace). "
+                        "State the SINGLE most likely reason it is failing, "
+                        "based on what the last results actually said, and test "
+                        "that one thing next. Rank by likelihood x cost to "
+                        "check, cheapest decisive test first, boring causes "
+                        "before exotic ones. Read each result properly instead "
+                        "of skimming, and when something fails use what it told "
+                        "you to pick the next move rather than repeating "
+                        "blindly. One hypothesis per turn; stop the moment it "
+                        "is confirmed.]").strip()
+        else:
+            _effort = "standard"
+
+        # ── RECOVERING FROM A TURN THAT THOUGHT AND SAID NOTHING ──────
+        # Set by the degraded branch in _on_stream_done_body when the model
+        # streamed reasoning and no content (or was cut at the time limit).
+        # Repeating that request unchanged reproduces it, so this ONE turn
+        # gets a shorter leash on the thinking and a bigger room for the
+        # answer. Consumed here, so it applies to exactly one retry and the
+        # operator's own reasoning-depth pill is never edited.
+        _re_override = None
+        _mt_override = None
+        if self._recover_silent_reasoner:
+            self._recover_silent_reasoner = False
+            _re_override = "low"
+            _mt_override = max(
+                int(self.settings.get("max_tokens", 2048) or 2048),
+                int(self.settings.get("effort_heavy_max_tokens", 4096) or 4096))
+            self.terminal_log(
+                f"↻ retrying with the thinking dialled down and room for "
+                f"{_mt_override} answer tokens", "dim")
+
+        # ── ONE-SHOT MODEL OVERRIDE (the degraded/empty escape) ──────
+        # Consumed here so it applies to exactly this retry and never edits the
+        # operator's saved model. Set by the degraded branch to walk to the next
+        # model in the provider's chain when the selected one keeps returning
+        # empty. Cleared unconditionally so a stale value can never pin the wrong
+        # model on an unrelated later turn.
+        _model_override = (self._next_model_override or "").strip() or None
+        self._next_model_override = ""
+
+        # ── ROOM TO WRITE A WHOLE FILE ───────────────────────────────
+        # THIS is why "it can't write big code": max_tokens ships at 2048 and
+        # the heavy rung of the effort ladder tops out at 4096. A 400-line
+        # source file is 6-8k tokens, so a model told to write one had its
+        # reply CUT at the cap, mid-string, inside the write call's JSON. What
+        # arrives is a `<tool …>` with no closing brace — args land in
+        # {"_raw": …} and the operator is told the JSON was malformed, so the
+        # model re-sends the same too-long call and hits the same wall. No
+        # amount of prompt hardening fixes that: the tokens were never granted.
+        # A turn that is DOING WORK gets a file-sized budget. max_tokens is a
+        # ceiling, not a spend — an answer that needs 300 tokens still costs
+        # 300 — and a model that cannot accept this much now says so and gets
+        # retried at half (see _max_tokens_cap in the backends), instead of
+        # failing the turn.
+        if _leash_work or self._mission_active:
+            _code_cap = _as_int(
+                self.settings.get("code_write_max_tokens", 16384), 16384)
+            if _code_cap < 2048:
+                _code_cap = 2048
+            if _code_cap > 131072:
+                _code_cap = 131072
+            if _code_cap > (_mt_override or 0):
+                _mt_override = _code_cap
+
+        # ── STUCK PIVOT (coded, not left to the model) ────────────────
+        # If the model has gone DEEP (20+ tool-steps into one turn) and its
+        # recent results are mostly failures / no-progress, it's grinding the
+        # same approach. Detect that from history and FORCE a research pivot:
+        # look the technique up on a trusted source and apply it immediately.
+        # The 20-step floor keeps this from firing during normal early
+        # iteration (a couple of failed attempts is just how hacking goes).
+        # Instant sources (PortSwigger/OWASP/NVD) need no approval; the
+        # community ones (exploit-db/GitHub) take a one-tap.
+        if (self.current_agent_mode and not self._tools_locked
+                and self._tool_chain_depth >= 20):
+            _recent = [m.get("content", "") for m in history[-9:]
+                       if "<tool_result>" in m.get("content", "")][-4:]
+            if len(_recent) >= 3:
+                def _looks_failed(tr):
+                    low = tr.lower()
+                    return ('"ok": false' in low or '"ok":false' in low
+                            or '"error"' in low or '"newly_solved": []' in low
+                            or 'no new' in low or 'nothing new' in low
+                            or 'not solved' in low or 'unchanged' in low
+                            or 'did not land' in low or "didn't land" in low)
+                if sum(1 for tr in _recent if _looks_failed(tr)) >= max(
+                        2, len(_recent) - 1):
+                    addendum = (addendum + "\n\n[STUCK - PIVOT TO RESEARCH NOW: "
+                        "your last few attempts failed or made no progress. STOP "
+                        "repeating the same approach. web_read the exact "
+                        "technique from a trusted source - PortSwigger Web "
+                        "Security Academy or OWASP for a web attack, NVD/MITRE "
+                        "for a CVE (these are instant, no approval); exploit-db "
+                        "or a GitHub PoC for a specific exploit (these take a "
+                        "one-tap approval). Pull the concrete working method and "
+                        "APPLY IT IMMEDIATELY against the target - don't just "
+                        "describe it - then diff to confirm and keep moving.]"
+                        ).strip()
+
+        # ── ALREADY DONE — the durable action list ──
+        # This is the counterweight to history trimming. _build_history_for_model
+        # keeps only the last HISTORY_KEEP_FULL_TOOL_RESULTS tool results at full
+        # length and headroom compresses the rest, so by step five the model's
+        # evidence of having already tried something is a 600-char stub while the
+        # mission directive is still shouting the original objective at it. That
+        # asymmetry is what made it redo work from a few turns back. One line per
+        # action, never trimmed, placed immediately before the directive so it is
+        # the last thing read before "take the next action".
+        if (self._action_log is not None
+                and self.settings.get("action_recall", True)
+                and not self._tools_locked):
+            try:
+                _done = self._action_log.prompt_block(
+                    int(self.settings.get("action_recall_entries", 40)))
+                if _done:
+                    addendum = (addendum + "\n\n" + _done).strip()
+            except Exception:
+                pass
+
+        if self._mission_active and self._mission_directive:
+            addendum = (addendum + "\n\n" + self._mission_directive).strip()
+            self._mission_directive = ""
+
+        # PROMPT CACHING: the addendum is NOT passed into the system prompt.
+        # It carries the per-turn material — the already-done action list, the
+        # mission directive, effort nudges — so putting it in the system message
+        # would change the cached prefix on every single turn and forfeit the
+        # discount on the whole ~6k-token prompt. It rides at the TAIL instead,
+        # where changing it costs only its own tokens.
+        sysprompt = build_system_prompt(
+            agent_mode=(False if _lean else self.current_agent_mode),
+            grouped=(not self.settings.get("max_mode", False)),
+            # UNLEASH decides the role framing AND which tool groups exist.
+            # Off = ordinary work on his machine, offensive suite not loaded:
+            # cheaper, and it stops a general task being framed as an attack.
+            unleashed=self._unleashed,
+            # THE REPO TOOLS SHIP WHEN THERE IS A REPO. Not after a
+            # load_tools round-trip the model has to remember to make — a
+            # coding assistant with a workspace open needs the edit tools
+            # the way it needs the file tools. Also on a leashed WORK turn,
+            # where the job is a repo job by classification even before one
+            # is imported.
+            preload_groups=self._preload_groups())
+        # The clock and the addendum go last, as their own trailing message, so
+        # everything above them stays byte-identical between turns and gets
+        # served from the provider's prefix cache: half price on input, lower
+        # latency, and on Groq those tokens do not count against rate limits.
+        full = assemble_messages(sysprompt, history,
+                                 volatile=volatile_block(addendum))
+        # Splice in relevance-scoped recall (top-k memories for THIS turn).
+        # No-op unless memory is enabled; never grows with history length.
+        if getattr(self, "_ext", None):
+            try:
+                full = self._ext.inject_memory(full)
+            except Exception:
+                pass
+
+        # Fresh assistant widget for this step — reset the speech streamer
+        # so sentence detection starts clean, and clear the tool-turn
+        # suspend flag (it re-arms below if this turn emits a tool call).
+        if self._tts_streamer is not None:
+            self._tts_streamer.reset()
+        self._tts_suspended = False
+        self._turn_active = True
+
+        # Build the streaming widget but DO NOT show it in the chat yet. An
+        # empty bubble that appears the instant a turn starts — then sits blank
+        # while the model's first move is a web-search / tool call that emits no
+        # text — reads as a bug: it pops in, the feed shows a scan running, then
+        # it vanishes. So the bubble is deferred: it's created here (detached)
+        # to buffer tokens, and only attached to the chat on the first real TEXT
+        # token (see _attach_streaming_bubble, called from _on_stream_token).
+        # Tool activity shows in the activity feed in the meantime; the bubble
+        # appears exactly when Basilisk starts saying something.
+        self._streaming_attached = False
+        self.streaming_msg_widget = MessageWidget(
+            "assistant", "", on_run_command=self._run_proposed_command,
+            on_apply_edit=self._run_proposed_edit,
+            on_speak=self._on_message_speak,
+            show_thoughts=self.settings.get("show_thoughts", True))
+        self.streaming_msg_widget.start_streaming()
+        if chat_id != self.current_chat_id:
+            # User navigated away — never attach; it just buffers for finish.
+            self._streaming_attached = True   # suppress lazy attach entirely
+
+        self.streaming_msg_db_id = self.store.add_message(
+            chat_id, "assistant", "")
+
+        self.streaming_cancel = threading.Event()
+
+        # ══════════════════════════════════════════════════════════════
+        # EVERY STREAM CARRIES ITS OWN IDENTITY
+        # ══════════════════════════════════════════════════════════════
+        # The four callbacks below all act on self.streaming_msg_widget /
+        # streaming_msg_db_id -- mutable fields naming whatever turn is
+        # current WHEN THE CALLBACK RUNS, not the turn that started the
+        # stream. With one stream at a time that is the same thing. It is
+        # not the same thing whenever a second turn starts while the first
+        # is still alive, and there are three ways that happens:
+        #
+        #   · a queued kick fires alongside an operator-sent message
+        #     (fixed above by making kicks cancellable, but defence in
+        #     depth belongs here too -- that fix removes the common cause,
+        #     this one removes the consequence);
+        #   · the turn watchdog abandons a stuck stream and starts a new
+        #     turn without joining the worker, which is still blocked in a
+        #     socket read and will call back later;
+        #   · a cancelled stream whose provider does not observe the
+        #     cancel until its own idle timeout.
+        #
+        # In all three the OLD stream's tokens append to the NEW turn's
+        # widget and its on_done finalises the new turn -- the operator
+        # watches two answers interleave into one bubble, and both get
+        # committed. An epoch captured here, compared on arrival, makes a
+        # stale stream silent instead: it cannot write, cannot finalise,
+        # and cannot schedule a retry on a turn that is no longer its own.
+        self._stream_epoch = getattr(self, "_stream_epoch", 0) + 1
+        _epoch = self._stream_epoch
+
+        def _live() -> bool:
+            return self._stream_epoch == _epoch
+
+        def _on_tok(tok):
+            if _live():
+                GLib.idle_add(self._on_stream_token, tok, _epoch)
+        def _on_done(meta):
+            if _live():
+                GLib.idle_add(self._on_stream_done, meta, _epoch)
+        def _on_err(err):
+            if _live():
+                GLib.idle_add(self._on_stream_error, err, _epoch)
+        def _on_reason(tok):
+            if _live():
+                GLib.idle_add(self._on_stream_reasoning, tok, _epoch)
+
+        # ── NATIVE TOOL SCHEMA FOR THIS TURN ──
+        # Built from the SAME system prompt the model is about to read, so it
+        # lists exactly the tools it was told about (leashed vs armed tracks
+        # automatically) and never a phantom one. Agent mode only — the model
+        # can only act then — and cached by prompt so it is parsed once, not
+        # every turn. OPT-IN: native tool-calling is OFF by default (it
+        # regressed on the live setup); the text `<tool>` protocol is the
+        # driver unless the operator turns this on in Settings. The fallback
+        # here is False on purpose, in lockstep with DEFAULT_SETTINGS and the
+        # router gate, so a settings dict missing the key never flips it on.
+        _tools = None
+        if self.current_agent_mode and self.settings.get(
+                "native_tool_calls", False):
+            try:
+                _ph = hash(sysprompt)
+                _c = getattr(self, "_tools_cache", None)
+                if _c and _c[0] == _ph:
+                    _tools = _c[1]
+                else:
+                    _tools = build_tools_schema(sysprompt) or None
+                    self._tools_cache = (_ph, _tools)
+            except Exception:
+                _tools = None
+
+        def _bg():
+            # The turn advances ONLY through _on_done / _on_err.  router.
+            # stream_chat calls one of them on every path it knows about, but if
+            # it raises on a path it does not — a malformed message list, a
+            # provider object in a bad state, an encoding error building the
+            # payload — this thread would die with a traceback on stderr and
+            # neither callback would ever fire.  The reply would sit at
+            # "thinking…" forever.  Route any such escape into the error
+            # callback, which is the path already built for "this turn failed".
+            try:
+                self.router.stream_chat(full, _on_tok, _on_done, _on_err,
+                                        self.streaming_cancel,
+                                        on_reasoning=_on_reason,
+                                        effort=_effort,
+                                        max_tokens_override=_mt_override,
+                                        reasoning_override=_re_override,
+                                        tools=_tools,
+                                        model_override=_model_override)
+            except Exception as e:
+                log(f"stream worker died: {traceback.format_exc()}")
+                _on_err(f"internal error starting the reply: "
+                        f"{type(e).__name__}: {e}")
+
+        self.streaming_thread = threading.Thread(target=_bg, daemon=True)
+        self.streaming_thread.start()
+        self._set_send_mode(True)
+        self._set_working(True, "thinking…")
+        self.terminal_log("── stream start", "dim")
+
+    def _stale_stream(self, epoch) -> bool:
+        """True when this callback belongs to a turn that has been replaced.
+
+        `epoch is None` means a caller from before the epochs existed (or a
+        test); those are always treated as live so nothing silently stops
+        working.
+        """
+        return epoch is not None and epoch != getattr(self, "_stream_epoch", 0)
+
+    def _on_stream_token(self, tok, epoch=None):
+        if self._stale_stream(epoch):
+            return False
+        self._mark_turn_progress()
+        if self.streaming_msg_widget:
+            self.streaming_msg_widget.append_streaming(tok)
+            # ── ATTACH ON VISIBLE TEXT, NOT ON ANY TOKEN ──
+            # The bubble is deferred so a tool-only step never draws an empty
+            # one. That test used to be "a token arrived", which is true of the
+            # FIRST token of a tool call as much as of a word — so a search step
+            # attached a bubble, painted the fragment of its opening tag, lost
+            # it to the stripper, and then hid itself as a bare tool step.
+            # Popped in, typed, deleted, popped out; all for a turn that was
+            # never going to say anything.
+            #
+            # Ask the renderer instead: attach the first time there is something
+            # to READ. append_streaming runs first so the judgement is made on
+            # the buffer this token is already part of.
+            if stream_visible_text(
+                    self.streaming_msg_widget._content or "").strip():
+                self._attach_streaming_bubble()
+            # Only scroll if user is on the chat that owns this stream
+            if self.streaming_chat_id == self.current_chat_id:
+                self._scroll_to_bottom()
+            self._feed_tts_stream()
+        return False
+
+    def _on_stream_reasoning(self, tok, epoch=None):
+        """Reasoning tokens (model 'thoughts') arrive separately from the
+        reply; route them to the message's collapsible thoughts panel."""
+        if self._stale_stream(epoch):
+            return False
+        if self.streaming_msg_widget:
+            self.streaming_msg_widget.append_thought(tok)
+            if self.streaming_chat_id == self.current_chat_id:
+                self._scroll_to_bottom()
+        return False
+
+    def _feed_tts_stream(self):
+        """Hand any newly-completed sentences to the speaker as the reply
+        streams in.  Suspends for a turn that emits tool tags so we never
+        read raw tool XML aloud — the post-tool prose reply gets read
+        instead."""
+        if not (self.tts and self.settings.get("tts_enabled")):
+            return
+        if self._tts_streamer is None or self.streaming_msg_widget is None:
+            return
+        raw = self.streaming_msg_widget._content or ""
+        # SUSPEND CHECK RUNS ON THE RAW TEXT, and asks "is protocol arriving?"
+        # in every dialect.  It used to ask `"<tool" in content` — a literal
+        # substring — which is false for `<｜DSML｜｜tool …>`, `<invoke …>` and
+        # `<function=…>`.  For those the guard never fired, the speaker kept
+        # running through the tool call, and the operator heard the transport.
+        if not self._tts_suspended and contains_tool_markup(raw):
+            # Model is doing a tool turn — stop streaming this widget's
+            # audio.  Drop anything already queued from it.
+            self._tts_suspended = True
+            self.tts.stop()
+            return
+        if self._tts_suspended:
+            return
+        try:
+            # speakable_text is the SAME transform used at flush below and by
+            # the per-message speak button.  The streamer tracks a prefix across
+            # calls, so feeding it one transform here and a different one at
+            # flush corrupts its bookkeeping — which is exactly how the model's
+            # reasoning ended up being read aloud after the reply finished.
+            sentences = self._tts_streamer.feed(speakable_text(raw))
+            if sentences:
+                # This reply now owns the speaker; its per-message button
+                # will show pause while it reads.
+                if self._speaking_widget is not self.streaming_msg_widget:
+                    prev = self._speaking_widget
+                    if prev is not None:
+                        prev.set_speak_state("idle")
+                    self._speaking_widget = self.streaming_msg_widget
+                for sentence in sentences:
+                    self.tts.speak(sentence)
+        except Exception as e:
+            log(f"tts stream feed error: {e}")
+
+    def _shell_block_command(self, text):
+        """Delegate to basilisk_core.shell_block_command (tested there). Recovers a
+        shell command the model printed in a ``` fence instead of calling run, so
+        autonomous mode still executes it."""
+        try:
+            return shell_block_command(text)
+        except Exception:
+            return ""
+
+    def _on_stream_done(self, meta, epoch=None):
+        if self._stale_stream(epoch):
+            return False
+        self._mark_turn_progress()
+        if not self.streaming_msg_widget:
+            self._finish_turn_cleanup()
+            return False
+        # THE WHOLE BODY IS GUARDED. This callback runs on the main loop —
+        # an unhandled exception here kills the GTK source, and with it the
+        # turn: no tool result, no continue-nudge, no error toast.  Every exit
+        # path from this method either chains the next step (a tool call or
+        # another kick) or cleans up (stop / error / completion), so a failure
+        # anywhere must land at the cleanup rather than silently dying.
+        try:
+            self._on_stream_done_body(meta)
+        except Exception:
+            log(f"_on_stream_done crashed: {traceback.format_exc()}")
+            self.terminal_log("✗ internal error finishing that reply — turn "
+                              "ended", "error")
+            try:
+                self._finish_turn_cleanup()
+            except Exception:
+                pass
+        return False
+
+    def _on_stream_done_body(self, meta):
+        final = self.streaming_msg_widget.finish_streaming()
+        # ── THE BACKEND'S FULL TEXT IS AUTHORITATIVE ──────────────────────
+        # Normally the widget buffer and meta["text"] are identical: every
+        # content token is pushed through on_token into the buffer. They can
+        # diverge for a STRUCTURED (native) tool call, which the backends
+        # synthesize at the very end of the stream. Older builds reported that
+        # synthesized call only in meta["text"], never as a token — so the
+        # widget stayed empty, parse_tool_calls("") found nothing, and a
+        # perfectly valid native write_file/run call was declared an empty
+        # "degraded" reply and retried against the model for ever. The
+        # backends now emit the call as a token too; this is the defensive
+        # half, so any backend that only fills meta["text"] still dispatches.
+        _meta_text = meta.get("text") or ""
+        if _meta_text and not parse_tool_calls(final or ""):
+            try:
+                _meta_norm = _normalise_tool_syntax(_meta_text)
+            except Exception:
+                _meta_norm = _meta_text
+            if parse_tool_calls(_meta_norm):
+                final = _meta_norm
+        # ── THE REPLY MAY NOT HAVE FINISHED; THE PROVIDER SAYS SO ──
+        # finish_reason == "length" means the model was cut off at max_tokens.
+        # Kept on the window because the two consumers are far apart: the card
+        # that could not render, and the correction sent back to the model.
+        # Without it, a write cut off mid-file was reported as bad JSON
+        # escaping, and the model "fixed" the escaping and hit the same cap.
+        self._last_stream_truncated = bool(meta.get("truncated"))
+        # WHICH cap. A turn cut at STREAM_MAX_WALL_S is also unfinished, but the
+        # advice differs: telling a model that ran out of TIME to "write the
+        # file in sections" is the wrong correction, and it will hit the clock
+        # again doing exactly what it was told.
+        self._last_stream_cut_by = str(meta.get("cut_by") or "")
+        # ── CANONICALISE ONCE, AT THE BOUNDARY ──
+        # Everything downstream — parsing, stripping, the stored message, the
+        # history re-sent on every later turn, the widget the operator reads —
+        # must see the SAME text. Normalising here rather than in each consumer
+        # is what guarantees that: a call in the model's native token syntax is
+        # rewritten to the canonical form the instant it arrives, so it cannot
+        # execute-but-not-strip, and the raw special tokens never reach the
+        # database or the screen.
+        try:
+            final = _normalise_tool_syntax(final or "")
+        except Exception:
+            pass
+        # ── THE MODEL WROTE THE HOST'S LINES: DELETE THEM ──
+        # See basilisk_core.strip_fabricated_results. A reply carrying the
+        # host's own tool-result envelope is a FORGED result — the model
+        # invented a fetch, an HTTP status and a page body and presented them
+        # as retrieved fact. This sits at the canonicalisation boundary, above
+        # everything, so the forgery is gone before it can be rendered, spoken,
+        # written to chats.db, or replayed to the model as history — that last
+        # one matters most: a stored forgery teaches every later turn that
+        # writing results is acceptable.
+        _forged = 0
+        try:
+            if fabricated_tool_result(final or ""):
+                final, _forged = strip_fabricated_results(final or "")
+        except Exception:
+            _forged = 0
+        if _forged:
+            log(f"FABRICATED TOOL RESULT: removed {_forged} forged span(s) "
+                f"from an assistant turn")
+            self.terminal_log(
+                f"⛔ the model WROTE {_forged} tool result(s) itself instead "
+                f"of calling a tool — invented data, removed and not stored",
+                "error")
+            try:
+                self._activity_note(
+                    "fabricated tool result removed - the model wrote a "
+                    "result it never fetched", "gate")
+            except Exception:
+                pass
+            # TELL THE MODEL, AND MAKE IT DO THE WORK. Silently deleting the
+            # forgery would leave the operator a reply whose evidence had been
+            # cut out of it and no explanation. Bounded at two corrections so a
+            # model that keeps forging cannot loop — after that the turn
+            # continues with the forgery removed and the operator can see, from
+            # the terminal line above, exactly what happened.
+            # NOT `cancelled` — that local is not bound until much further
+            # down this function. Read the same two facts it is built from.
+            if (self._forged_retries < 2 and not self._stop_requested
+                    and not meta.get("cancelled")):
+                self._forged_retries += 1
+                try:
+                    _fc = self.streaming_chat_id or self.current_chat_id
+                    self.store.add_message(
+                        _fc, "user",
+                        "<tool_result>\n[system] STOP. Your last reply "
+                        "contained a tool result that YOU WROTE. That text was "
+                        "not fetched by anything — you invented the request, "
+                        "the status code and the content, and it has been "
+                        "deleted. A tool result only ever arrives from the "
+                        "host, in a later message, after you emit a tool call "
+                        "and stop. Never write one yourself, never predict "
+                        "what one will say, and never continue past a call as "
+                        "if its result had arrived. Emit the tool call you "
+                        "actually need now, in the documented format, and end "
+                        "your turn there. If you cannot call the tool, say so "
+                        "plainly instead of inventing the answer.\n"
+                        "</tool_result>",
+                        meta={"kind": "tool_result"})
+                except Exception:
+                    pass
+                _junk = self.streaming_msg_widget
+                self.streaming_msg_widget = None
+                self.streaming_msg_db_id = None
+                if _junk is not None:
+                    try:
+                        self.msg_box.remove(_junk)
+                    except Exception:
+                        pass
+                self.terminal_log(
+                    f"↻ asking it to actually call the tool "
+                    f"({self._forged_retries}/2)", "dim")
+                self._schedule_kick(600)
+                return
+        # Mission completion signal: strip the token from what's shown/stored/
+        # spoken, but remember that it fired this turn.
+        _mission_done_signal = MISSION_COMPLETE_TOKEN in final
+        if _mission_done_signal:
+            final = final.replace(MISSION_COMPLETE_TOKEN, "").strip()
+            try:
+                self.streaming_msg_widget.set_content(final or "*(done)*")
+            except Exception:
+                pass
+        # A stream that reached 'done' cleanly resets the error-retry backoff.
+        self._error_retries = 0
+        if (self.tts and self.settings.get("tts_enabled")
+                and not self._tts_suspended and self._tts_streamer is not None
+                and not (meta.get("cancelled") or self._stop_requested)):
+            try:
+                # SAME transform as the per-token feed above — see the note
+                # there.  Passing `final` raw here is what broke the streamer's
+                # prefix invariant and re-spoke the <think> block.
+                for sentence in self._tts_streamer.flush(speakable_text(final)):
+                    self.tts.speak(sentence)
+            except Exception as e:
+                log(f"tts flush error: {e}")
+        if self.streaming_msg_db_id:
+            self.store.update_message(self.streaming_msg_db_id, final)
+            # Persist any captured reasoning so the thoughts panel survives a
+            # chat reload.  Merge, don't clobber, whatever meta already exists.
+            try:
+                thoughts = self.streaming_msg_widget.get_thoughts()
+                if thoughts:
+                    m = dict(self.streaming_msg_widget.meta or {})
+                    m["thoughts"] = thoughts
+                    self.streaming_msg_widget.meta = m
+                    self.store.update_message_meta(
+                        self.streaming_msg_db_id, m)
+            except Exception as e:
+                log(f"thoughts persist failed: {e}")
+        calls = parse_tool_calls(final)
+        cancelled = meta.get("cancelled") or self._stop_requested
+        self.terminal_log(f"── stream done{' (cancelled)' if cancelled else ''}", "dim")
+        # `propose` is advisory — it renders a command card (already done by
+        # finish_streaming → set_content) and must NOT execute.  Only the
+        # sensing/run tools are executable here.
+        # In SUPERVISED mode, propose/propose_edit/write_file are advisory: they
+        # render an approval card (drawn in set_content) and must NOT auto-execute
+        # here — only the sensing/run tools are executable. But in AUTONOMOUS mode
+        # there is NO card and no operator to click it, so those calls MUST execute
+        # instead: they run directly through _execute_tool_calls (→ _run_proposed_
+        # command / _run_proposed_edit). Excluding them unconditionally was silently
+        # dropping autonomous file writes and command proposals (the model's
+        # write_file did nothing). So keep them only when supervised.
+        if self.settings.get("approval_mode", "none") == "none":
+            executable = list(calls)
+        else:
+            executable = [c for c in calls
+                          if c.name not in ("propose", "propose_edit",
+                                            "write_file")]
+        # ── TOOL LOCK: dropped calls must be TOLD, not silently binned ──
+        # When the budget is spent we lock tools for one final answer turn. The
+        # old code just emptied `executable` and said nothing. That is the bug
+        # behind "it hits the tool cap and never gives me the report":
+        #
+        #   · the model was mid-research, so its reply was mostly a tool call
+        #     with little or no prose,
+        #   · the call was dropped in silence — nothing fed back, nothing logged
+        #     to the model,
+        #   · the turn then settled, and strip_tool_calls() left an empty or
+        #     near-empty bubble.
+        #
+        # The operator gets a blank answer to a question the model had actually
+        # half-researched. Feeding the refusal back costs one round-trip and
+        # turns a dead end into a finished answer.
+        _locked_drop = []
+        if self._tools_locked:
+            _locked_drop = list(executable)
+            executable = []
+        # ── RECOVERY: THE TOOL CALL LANDED IN THE REASONING STREAM ──────────
+        # The DeepSeek thinking models emit their tool call using native tokens
+        # at the END of a chain of thought. When the provider routes that whole
+        # span into `reasoning_content` (which is what happens on the V4/V4.1
+        # family when thinking is left on — see the think-off default in
+        # basilisk_core), `content` arrives EMPTY: the model "thought for 50,000
+        # characters and said nothing", the call is never dispatched, and the
+        # turn spins on the degraded-retry path for ever. That is the exact loop
+        # the operator filmed.
+        #
+        # DeepSeek's own harness reads the call out of that stream; so does
+        # this. Run the SAME canonicaliser over the captured reasoning and, if
+        # it carries a real tool call, execute it. Gated on there being NO
+        # visible answer and NO call already found, so a normal reply whose
+        # private reasoning happens to mention a tag is never touched. A valid
+        # tool-call structure is unambiguous, so this cannot fire on prose.
+        if (not executable and not calls and not cancelled
+                and not self._tools_locked):
+            _reason_txt = ""
+            try:
+                if (not strip_tool_calls(final or "").strip()
+                        and self.streaming_msg_widget is not None):
+                    _reason_txt = self.streaming_msg_widget.get_thoughts() or ""
+            except Exception:
+                _reason_txt = ""
+            if _reason_txt:
+                try:
+                    _rnorm = _normalise_tool_syntax(_reason_txt)
+                except Exception:
+                    _rnorm = _reason_txt
+                _rcalls = parse_tool_calls(_rnorm)
+                if _rcalls:
+                    calls = _rcalls
+                    if self.settings.get("approval_mode", "none") == "none":
+                        executable = list(_rcalls)
+                    else:
+                        executable = [c for c in _rcalls
+                                      if c.name not in ("propose",
+                                                        "propose_edit",
+                                                        "write_file")]
+                    self.terminal_log(
+                        "↩ recovered a tool call from the reasoning stream — "
+                        "the model emitted it while thinking and the reply "
+                        "came back empty", "error")
+                    try:
+                        self._activity_note(
+                            "the tool call arrived in the reasoning stream, "
+                            "not the reply - dispatching it", "gate")
+                    except Exception:
+                        pass
+        # ── RECOVERY: the model printed a command instead of calling `run` ──
+        # A known model-drift failure: instead of a `run` tool call, the model
+        # writes the shell command in a ```bash``` fence. parse_tool_calls finds
+        # no tool tag, so it renders as a copyable code block and NEVER executes —
+        # the "it gives me commands with a copy banner instead of running them"
+        # bug.
+        #
+        # This recovery fires in TWO tiers:
+        #
+        #   1. MISSION (walk-away): always recover. The operator unleashed it; a
+        #      printed command is never the right answer during autonomous work.
+        #
+        #   2. REGULAR TURN (agent mode on, no mission): recover ONLY when the
+        #      reply's own wording says it is ACTING, not EXPLAINING.  "Let me
+        #      check…" + a fence = the model tried to act and fumbled the format;
+        #      recover it.  "You could try running…" + a fence = it is showing an
+        #      example to the operator; leave it alone.  The detector is
+        #      reply_intends_action(), the same one the mission loop already uses,
+        #      so the two judgments are consistent.
+        #
+        # The catastrophic floor in _execute_command still applies to anything
+        # recovered here.  The approval mode gate still applies (if confirmations
+        # are on, the recovered command goes through the confirmation dialog, not
+        # straight to execution).
+        _recover_fence = False
+        if (not executable and not cancelled and self.current_agent_mode
+                and not self._tools_locked):
+            if self._mission_active:
+                # Tier 1: mission — always recover.
+                _recover_fence = True
+            elif reply_intends_action(final):
+                # Tier 2: regular turn, but the reply says it is acting.
+                _recover_fence = True
+        # ── SAME RECOVERY, FOR THE WEB TOOL ──
+        # A printed URL is the identical drift to a printed shell block, and
+        # it was the one the operator actually hit: three turns running, the
+        # model said "let's read the top result", printed the search URL, and
+        # never called web_read. The turn ended "done" with a promise in it.
+        # Same two-tier gate, so a finished answer that CITES a source is
+        # never fetched behind the operator's back.
+        if _recover_fence and not self._shell_block_command(final):
+            _url = printed_url_target(final)
+            if _url:
+                synthetic = ('<tool name="web_read">' + json.dumps({
+                    "url": _url}) + "</tool>")
+                recovered = parse_tool_calls(synthetic)
+                if recovered:
+                    executable = recovered
+                    self.terminal_log(
+                        "↩ recovered a printed URL into a web_read call "
+                        "(the model wrote the link instead of reading it)",
+                        "error")
+                    self._activity_note(
+                        "the model printed a URL instead of reading it - "
+                        "fetching %s" % _url[:70], "gate")
+
+        # ── THE PROMISE GATE: THE APP FETCHES WHAT THE MODEL ONLY PROMISED ──
+        # Everything above is a RECOVERY: it needs the model to have left
+        # something recoverable behind — a fenced command, a printed URL, a
+        # phrase the stall detector knows. That is why "okay, fetching the
+        # news now." followed by silence kept getting through: no fence, no
+        # URL, and a phrasing the detector had not seen. Every fix of that
+        # shape is one phrasing away from failing again.
+        #
+        # This one does not read the reply at all. It reads two facts the app
+        # OWNS:
+        #
+        #   · the operator asked something that cannot be answered from
+        #     memory (_needs_web_verification — the same judgment that put
+        #     "read a primary source first" in the prompt), and
+        #   · no web tool has run this entire request.
+        #
+        # If both hold, the turn is about to end having answered a
+        # current-events question out of training data, or having promised a
+        # fetch and not made one. Either way it is wrong, and no wording of
+        # the reply can make it right. So the app performs the search itself
+        # — a real web_read of a real results page for HIS question — and
+        # hands it to the model to answer from.
+        #
+        # Fires at most ONCE per request (_forced_fetch_done), and after it
+        # fires a web tool HAS run, so the condition cannot re-arm. It is a
+        # floor under the model, not a loop.
+        if (not executable and not cancelled and not self._stop_requested
+                and self.current_agent_mode and not self._tools_locked
+                and not self._mission_active
+                and not getattr(self, "_forced_fetch_done", False)):
+            _surl = forced_search_url(
+                getattr(self, "_turn_question", ""),
+                getattr(self, "_tools_used_this_request", ()),
+                getattr(self, "_forced_fetch_done", False))
+            if _surl:
+                _synth = ('<tool name="web_read">'
+                          + json.dumps({"url": _surl}) + "</tool>")
+                _rec = parse_tool_calls(_synth)
+                if _rec:
+                    self._forced_fetch_done = True
+                    executable = _rec
+                    # THE REPLY IS ALREADY ON SCREEN. See _gate_forced.
+                    self._gate_forced = "fetch"
+                    self.terminal_log(
+                        "↩ you asked for something current and nothing was "
+                        "fetched — searching it myself", "error")
+                    self._activity_note(
+                        "nothing was fetched for a question that needs a "
+                        "live source - running the search", "gate")
+                    self._deferred_note = (
+                        (self._deferred_note or "")
+                        + "\n[system note: NOTHING had been fetched for this "
+                          "question, so the search was run FOR you. These are "
+                          "real results for the operator's question. web_read "
+                          "the best links from here, then answer from what "
+                          "you actually read and cite it. Do not answer from "
+                          "memory, and do not say you will fetch something — "
+                          "fetch it.]"
+                        + _GATE_CONTINUATION_NOTE)
+
+        # ── THE FOLLOW-THROUGH GATE: read the top RESULT, not the search again ──
+        # The exact loop the operator filmed: the forced search ran, came back a
+        # page of news SITES (links, no stories), and the model then wrote "let
+        # me read a real news page" / "reading a front page directly" turn after
+        # turn WITHOUT ever emitting web_read. The promise gate above cannot
+        # re-fire (a web tool has now run this request), so nothing converted the
+        # stated intent into an action and the model narrated itself in a circle.
+        #
+        # This closes it: when the reply INTENDS a fetch, a search already ran,
+        # and there is a results page to mine, the host follows the TOP result
+        # itself — the very thing the model kept saying it would do. Bounded to
+        # twice per request so it advances the read without becoming its own
+        # loop, and it hands the ACTUAL article back for the model to answer from.
+        if (not executable and not cancelled and not self._stop_requested
+                and self.current_agent_mode and not self._tools_locked
+                and not self._mission_active
+                and reply_intends_action(final)
+                and (getattr(self, "_tools_used_this_request", set())
+                     & _WEB_TOOL_NAMES)
+                and getattr(self, "_forced_followthrough", 0) < 2):
+            _nexturl = first_result_url(
+                getattr(self, "_last_web_result", "") or "")
+            if _nexturl:
+                _synth = ('<tool name="web_read">'
+                          + json.dumps({"url": _nexturl}) + "</tool>")
+                _rec = parse_tool_calls(_synth)
+                if _rec:
+                    self._forced_followthrough = getattr(
+                        self, "_forced_followthrough", 0) + 1
+                    executable = _rec
+                    self._gate_forced = "fetch"
+                    self.terminal_log(
+                        "↩ you said you'd read a page but never called the "
+                        "tool — following the top result myself", "error")
+                    try:
+                        self._activity_note(
+                            "following the top search result -> %s"
+                            % _nexturl[:70], "gate")
+                    except Exception:
+                        pass
+                    self._deferred_note = (
+                        (self._deferred_note or "")
+                        + "\n[system note: you kept saying you would read a "
+                          "page but never emitted the call, so the host "
+                          "followed the top result FOR you. Below is the ACTUAL "
+                          "article/page content. Answer the operator's question "
+                          "from what you read here and cite it. Do NOT say you "
+                          "will read something — it is already read below.]"
+                        + _GATE_CONTINUATION_NOTE)
+
+        # ── THE VERIFICATION GATE ──
+        # Sits beside the promise gate above and shares its shape exactly: no
+        # executable call left, so the turn is ENDING — and it is ending on a
+        # repo it changed and never checked. See unverified_work_gap.
+        #
+        # ONE ROUND TRIP IS THE PRICE, AND IT IS WORTH IT. If the change was a
+        # README rather than code, the suite runs, passes, and the model says
+        # so — one wasted step. If the change was code, this is the difference
+        # between a verified fix and a plausible one. That trade is not close.
+        # The deferred note below tells the model both branches so a doc-only
+        # change can close out honestly instead of casting about.
+        if (not executable and not cancelled and not self._stop_requested
+                and self.current_agent_mode and not self._tools_locked
+                and not self._mission_active
+                and not getattr(self, "_forced_verify_done", False)):
+            _vtool = unverified_work_gap(
+                getattr(self, "_tools_used_this_request", ()),
+                getattr(self, "_forced_verify_done", False))
+            if _vtool:
+                _rec = parse_tool_calls(
+                    '<tool name="%s">{}</tool>' % _vtool)
+                if _rec:
+                    self._forced_verify_done = True
+                    executable = _rec
+                    self._gate_forced = "verify"
+                    self.terminal_log(
+                        "↩ you changed the repo and never ran anything "
+                        "— verifying it myself", "error")
+                    self._activity_note(
+                        "files were changed and nothing was run to prove it "
+                        "- running the check", "gate")
+                    self._deferred_note = (
+                        (self._deferred_note or "")
+                        + "\n[system note: this turn CHANGED FILES and never "
+                          "ran anything that proves the change works, so the "
+                          "check was run FOR you. Read the result now. If "
+                          "`broke` is non-empty those are YOUR regressions and "
+                          "you must fix them before you stop. If it still "
+                          "fails, read the real error and fix the real cause. "
+                          "If there is no test command, or the change was not "
+                          "code, say that plainly in your report and stop — do "
+                          "not invent a verification you did not run.]"
+                        + _GATE_CONTINUATION_NOTE)
+
+        if _recover_fence:
+            _cmd = self._shell_block_command(final)
+            if _cmd and not is_catastrophic_command(_cmd):
+                synthetic = ('<tool name="run">' + json.dumps({
+                    "command": _cmd,
+                    "reason": "auto-run: the model wrote a shell block instead of "
+                              "calling the run tool"}) + "</tool>")
+                recovered = parse_tool_calls(synthetic)
+                if recovered:
+                    executable = recovered
+                    self.terminal_log(
+                        "↩ recovered a printed shell block into a run call "
+                        "(model wrote a code block instead of executing)", "error")
+                    # Persist a correction so the model reads it on the NEXT
+                    # turn and stops doing it.  This is the short-term fix —
+                    # the persona carries the standing rule, but a model that
+                    # has already drifted once needs the slap close to the
+                    # drift, not two thousand tokens away in the system prompt.
+                    try:
+                        _corr_cid = (self.streaming_chat_id
+                                     or self.current_chat_id)
+                        if _corr_cid:
+                            self.store.add_message(
+                                _corr_cid, "user",
+                                "[system correction] You wrote a shell command "
+                                "in a ```bash``` code fence instead of calling "
+                                "the run tool. The host recovered it this time. "
+                                "On every future turn: CALL the run tool. Never "
+                                "print a command for the operator to copy.",
+                                meta={"kind": "system"})
+                    except Exception:
+                        pass
+        # Honour the agent-mode toggle and the stop button.  If the user
+        # turned agent mode off or hit stop, don't execute even if the
+        # model emitted a tool tag.
+        if executable and not cancelled and self.current_agent_mode:
+            # A bare `notify` is the model ANNOUNCING to the operator — not
+            # progress toward the objective. It must NOT reset the completion-
+            # verify state or count as acting, or "done → notify → done → notify"
+            # loops forever (two completion claims never land in a row, because
+            # the notify between them clears the pending flag). Only SUBSTANTIVE
+            # tool calls (anything but notify) count as work.
+            if any(c.name != "notify" for c in executable):
+                self._mission_kicks = 0
+                self._mission_verify_pending = False
+                self._mission_ever_acted = True
+                self._mission_no_action_streak = 0
+            # EFFICIENCY: gather the leading run of read-only tools and run
+            # them together in ONE round-trip (parallel), instead of one
+            # model call per lookup.  Stop at the first side-effecting tool
+            # so anything with side effects still goes one-at-a-time through
+            # its own confirm gate next turn — the safety model is unchanged.
+            batch = []
+            for c in executable:
+                if self._pure_tool_fn(c) is not None:
+                    batch.append(c)
+                else:
+                    break
+            if len(batch) >= 2:
+                self._set_working(True, self._status_for_batch(batch) + "…")
+                self._execute_tool_batch(batch)
+            elif batch:
+                self._set_working(True, self._status_for_call(batch[0]) + "…")
+                self._execute_tool_calls(batch)
+            else:
+                # First executable tool has side effects (or is otherwise not
+                # batchable) → one at a time.
+                #
+                # THE REST ARE NOT SILENTLY DROPPED. They used to be, and it is
+                # the second half of the "malformed call" failure: `web_read` is
+                # deliberately NOT in the batchable set (the web readers were
+                # pulled from it to shrink the prompt-injection surface), so a
+                # reply containing two or three web_read calls — which the
+                # persona explicitly tells the model to emit, "batch reads" —
+                # ran only the FIRST and discarded the others without a word.
+                # The model then got one result for three lookups, concluded it
+                # had emitted malformed calls, apologised, and re-sent them.
+                # Same failure again, forever.
+                #
+                # Telling it costs nothing and turns a mystery into an
+                # instruction it can follow.
+                self._set_working(
+                    True, self._status_for_call(executable[0]) + "…")
+                if len(executable) > 1:
+                    _rest = executable[1:]
+                    _names = ", ".join(
+                        self._action_label(c) for c in _rest)[:400]
+                    self.terminal_log(
+                        f"↷ {len(_rest)} further call(s) not run this turn "
+                        f"— they follow one at a time", "dim")
+                    self._activity_note(
+                        "%d further call(s) queued - they run one at a time"
+                        % len(_rest), "note")
+                    self._deferred_note = (
+                        f"\n\n[host] NOTE — you emitted {len(executable)} tool "
+                        f"calls in that reply and only the FIRST was run. The "
+                        f"others were NOT executed and NOT lost; they simply do "
+                        f"not run in parallel:\n    {_names}\n"
+                        f"Nothing was malformed. Re-issue them ONE PER REPLY, "
+                        f"reading each result before the next. Read-only tools "
+                        f"like read_file and list_dir DO batch; web_read does "
+                        f"not.")
+                self._execute_tool_calls(executable[:1])
+        else:
+            # No executable tool ran this turn. Track how many turns in a row
+            # THIS mission has produced no tool call — a live pentest runs tools
+            # constantly, so a run of quiet turns means it's done or stuck.
+            self._mission_no_action_streak = getattr(
+                self, "_mission_no_action_streak", 0) + 1
+            # ── Rule 1: a pending completion claim is CONFIRMED by any quiet turn.
+            # Once the model has claimed done (emitted [[MISSION_COMPLETE]] last
+            # turn → verify pending), the very next turn with no NEW substantive
+            # action confirms it — whether that turn re-emits the token, says
+            # "done, all clean", or produces filler. A finished model confirms in
+            # natural language, NOT by re-emitting an exact token; demanding the
+            # token twice was why "claim → re-verify → (talk) → claim → …" looped
+            # forever. Only a real new tool call cancels a pending completion, and
+            # that path runs through the executable branch (which clears the flag).
+            if (self._mission_active and not cancelled
+                    and self._mission_verify_pending):
+                self._mission_active = False
+                self._mission_verify_pending = False
+                self.terminal_log(
+                    "✅ mission complete — confirmed on re-verify", "ok")
+                self._show_toast("Mission complete.", timeout=5)
+                self._finish_turn_cleanup()
+                return False
+            # ── Rule 2 (smart completion): the mission has ACTED and this turn
+            # produced no tool call. Decide stop-vs-continue by what the reply
+            # SAYS, not a blind turn counter — this is what fixed "it answers me
+            # 3 times before it stops":
+            #   • reads as a CONCLUSION (no "next I'll…" intent), OR it has now
+            #     stalled 3 quiet turns (a hard backstop) → force ONE re-verify;
+            #     the next quiet turn confirms via Rule 1. A genuine multi-step
+            #     run is never cut short: ACTING (a tool call) resets all of this
+            #     in the executable branch above, so this only fires once the
+            #     model has genuinely stopped doing things.
+            #   • still intends a NEXT action ("I'll run X" with no tool call — a
+            #     stall) → fall through to the continue-nudge at the end of this
+            #     branch, which pushes it to actually act.
+            # A degraded/empty reply is NOT a conclusion (the (#7) block below
+            # handles that); only the 3-turn backstop can fire on junk, so
+            # persistent junk still terminates rather than looping forever.
+            if (self._mission_active and not cancelled
+                    and self._mission_ever_acted
+                    and not self._mission_verify_pending):
+                # ── FAST STOP (1 turn, no verify round-trip): an UNAMBIGUOUS
+                # completion ends the run immediately — the token emitted this
+                # turn, or a decisive "assessment complete / nothing further"
+                # phrase. This is the fix for "it answers me 3 different ways
+                # before it stops": when the model clearly says it's finished AND
+                # it has actually done work, believe it at once. (A real
+                # multi-step run never reaches here mid-work — a tool call resets
+                # everything in the executable branch above.)
+                if ((_mission_done_signal
+                        or reply_is_strong_conclusion(final))
+                        and not looks_degraded(final)):
+                    self._mission_active = False
+                    self._mission_verify_pending = False
+                    self.terminal_log(
+                        "✅ mission complete — clear completion, ending now", "ok")
+                    self._show_toast("Mission complete.", timeout=5)
+                    self._finish_turn_cleanup()
+                    return False
+                # ── Otherwise a weaker/ambiguous settle: the model just stopped
+                # calling tools without a decisive sign-off, OR it has stalled 3
+                # quiet turns (hard backstop). Take ONE verify checkpoint; the
+                # next quiet turn confirms via Rule 1. A reply that still intends
+                # a NEXT action falls through to the continue-nudge instead.
+                _stalled_out = self._mission_no_action_streak >= 3
+                _concludes = (not looks_degraded(final)
+                              and not reply_intends_action(final))
+                if _concludes or _stalled_out:
+                    self._mission_verify_pending = True
+                    self._mission_directive = _MISSION_VERIFY_DIRECTIVE.format(
+                        obj=self._mission_objective)
+                    self.terminal_log(
+                        "🔎 no tool call and the reply reads as complete "
+                        "— forcing one final verify", "dim")
+                    self._mission_continue(verify=True)
+                    return False
+            # (#7) Degraded-output check: if the model returned junk (empty,
+            # one-word, or stuck repeating) and it wasn't a deliberate stop, flag
+            # it. With auto_fallback_on_degraded on, hop to the next provider that
+            # has a key so the NEXT turn retries elsewhere.
+            if (not cancelled and not executable
+                    and looks_degraded(final)):
+                # ── WHY IT WAS EMPTY, NOT JUST THAT IT WAS ──
+                # The reported symptom: "stream start / stream done / response
+                # looked degraded" three times, force-answer, three more, for
+                # ever — on a model whose thinking cannot be turned off. The
+                # host already HELD the answer and threw it away: the turn had
+                # streamed a full chain of thought into the Thoughts panel and
+                # emitted zero content tokens. That is not junk output, it is
+                # the response budget being spent on reasoning — and a retry
+                # that changes NOTHING is guaranteed to reproduce it, which is
+                # exactly the stable loop in the log.
+                _thoughts = ""
+                try:
+                    if self.streaming_msg_widget is not None:
+                        _thoughts = self.streaming_msg_widget.get_thoughts()
+                except Exception:
+                    _thoughts = ""
+                _cut = self._last_stream_cut_by
+                _reasoned_silent = bool(_thoughts) and not (final or "").strip()
+                if _reasoned_silent:
+                    self.terminal_log(
+                        f"⚠ the model thought for {len(_thoughts)} characters "
+                        f"and said nothing — the response budget went on "
+                        f"reasoning, not on the answer", "error")
+                elif _cut == "time":
+                    self.terminal_log(
+                        "⚠ the turn was cut at the per-turn time limit before "
+                        "the answer started", "error")
+                else:
+                    self.terminal_log("⚠ response looked degraded (empty/"
+                                      "repetitive)", "error")
+                # Never just stop on a degraded reply — retry automatically,
+                # bounded so it can't loop forever. Hop to another provider
+                # (if one has a key) and re-kick the SAME turn so the work
+                # continues without the operator having to tap send.
+                _dret = getattr(self, "_degraded_retries", 0)
+                if (self.settings.get("auto_fallback_on_degraded", True)
+                        and _dret < 3 and not self._stop_requested):
+                    self._degraded_retries = _dret + 1
+                    # CHANGE SOMETHING BEFORE RETRYING. A deterministic budget
+                    # failure does not care how many times it is asked again.
+                    if _reasoned_silent or _cut == "time":
+                        self._recover_silent_reasoner = True
+                        try:
+                            _fc = self.streaming_chat_id or self.current_chat_id
+                            self.store.add_message(
+                                _fc, "user",
+                                "<tool_result>\n[system] your last turn "
+                                "produced REASONING ONLY and no answer — the "
+                                "operator saw an empty message. Nothing you "
+                                "worked out is lost, it is in this "
+                                "conversation. Answer NOW, directly, in the "
+                                "reply itself. Think briefly and write the "
+                                "answer; if the job is long, deliver the first "
+                                "complete, usable part of it in this turn "
+                                "rather than planning the whole thing.\n"
+                                "</tool_result>",
+                                meta={"kind": "tool_result"})
+                        except Exception:
+                            pass
+                    # PINNED PROVIDER: never hop clouds behind the operator's
+                    # back. Whatever provider is selected STAYS selected — a
+                    # degraded reply never changes the operator's cloud, and
+                    # active_provider is never mutated or persisted here.
+                    #
+                    # WALK THE MODEL, THOUGH. The original bug — and the one the
+                    # operator kept filming — is a model that returns EMPTY on
+                    # this endpoint turn after turn (V4.1-Flash "thought and said
+                    # nothing", or a thinking mode the endpoint will not switch
+                    # off). Re-kicking the SAME model cannot fix that: the reply
+                    # was a clean HTTP 200, so the backend's own chain-walk
+                    # (which only fires on HTTP errors) never triggers, and the
+                    # host used to just ask the same model again three times and
+                    # give up. So the FIRST retry stays on the selected model
+                    # (handles a one-off hiccup cheaply), and any retry after
+                    # that WALKS to the next model in this provider's OWN chain
+                    # (V4.1-Flash -> V4-Flash -> GLM-5.3-Flash) — same provider,
+                    # same vendor family, the benchmarked V4-Flash included. This
+                    # is a one-shot, per-turn override (_next_model_override):
+                    # the saved model is untouched, so the next fresh question
+                    # starts on the operator's choice again.
+                    _next_m = ""
+                    if self._degraded_retries >= 2:
+                        _next_m = self._next_chain_model_after(
+                            self._degraded_escalated_to
+                            or self._active_model_id())
+                    if _next_m:
+                        self._next_model_override = _next_m
+                        self._degraded_escalated_to = _next_m
+                        self.terminal_log(
+                            f"↻ auto-retry {self._degraded_retries}/3 "
+                            f"— the selected model kept returning empty, "
+                            f"falling back to {_next_m.split('/')[-1]}", "dim")
+                    else:
+                        self.terminal_log(
+                            f"↻ auto-retry {self._degraded_retries}/3 "
+                            f"(staying on selected provider)", "dim")
+                    # ── RETIRE THE JUNK BUBBLE BEFORE RETRYING ──
+                    # Every other re-kick path (force-answer, stall nudge,
+                    # _feed_tool_result, _mission_continue) nulls these two
+                    # first. This one did not, so the degraded reply stayed
+                    # parented in msg_box and the retry appended a SECOND
+                    # bubble underneath it -- the operator saw the junk reply
+                    # and its replacement, up to three times over. Drop the
+                    # row and the refs, then retry into a clean one.
+                    _junk = self.streaming_msg_widget
+                    self.streaming_msg_widget = None
+                    self.streaming_msg_db_id = None
+                    if _junk is not None:
+                        try:
+                            self.msg_box.remove(_junk)
+                        except Exception:
+                            pass
+                    self._schedule_kick(600)
+                    return
+                else:
+                    # Retries exhausted. Don't loop — and NEVER leave the
+                    # operator staring at a blank bubble. Write an honest,
+                    # visible message into the reply itself (the old code only
+                    # flashed a toast, so the turn ended with an empty bubble —
+                    # the "cant even fetch news" the operator saw). The counter
+                    # resets, so tapping send genuinely retries.
+                    self._degraded_retries = 0
+                    self._degraded_escalated_to = ""
+                    _msg = (
+                        "I couldn't get a usable reply together for that — the "
+                        "model returned an empty response several times in a "
+                        "row, on more than one model. That's usually a provider "
+                        "hiccup or a fetch that got blocked, not your question. "
+                        "Tap send to try again, or switch the model in "
+                        "Settings → Backends.")
+                    try:
+                        if self.streaming_msg_widget is not None:
+                            self.streaming_msg_widget.set_content(_msg)
+                        if self.streaming_msg_db_id:
+                            self.store.update_message(
+                                self.streaming_msg_db_id, _msg)
+                    except Exception:
+                        pass
+                    self._show_toast(
+                        "That reply looked degraded after retries. Tap send to "
+                        "try again.", timeout=6)
+                    # END THE TURN HERE. Without this return, control fell
+                    # through to the empty-answer force-answer block below, which
+                    # orphaned the message just written, re-locked tools, and
+                    # kicked up to two more turns — each re-entering this degraded
+                    # block with a FRESH 3-retry budget because the counter was
+                    # just reset. That turned a 3-retry ceiling into ~11 round
+                    # trips and printed "giving up" while visibly continuing. The
+                    # block's own contract is "Retries exhausted. Don't loop."
+                    self._finish_turn_cleanup()
+                    return False
+            # ── the two dead ends that lose an answer ──
+            # (a) tools were locked and the model still called one, or
+            # (b) the reply is ALL tool call and no prose,
+            # either way settling here hands the operator an empty bubble.
+            # Push exactly one more turn that demands the answer in words.
+            _visible = strip_tool_calls(final or "").strip()
+            _empty_answer = (not cancelled and not executable
+                             and not _visible
+                             and not self._mission_active)
+            # ── A TOOL CALL THE HOST DIDN'T UNDERSTAND ──
+            # Models emit tool calls in several dialects, including their own
+            # native special-token format. Anything parse_tool_calls doesn't
+            # recognise is neither executed NOR stripped: it leaks onto the
+            # screen as raw protocol garbage and the turn ends with nothing to
+            # run. _normalise_tool_syntax now converts the known dialects, but
+            # this is the fail-open backstop for the ones it doesn't know yet —
+            # tell the model its call wasn't understood and show it the format
+            # that works. That fixes the CLASS instead of one member of it.
+            # ── AND IT ONLY COUNTS IF THE ANSWER IS MISSING ──
+            # `_empty_answer` above is gated on `not _visible`; this was not,
+            # so a reply that ANSWERED THE QUESTION IN FULL and merely
+            # contained tag-shaped text was treated as a failed tool call and
+            # the turn was kicked again. The model has nothing new to send,
+            # so it repeats itself -- twice, because the budget below is 2.
+            # That is the "it answers twice" the operator reported, and the
+            # commonest trigger is asking Basilisk to explain its own tool
+            # syntax, because the force-answer text quotes that syntax back.
+            #
+            # (looks_like_failed_tool_call now masks ``` fences too, so a
+            # documented example no longer registers at all -- but the gate
+            # belongs here regardless: a delivered answer is never a reason
+            # to ask for the answer again.)
+            _bad_call = (not cancelled and not executable
+                         and not _visible
+                         and looks_like_failed_tool_call(final or ""))
+            if _bad_call:
+                self.terminal_log(
+                    "⚠ the model emitted a tool call in a syntax this build "
+                    "doesn't parse — asking it to re-send", "error")
+            # ── _locked_drop NEEDS THE SAME GATE, FOR THE SAME REASON ──
+            # A dropped tool call is a reason to ask for the answer in prose
+            # ONLY when there is no answer yet. After the host tells the model
+            # "write the full answer NOW", the very next reply routinely does
+            # exactly that AND appends one more tool call -- which is dropped,
+            # which re-triggers this branch, which asks for the answer again.
+            # The operator reads the same complete answer two or three times.
+            _drop_without_answer = bool(_locked_drop) and not _visible
+            if (not cancelled
+                    and (_drop_without_answer or _empty_answer or _bad_call)
+                    and getattr(self, "_force_answer_tries", 0) < 2
+                    and not self._stop_requested):
+                self._force_answer_tries = \
+                    getattr(self, "_force_answer_tries", 0) + 1
+                if _locked_drop:
+                    _why = ("your tool call was NOT run — the tool budget for "
+                            "this question is spent")
+                elif _bad_call and self._last_stream_cut_by == "time":
+                    # Cut by the CLOCK, not the token cap. "Write it in
+                    # sections" is the wrong instruction here — more, shorter
+                    # round-trips is exactly what runs the clock down again.
+                    _why = (
+                        "your last reply was CUT OFF at the per-turn TIME "
+                        "limit, mid-tool-call — nothing ran. The format was "
+                        "fine and the reply was not too long; it took too "
+                        "long to produce. Re-send the SAME call, but get to "
+                        "it immediately: no preamble, no restating the plan, "
+                        "and keep the reasoning short. If the step is genuinely "
+                        "big, do the smallest useful part of it first")
+                elif _bad_call and self._last_stream_truncated:
+                    # NOT a syntax problem. Sending the re-send-in-this-format
+                    # lecture here is worse than useless: the format was right
+                    # and the reply was cut off, so the model re-sends the same
+                    # oversized call and is cut off again. That loop is what
+                    # "writing big code fails every time" looks like from the
+                    # operator's chair.
+                    _why = (
+                        "your last reply was CUT OFF at the response-token "
+                        "cap, mid-tool-call — nothing ran. The format was "
+                        "fine; the reply was too long. Do NOT re-send the "
+                        "same call. Write the file in SECTIONS instead: "
+                        'first <tool name="write_file">{"path": "...", '
+                        '"content": "<the first part>"}</tool>, then the '
+                        'next part with {"path": "...", "mode": "append", '
+                        '"content": "..."} until the file is complete. Keep '
+                        "each section well under the cap")
+                elif _bad_call:
+                    _why = (
+                        "your last message contained a tool call this host "
+                        "could NOT parse, so NOTHING ran and the raw text was "
+                        "shown to the operator. Do not use your native "
+                        "function-calling tokens, DSML tags, argument child "
+                        "tags such as <parameter name=\"...\">, JSON tool "
+                        "blocks, <tool_call>, <invoke> or <function=...>. "
+                        "Put the arguments in the tag BODY as one JSON "
+                        "object. The ONLY format that works is exactly:\n"
+                        '  <tool name="web_read">{"url": "https://example.com"}'
+                        "</tool>\n"
+                        "one tag, the tool name in a name=\"...\" attribute, "
+                        "plain JSON in the body, closed with </tool>. RE-SEND "
+                        "the call you were trying to make, in that exact form")
+                else:
+                    _why = "your reply contained no answer, only a tool call"
+                # The label had two branches for three cases, so an unparsed
+                # tool call was announced as "empty reply" — the log named the
+                # wrong problem at the exact moment you needed the right one.
+                _label = ("dropped tool call" if _locked_drop
+                          else "unreadable tool call — asking for a re-send"
+                          if _bad_call else "empty reply")
+                self.terminal_log(
+                    ("── asking the model to re-send its tool call"
+                     if _bad_call else "── forcing the final answer")
+                    + f" ({_label})", "dim")
+                try:
+                    _fc = self.streaming_chat_id or self.current_chat_id
+                    self.store.add_message(
+                        _fc, "user",
+                        "<tool_result>\n[system] " + _why + ". Nothing you "
+                        "gathered is lost — it is all in this conversation."
+                        + ("" if _bad_call else
+                           " Do NOT call another tool. Write the FULL answer "
+                           "to the operator's original question NOW, in prose, "
+                           "using everything you have already read. If some "
+                           "part is still unverified, say so plainly and "
+                           "answer the rest — a partial answer is useful, "
+                           "silence is not.")
+                        + "\n</tool_result>",
+                        meta={"kind": "tool_result"})
+                except Exception:
+                    pass
+                if not _bad_call:
+                    # A dropped/empty answer means "stop calling tools". A
+                    # MALFORMED call means the opposite — it still needs to run,
+                    # just in the right syntax.
+                    self._tools_locked = True
+                self.streaming_msg_widget = None
+                self.streaming_msg_db_id = None
+                try:
+                    self._kick_assistant_turn()
+                    return False
+                except Exception:
+                    log(f"force-answer kick failed: {traceback.format_exc()}")
+
+            elif not cancelled and (_drop_without_answer or _empty_answer
+                                    or _bad_call):
+                # Re-send budget spent and the turn still produced nothing
+                # runnable.  Previously this settled in silence and handed the
+                # operator an empty bubble with no idea why — say it plainly
+                # instead.  The counter resets on the next fresh turn, so
+                # tapping send genuinely does retry.
+                self._degraded_retries = 0
+                self.terminal_log(
+                    "⚠ the model kept emitting an unreadable tool call — "
+                    "giving up on this turn", "error")
+                # Never a blank bubble: put an honest line where the answer
+                # should have been, so the operator sees WHY, not nothing.
+                _msg = (
+                    "I couldn't complete that — the model's replies came back "
+                    "unreadable after a couple of attempts (an empty response "
+                    "or a malformed tool call). Tap send to retry, or switch "
+                    "the model in Settings → Backends.")
+                try:
+                    if self.streaming_msg_widget is not None:
+                        self.streaming_msg_widget.set_content(_msg)
+                    if self.streaming_msg_db_id:
+                        self.store.update_message(self.streaming_msg_db_id, _msg)
+                except Exception:
+                    pass
+                self._show_toast(
+                    "The model's tool calls couldn't be read after 2 "
+                    "attempts. Tap send to retry, or switch model in "
+                    "Settings.", timeout=8)
+            elif not cancelled and not executable:
+                # A clean, non-degraded settle → reset the degraded retry counter
+                # (but NOT the no-action streak: a plain reply is still a turn
+                # with no tool call, and Rule 2 needs to see the run of them).
+                self._degraded_retries = 0
+                # A model produced a real reply — forget any chain-walk we made
+                # so the NEXT fresh question starts on the operator's own model.
+                self._degraded_escalated_to = ""
+            # Turn has fully settled (no tool chaining).  Record it for
+            # persistent memory in the background — no-op unless memory is on.
+            if getattr(self, "_ext", None) and not cancelled:
+                try:
+                    rec_chat = self.streaming_chat_id or self.current_chat_id
+                    msgs = self.store.list_messages(rec_chat)
+                    utext = ""
+                    for m in reversed(msgs):
+                        if (m.role == "user"
+                                and "<tool_result>" not in (m.content or "")):
+                            utext = m.content
+                            break
+                    threading.Thread(
+                        target=self._ext.record_turn,
+                        args=(utext, final), daemon=True).start()
+                except Exception:
+                    pass
+            # ── Autonomous mission: a plain (no-tool) reply does NOT end the
+            #    run.  It ends only on an explicit, re-verified completion
+            #    signal or the Stop button. ──
+            if self._mission_active and not cancelled:
+                if _mission_done_signal:
+                    # First explicit completion claim (the token this turn) →
+                    # force ONE re-verify; the next quiet turn confirms via Rule 1
+                    # (it no longer has to re-emit the exact token — talk/filler
+                    # counts). A premature "done" still can't slip through in one
+                    # turn.
+                    self._mission_verify_pending = True
+                    self._mission_directive = (
+                        _MISSION_VERIFY_DIRECTIVE.format(
+                            obj=self._mission_objective))
+                    self._mission_continue(verify=True)
+                    return False
+                elif (not self._mission_ever_acted
+                        and not looks_degraded(final)
+                        and not reply_intends_action(final)):
+                    # NEVER-ACTED mission whose reply reads as a COMPLETE answer
+                    # with NO intent to act — this was really a question (or a
+                    # trivial task the model fully answered in one turn). Stop
+                    # NOW instead of re-kicking the same answer several times.
+                    # (If it HAD intended to act — a preamble/stall — we fall
+                    # through to the nudge below and push it to actually act; the
+                    # idle cap in _mission_continue bounds a model that only ever
+                    # talks.) This is the other half of the "answers me 3 times"
+                    # fix: the acted path is handled by Rule 2 above.
+                    self._mission_active = False
+                    self.terminal_log(
+                        "✅ answered in one turn — nothing to act on, ending",
+                        "ok")
+                    self._finish_turn_cleanup()
+                    return False
+                else:
+                    # Acted-and-mid-task, or a stall that still intends action →
+                    # keep working toward the objective. (A pending claim was
+                    # accepted by Rule 1 above; a concluded acted-mission by
+                    # Rule 2 above.)
+                    self._mission_directive = (
+                        _MISSION_CONTINUE_DIRECTIVE.format(
+                            obj=self._mission_objective))
+                    self._mission_continue()
+                    return False
+            # ── ANSWER MODE: an ANNOUNCED next step with no tool call is a
+            #    stall, not an answer. ──
+            # Everything above is gated on `_mission_active`, so in answer mode
+            # (leashed — the normal way a question gets asked) a reply like
+            #
+            #   "I've got the site and the paper metadata. Let me grab the HN
+            #    discussion thread… and also look for a news writeup."
+            #
+            # fell straight through to cleanup. The model narrated its next two
+            # actions instead of emitting the calls, and the turn simply ENDED —
+            # leaving the operator looking at a promise of work that would never
+            # happen, and no report. Asking "did you do it?" then starts a fresh
+            # turn with no memory that anything was pending.
+            #
+            # That gap is not incidental: ANSWER MODE's own directive tells the
+            # model to "chain as many reads as it takes", so a multi-step answer
+            # is the DESIGNED behaviour here — but the only stall recovery in the
+            # file (reply_intends_action, already used by the mission loop) was
+            # never wired to this path. Answer mode could chain N tool calls and
+            # die the moment the model described the next one instead of calling
+            # it.
+            #
+            # BOUNDED, because a model that only ever narrates must not spin:
+            # after ANSWER_STALL_NUDGE_MAX pushes we stop nudging and let the
+            # turn end, so the worst case is a couple of extra round-trips.
+            # reply_is_bare_stall, NOT reply_intends_action: the latter answers
+            # the MISSION loop's question ("mid-task or finished?"), and wiring
+            # it here asked it the wrong one. A complete answer that mentions a
+            # next step — or just ends "Let me know if you want more" — was read
+            # as a stall and nudged, and with a budget of 2 nudges the operator
+            # got the SAME ANSWER THREE TIMES for one question.
+            # A WORK turn gets a bigger nudge budget: 2 suits a question, but
+            # a repo job runs 100 steps, where a stall at step 12 and one at
+            # step 60 are independent stalls, not a loop.
+            _work_turn = bool(getattr(self, "_leash_work_turn", False))
+
+            # ══════════════════════════════════════════════════════════
+            #  THE LEDGER GATE — deterministic, and it runs FIRST
+            # ══════════════════════════════════════════════════════════
+            # Before any prose is read. The three pushes below are in
+            # descending order of how much they know:
+            #
+            #   1. the ledger    — the model's own declared, tracked state
+            #   2. the verifier  — what a command actually returned
+            #   3. the stall detector — a guess about English
+            #
+            # The first two are facts and the third is a heuristic, so the
+            # heuristic gets consulted only when neither fact applies. That
+            # ordering is the point: every "it stopped early" bug in this
+            # app's history came from a heuristic answering a question a
+            # fact could have answered.
+            _plan = getattr(self, "_plan", None)
+            _plan_complete = False
+            try:
+                _plan_complete = bool(_plan is not None and len(_plan)
+                                      and _plan.is_complete())
+            except Exception:
+                _plan_complete = False
+            if (not cancelled and not executable
+                    and not self._stop_requested
+                    and not self._tools_locked
+                    and not self._mission_active
+                    and self.current_agent_mode
+                    and self.settings.get("plan_enabled", True)):
+                _pg = unfinished_plan_gap(
+                    _plan, getattr(self, "_plan_pushes", 0),
+                    _as_int(self.settings.get("plan_push_max", 6), 6))
+                if _pg:
+                    self._plan_pushes = getattr(self, "_plan_pushes", 0) + 1
+                    _left = len(_plan.open_items())
+                    self.terminal_log(
+                        "↻ %d plan item(s) still open — the turn does not "
+                        "end here (%d/%d)"
+                        % (_left, self._plan_pushes,
+                           _as_int(self.settings.get("plan_push_max", 6), 6)),
+                        "dim")
+                    self._activity_note(
+                        "%d step(s) still open - keeping going" % _left,
+                        "gate")
+                    try:
+                        _sc = self.streaming_chat_id or self.current_chat_id
+                        self.store.add_message(_sc, "user", _pg,
+                                               meta={"kind": "tool_result"})
+                    except Exception as e:
+                        log(f"plan gate: store write failed: {e}")
+                    self.streaming_msg_widget = None
+                    self.streaming_msg_db_id = None
+                    self._kick_assistant_turn()
+                    return False
+
+            # ══════════════════════════════════════════════════════════
+            #  THE FAILING-VERIFICATION GATE — red is not a stopping point
+            # ══════════════════════════════════════════════════════════
+            # v1.1.3.0 made the turn RUN the check; nothing made it care
+            # what the check SAID. `_verify_red` is set in _feed_tool_result
+            # from the verifier's own structured verdict, so this is the
+            # tool's answer and not the model's account of it.
+            if (not cancelled and not executable
+                    and not self._stop_requested
+                    and not self._tools_locked
+                    and not self._mission_active
+                    and self.current_agent_mode
+                    and getattr(self, "_verify_red", "")):
+                _fv = failing_verification_gap(
+                    self._verify_red, getattr(self, "_verify_pushes", 0))
+                if _fv:
+                    self._verify_pushes = getattr(self, "_verify_pushes", 0) + 1
+                    self.terminal_log(
+                        "↻ the check is still red (%s) — not ending on that"
+                        % self._verify_red[:60], "error")
+                    self._activity_note(
+                        "the check did not pass - going back to it", "gate")
+                    try:
+                        _sc = self.streaming_chat_id or self.current_chat_id
+                        self.store.add_message(_sc, "user", _fv,
+                                               meta={"kind": "tool_result"})
+                    except Exception as e:
+                        log(f"verify gate: store write failed: {e}")
+                    self.streaming_msg_widget = None
+                    self.streaming_msg_db_id = None
+                    self._kick_assistant_turn()
+                    return False
+
+            # ── A COMPLETED PLAN ENDS THE TURN, FULL STOP ──
+            # The other half of the ledger, and the half that stops the
+            # second answer. Every item closed means the declared work is
+            # done, so the host stops looking for reasons to hand the model
+            # another turn — including the stall detector below, which is a
+            # prose heuristic and therefore the most likely of the three to
+            # push a FINISHED turn back into the loop. A finished job is not
+            # a stall however the last sentence happens to be phrased.
+            _nudge_cap = (ANSWER_STALL_NUDGE_MAX * 2 if _work_turn
+                          else ANSWER_STALL_NUDGE_MAX)
+            if _plan_complete:
+                _nudge_cap = 0
+                if not getattr(self, "_plan_done_announced", False):
+                    self._plan_done_announced = True
+                    self.terminal_log(
+                        "✅ every plan item closed (%s) — ending the turn"
+                        % _plan.summary_line(), "ok")
+                    self._activity_note(
+                        "all steps closed - done", "note")
+            # ── ANSWER-MODE STALL NUDGE (the block below is this one) ──
+            # Given its own anchor because tests locate it by comment and a
+            # fixed-width slice from the section header broke the moment the
+            # deterministic gates above were added. A named anchor cannot
+            # drift when a neighbour grows.
+            if (not cancelled and not executable
+                    and not self._stop_requested
+                    and not self._tools_locked
+                    and not looks_degraded(final)
+                    and reply_is_bare_stall(final)
+                    and getattr(self, "_answer_stall_nudges", 0) < _nudge_cap
+                    and getattr(self, "_answer_stall_total", 0)
+                        < ANSWER_STALL_NUDGE_TOTAL_MAX):
+                self._answer_stall_nudges = getattr(
+                    self, "_answer_stall_nudges", 0) + 1
+                self._answer_stall_total = getattr(
+                    self, "_answer_stall_total", 0) + 1
+                self.terminal_log(
+                    "↻ you said you'd do something but called no tool "
+                    f"— nudging ({self._answer_stall_nudges}/"
+                    f"{_nudge_cap})", "dim")
+                if _work_turn:
+                    _nudge = ("<tool_result>\n[system note: you described the "
+                              "change you were about to make but "
+                              "did not emit a tool call"
+                              ", so NOTHING WAS WRITTEN AND NOTHING RAN. "
+                              "Describing an edit is not making it; a fenced "
+                              "code block changes no file. "
+                              "Emit the tool call now"
+                              " — the write/replace/run call. If the work is "
+                              "genuinely finished, say what you changed, what "
+                              "you ran and what the result was; if it is not "
+                              "verified, say that instead of claiming "
+                              "done.]\n</tool_result>")
+                else:
+                    _nudge = ("<tool_result>\n[system note: you described what "
+                              "you were going to do next but "
+                              "did not emit a tool call"
+                              ", so NOTHING RAN. Saying it is not doing it. "
+                              "Either emit the tool call now"
+                              ", or — if you already have enough — give the "
+                              "complete final answer"
+                              " to the operator's question in full, with no "
+                              "further preamble.]\n</tool_result>")
+                try:
+                    _sc = self.streaming_chat_id or self.current_chat_id
+                    self.store.add_message(
+                        _sc, "user", _nudge,
+                        meta={"kind": "tool_result"})
+                except Exception as e:
+                    log(f"answer-stall nudge: store write failed: {e}")
+                self.streaming_msg_widget = None
+                self.streaming_msg_db_id = None
+                self._kick_assistant_turn()
+                return False
+            self._finish_turn_cleanup()
+        return False
+
+    def _on_stream_error(self, err, epoch=None):
+        if self._stale_stream(epoch):
+            # A dead stream must not schedule a retry for a turn that has
+            # already moved on -- that is a second answer, arriving late.
+            return False
+        self._mark_turn_progress()
+        self.terminal_log(f"✗ stream error: {err}", "error")
+        if self.streaming_msg_widget:
+            # Preserve any tokens that already streamed in.  Wiping the
+            # widget and replacing with just the error text discards
+            # potentially useful partial output (an explanation that got
+            # cut off, a half-finished tool call, etc).
+            # Same boundary as the finish and stop paths: whatever streamed in
+            # before the error is about to be stored and replayed as history.
+            partial = self.streaming_msg_widget.canonical_content() or ""
+            sep = "\n\n" if partial.strip() else ""
+            final_text = f"{partial}{sep}*(error: {err})*"
+            self.streaming_msg_widget.set_content(final_text)
+            if self.streaming_msg_db_id:
+                self.store.update_message(self.streaming_msg_db_id,
+                                          final_text)
+        self._show_toast(f"Error: {err}")
+        # Clear widget refs without re-marking the message (we just wrote
+        # the error into it above), then restore the button/banner.
+        self.streaming_msg_widget = None
+        self.streaming_msg_db_id = None
+        self.streaming_chat_id = None
+        self._tool_chain_depth = 0
+        self._turn_active = False
+        # ── Autonomous mission: a transient stream/API error must NOT kill the
+        #    run.  Back off and retry, forever, until it succeeds or you Stop. ──
+        if self._mission_active and not self._stop_requested:
+            self._error_retries += 1
+            # exponential backoff capped at 60s — so a persistent outage (e.g.
+            # provider down for hours) just keeps politely retrying, and a run
+            # left for weeks survives it and resumes the moment it clears.
+            delay = min(60000, 1000 * (2 ** min(self._error_retries - 1, 6)))
+            self.terminal_log(
+                f"↻ stream error — retrying in {delay // 1000}s "
+                f"[{self._error_retries}]", "dim")
+            self._activity_note(
+                "stream error - retrying in %ds (attempt %d): %s"
+                % (delay // 1000, self._error_retries, str(err)[:80]), "gate")
+            self._set_working(True, "retrying after error…")
+            self._schedule_kick(delay)
+            return False
+        self._set_working(False)
+        self._set_send_mode(False)
+        return False
+
+    # ── tool execution ──────────────────────────────────────────
+
+    # ══════════════════════════════════════════════════════════════════
+    #  THE TASK LEDGER — host side
+    # ══════════════════════════════════════════════════════════════════
+    def _plan_obj(self):
+        """The plan for THIS request. One per request, created on demand."""
+        pl = getattr(self, "_plan", None)
+        if pl is None:
+            try:
+                from basilisk_ext.tasks import TaskPlan
+            except Exception:
+                return None
+            pl = TaskPlan()
+            self._plan = pl
+        return pl
+
+    def _plan_reset(self):
+        """A new operator message starts a new plan.
+
+        NOT per chat. Carrying a plan across requests would let an item left
+        open in the last question hold this question's answer hostage, and
+        the gate would be enforcing an intention the operator has moved on
+        from."""
+        pl = getattr(self, "_plan", None)
+        if pl is not None:
+            try:
+                pl.clear()
+            except Exception:
+                self._plan = None
+        self._plan_pushes = 0
+        self._plan_done_announced = False
+
+    def _plan_call(self, op, a):
+        """plan_set / plan_step / plan_status, and the screen update."""
+        pl = self._plan_obj()
+        if pl is None:
+            return {"ok": False, "error": (
+                "the task-ledger module is not installed — carry on without "
+                "a plan and just do the work, verifying as you go.")}
+        try:
+            if op == "set":
+                items = a.get("items", a.get("steps", a.get("plan",
+                              a.get("tasks", a.get("todo")))))
+                out = pl.set_plan(items, a.get("goal", a.get("objective", "")))
+            elif op == "step":
+                out = pl.update(
+                    a.get("id", a.get("item", a.get("step", a.get("task",
+                          a.get("title", ""))))),
+                    a.get("status", a.get("state", a.get("to", ""))),
+                    a.get("note", a.get("reason", a.get("detail", ""))))
+            else:
+                out = pl.status()
+        except Exception as e:
+            return {"ok": False, "error": f"plan tool failed: {e}"}
+        try:
+            GLib.idle_add(self._plan_render)
+        except Exception:
+            pass
+        return out
+
+    def _plan_render(self):
+        """Push the checklist onto the live activity feed."""
+        try:
+            pl = getattr(self, "_plan", None)
+            if pl is None or not len(pl):
+                return False
+            feed = getattr(self, "_feed", None)
+            if feed is not None and hasattr(feed, "set_checklist"):
+                feed.set_checklist(pl.items, pl.summary_line())
+        except Exception:
+            pass
+        return False
+
+    def _preload_groups(self):
+        """Tool groups to ship inline this turn instead of lazily.
+
+        Pure and cheap — called once per round-trip. Anything it cannot
+        determine it simply does not preload, which is exactly the old
+        behaviour."""
+        out = []
+        try:
+            if workspace_cwd():
+                out.append("workspace")
+            elif getattr(self, "_leash_work_turn", False):
+                out.append("workspace")
+        except Exception:
+            pass
+        return tuple(out)
+
+    def _research_reader(self):
+        """The reader web_search / web_research fetch through.
+
+        _web_read_gated, not tool_web_read: the domain-approval gate lives
+        in that wrapper, and a research fetch must not be a way around it."""
+        def _rd(url):
+            try:
+                return self._web_read_gated(url, 14000)
+            except Exception as e:
+                return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        return _rd
+
+    def _workspace_call(self, n, a):
+        """One arg-mapper for all 13 workspace tools, shared by BOTH dispatch
+        paths (autonomous and approval-gated).
+
+        Written once deliberately. The two dispatch sites in this file have
+        drifted before -- a tool wired into one and not the other works
+        perfectly until the operator flips approval mode, then vanishes. A
+        single mapper cannot drift from itself.
+
+        The generous key aliases exist because the model does not always
+        emit the exact parameter name: it will send `file`, `filename` or
+        `target` when the spec says `path`. Accepting the obvious synonyms
+        turns a failed tool call into a working one, and the cost is a dict
+        lookup.
+        """
+        def _p(*names, default=""):
+            for k in names:
+                if k in a and a[k] not in (None, ""):
+                    return a[k]
+            return default
+
+        def _b(*names, default=False):
+            v = _p(*names, default=None)
+            if v is None:
+                return default
+            if isinstance(v, bool):
+                return v
+            return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+        def _i(*names, default=0):
+            try:
+                return int(_p(*names, default=default))
+            except (TypeError, ValueError):
+                return default
+
+        path = _p("path", "file", "filename", "target", "name")
+        if n == "workspace_import":
+            return lambda: tool_workspace_import(
+                _p("zip_path", "zip", "path", "file", "archive"),
+                _p("name", "workspace", "label"))
+        if n == "workspace_status":
+            return lambda: tool_workspace_status()
+        if n == "workspace_overview":
+            return lambda: tool_workspace_overview()
+        if n == "workspace_tree":
+            return lambda: tool_workspace_tree(
+                _p("path", "dir", "directory"),
+                _i("max_entries", "limit", "max", default=400))
+        if n == "workspace_search":
+            return lambda: tool_workspace_search(
+                _p("pattern", "query", "q", "text", "needle"),
+                _p("glob", "filter", "files", "include"),
+                _b("regex", "is_regex", "re"),
+                _i("max_results", "limit", "max", default=120),
+                _i("context", "ctx", "around", default=0))
+        if n == "workspace_read":
+            return lambda: tool_workspace_read(
+                path, _i("start", "from", "start_line", default=1),
+                _i("end", "to", "end_line", default=0))
+        if n == "workspace_replace":
+            return lambda: tool_workspace_replace(
+                path, _p("old", "old_str", "find", "search"),
+                _p("new", "new_str", "replace", "replacement"),
+                _i("count", "n", "occurrences", default=1))
+        if n == "workspace_write":
+            return lambda: tool_workspace_write(
+                path, _p("content", "text", "body", "source", "code"),
+                _b("create", "new", "create_new"))
+        if n == "workspace_edits":
+            return lambda: tool_workspace_edits(
+                path, a.get("edits", a.get("items", a.get("changes",
+                            a.get("replacements", a.get("edit"))))))
+        if n == "workspace_append":
+            return lambda: tool_workspace_append(
+                path, _p("content", "text", "body", "source", "code",
+                         "chunk"),
+                _b("create", "new", "create_new"))
+        if n == "workspace_insert":
+            return lambda: tool_workspace_insert(
+                path, _p("content", "text", "body", "block", "code"),
+                _i("after_line", "after", "line", default=0),
+                _i("before_line", "before", default=0))
+        if n == "workspace_glob":
+            return lambda: tool_workspace_glob(
+                _p("pattern", "glob", "files", "q", "query", default="*"),
+                _i("limit", "max", "max_results", default=300))
+        if n == "workspace_read_many":
+            return lambda: tool_workspace_read_many(
+                a.get("paths", a.get("files", a.get("path", a.get("items")))),
+                _i("max_chars", "chars", "limit", default=6000))
+        if n == "workspace_delete":
+            return lambda: tool_workspace_delete(path)
+        if n == "workspace_diff":
+            return lambda: tool_workspace_diff(path)
+        if n == "workspace_revert":
+            return lambda: tool_workspace_revert(path)
+        if n == "workspace_export":
+            return lambda: tool_workspace_export(
+                _p("out_path", "out", "dest", "output", "zip_path"),
+                _b("include_secrets", "secrets"),
+                _b("changed_only", "only_changed", "changed"),
+                _b("force", "override"))
+        if n == "workspace_close":
+            return lambda: tool_workspace_close(_b("discard", "delete"))
+        if n == "workspace_test_command":
+            return lambda: tool_workspace_test_command()
+        if n == "workspace_baseline":
+            return lambda: tool_workspace_baseline(
+                _p("command", "cmd", "test_command"),
+                _i("timeout", "secs", default=900))
+        if n == "workspace_verify":
+            return lambda: tool_workspace_verify(
+                _p("command", "cmd", "test_command"),
+                _i("timeout", "secs", default=900))
+        if n == "workspace_health":
+            return lambda: tool_workspace_health()
+        return lambda: {"ok": False, "error": f"unknown workspace tool: {n}"}
+
+    def _pure_tool_fn(self, call):
+        """Return a zero-arg callable that produces a result dict for a
+        read-only, side-effect-free tool that's safe to run in parallel and
+        batch — or None if this tool must take the normal (gated / specially
+        rendered) single path.  This is the allow-list that decides what can
+        be bundled into one round-trip."""
+        n = call.name
+        a = call.args or {}
+
+        def i(v, d):
+            try:
+                return int(float(v))
+            except (TypeError, ValueError):
+                return d
+
+        # Pentest planning / inventory / reference — pure local work (which-
+        # checks, building a command plan, text parsing, reading the
+        # filesystem, formatting), no network and no execution, so it's safe
+        # to bundle.  (The web / OSINT / social / GitHub readers that used to
+        # live here were removed — they ingested attacker-controllable external
+        # text, i.e. the prompt-injection surface.)
+        if n == "tooling_check":
+            return lambda: tool_tooling_check()
+        if n == "pentest_plan":
+            return lambda: tool_pentest_plan(
+                a.get("target", a.get("host", a.get("url", ""))),
+                a.get("profile", a.get("mode", "web")),
+                a.get("intensity", a.get("speed", "normal")))
+        if n == "parse_output":
+            return lambda: tool_parse_output(
+                a.get("tool", a.get("name", "")),
+                a.get("raw", a.get("output", a.get("text", ""))),
+                a.get("enrich_cves", a.get("enrich", False)) not in
+                    (False, "false", "0", 0, None))
+        if n == "methodology":
+            return lambda: tool_methodology(
+                a.get("area", a.get("topic", "")),
+                a.get("phase", ""))
+        if n == "wordlist_find":
+            return lambda: tool_wordlist_find(
+                a.get("kind", a.get("type", a.get("category", ""))))
+        if n == "cheatsheet":
+            return lambda: tool_cheatsheet(
+                a.get("topic", a.get("tool", a.get("name", ""))))
+        if n == "report_findings":
+            return lambda: tool_report_findings(
+                a.get("findings", a.get("items", [])),
+                a.get("target", a.get("host", a.get("url", ""))),
+                a.get("scope_note", a.get("scope", "")),
+                a.get("title", ""))
+        if n == "attack_writeup":
+            return lambda: tool_attack_writeup(
+                a.get("access", a.get("summary", "")),
+                a.get("steps", a.get("path_steps", None)),
+                a.get("target", a.get("host", a.get("url", ""))),
+                a.get("scope_note", a.get("scope", "")),
+                a.get("impact", ""), a.get("remediation", a.get("fix", "")),
+                a.get("root_cause", a.get("cause", "")),
+                a.get("ledger_events", a.get("events", None)))
+        if n.startswith("workspace_"):
+            return self._workspace_call(n, a)
+        if n == "code_tooling_check":
+            return lambda: tool_code_tooling_check()
+        if n == "code_scan_plan":
+            return lambda: tool_code_scan_plan(
+                a.get("path", a.get("dir", a.get("target", "."))),
+                a.get("kind", a.get("type", "auto")),
+                a.get("intensity", a.get("depth", "normal")))
+        if n == "zday_scan":
+            if _zdayfind is None:
+                return _ext_unavailable("zday_scan", "zdayfind")
+            return lambda: _zdayfind.zday_scan(
+                path=_ws_path(a.get("path", a.get("dir", a.get("target", "")))),
+                code=a.get("code", a.get("source", "")),
+                like=a.get("like", a.get("variant_of", a.get("snippet", ""))),
+                focus=a.get("focus", a.get("classes", "")),
+                filename=a.get("filename", a.get("name", "snippet")))
+        if n == "zday_signatures":
+            if _zdayfind is None:
+                return _ext_unavailable("zday_signatures", "zdayfind")
+            return lambda: _zdayfind.signature_catalog()
+        if n == "saml_attack":
+            if _exploits is None:
+                return _ext_unavailable("saml_attack", "exploits")
+            return lambda: _exploits.saml_attack(
+                a.get("mode", a.get("technique", "signature_wrapping")),
+                a.get("assertion", a.get("response", "")))
+        if n == "cloud_storage":
+            if _exploits is None:
+                return _ext_unavailable("cloud_storage", "exploits")
+            return lambda: _exploits.cloud_storage(
+                a.get("provider", a.get("cloud", "s3")),
+                a.get("bucket", a.get("container", a.get("name", ""))))
+        if n == "subdomain_takeover":
+            if _exploits is None:
+                return _ext_unavailable("subdomain_takeover", "exploits")
+            return lambda: _exploits.subdomain_takeover(
+                a.get("host", a.get("subdomain", a.get("domain", ""))),
+                a.get("cname", a.get("target", "")))
+        if n == "padding_oracle":
+            if _exploits is None:
+                return _ext_unavailable("padding_oracle", "exploits")
+            return lambda: _exploits.padding_oracle(
+                a.get("mode", "detect"),
+                a.get("ciphertext", a.get("data", "")),
+                a.get("block_size", a.get("blocksize", 16)))
+        if n == "xslt_injection":
+            if _exploits is None:
+                return _ext_unavailable("xslt_injection", "exploits")
+            return lambda: _exploits.xslt_injection(
+                a.get("mode", "detect"), a.get("cmd", a.get("command", "id")))
+        if n == "parse_scan":
+            return lambda: tool_parse_scan(
+                a.get("tool", a.get("scanner", a.get("name", ""))),
+                a.get("raw", a.get("output", a.get("json", a.get("text", "")))))
+        if n == "triage_findings":
+            return lambda: tool_triage_findings(
+                a.get("findings", a.get("items", [])))
+        if n == "remediation_hint":
+            return lambda: tool_remediation_hint(
+                a.get("finding", a.get("item", a)))
+        # ── Engagement state: scope allowlist, asset graph, loot (read/record;
+        # scope_check is the authorisation boundary, fails closed) ──
+        if n == "scope_set":
+            return lambda: tool_scope_set(
+                a.get("targets", a.get("scope", a.get("hosts", []))),
+                a.get("mode", "replace"))
+        if n == "scope_check":
+            return lambda: tool_scope_check(
+                a.get("target", a.get("host", a.get("url", ""))))
+        if n == "scope_show":
+            return lambda: tool_scope_show()
+        if n == "scope_exclude":
+            return lambda: tool_scope_exclude(
+                a.get("targets", a.get("exclusions", a.get("hosts", []))),
+                a.get("mode", "replace"))
+        if n == "scope_window":
+            return lambda: tool_scope_window(
+                a.get("start", ""), a.get("end", ""), bool(a.get("clear", False)))
+        if n == "scope_authorisation":
+            return lambda: tool_scope_authorisation(
+                a.get("client", ""), a.get("authorised_by", a.get("authorized_by", "")),
+                a.get("reference", a.get("ref", "")))
+        if n == "asset_record":
+            return lambda: tool_asset_record(
+                a.get("host", a.get("target", "")), a.get("service", ""),
+                a.get("port", None), a.get("finding", ""),
+                a.get("access", ""), a.get("note", ""))
+        if n == "engagement_graph":
+            return lambda: tool_engagement_graph(a.get("host", ""))
+        if n == "loot_record":
+            return lambda: tool_loot_record(
+                a.get("host", ""), a.get("kind", "credential"),
+                a.get("username", a.get("user", "")),
+                a.get("secret", a.get("password", a.get("hash", ""))),
+                a.get("service", ""), a.get("note", ""))
+        if n == "loot_list":
+            return lambda: tool_loot_list()
+        if n == "loot_reuse":
+            return lambda: tool_loot_reuse()
+        # ── Exploitation oracle: verify whether an exploit actually landed and
+        #    keep a verdict ledger that feeds the loop (local; no target/network
+        #    side effects beyond a local OOB canary listener) ──
+        if n == "oracle_arm":
+            return lambda: tool_oracle_arm(
+                a.get("objective", a.get("goal", a.get("what", ""))),
+                a.get("target", a.get("url", a.get("host", ""))),
+                a.get("technique", a.get("vuln", a.get("class", a.get("attack", "")))),
+                a.get("criterion_type", a.get("type", a.get("criterion", a.get("check", "contains")))),
+                a.get("criterion_value", a.get("value", a.get("marker",
+                    a.get("expect", a.get("expected", a.get("pattern", "")))))),
+                a.get("blind", a.get("oob", False)),
+                a.get("oob_host", a.get("host", a.get("callback_host", ""))))
+        if n == "oracle_check":
+            return lambda: tool_oracle_check(
+                a.get("attempt_id", a.get("id", a.get("attempt", ""))),
+                a.get("evidence", a.get("response", a.get("body",
+                    a.get("output", a.get("text", a.get("resp", "")))))),
+                a.get("status", a.get("code", a.get("status_code", None))),
+                a.get("baseline", a.get("base", a.get("normal", a.get("control", "")))))
+        if n == "oracle_status":
+            return lambda: tool_oracle_status()
+        if n == "oracle_listen":
+            return lambda: tool_oracle_listen(
+                a.get("port", 0),
+                a.get("host", a.get("callback_host", a.get("ip", ""))))
+        if n == "graph_ingest":
+            return lambda: tool_graph_ingest(
+                a.get("parsed", a.get("findings", a.get("result", a))))
+        if n == "sqlmap_plan":
+            return lambda: tool_sqlmap_plan(
+                a.get("target", a.get("url", a.get("host", ""))),
+                a.get("mode", "detect"), a.get("data", ""), a.get("cookie", ""),
+                a.get("headers", ""), a.get("level", 1), a.get("risk", 1),
+                a.get("dbms", ""), a.get("technique", ""), a.get("db", ""),
+                a.get("table", ""), a.get("request_file", a.get("r", "")),
+                a.get("extra", ""))
+        if n == "benchmark_targets":
+            return lambda: tool_benchmark_targets(a.get("target", ""))
+        if n == "benchmark_score":
+            return lambda: tool_benchmark_score(
+                a.get("target", ""), a.get("findings", a.get("items", [])),
+                a.get("ground_truth", a.get("gt", None)), a.get("tool", "basilisk"))
+        if n == "benchmark_report":
+            return lambda: tool_benchmark_report(
+                a.get("scored", a.get("result", a)))
+        if n == "benchmark_compare":
+            return lambda: tool_benchmark_compare(
+                a.get("runs", a.get("results", a.get("items", []))))
+        if n == "load_tools":
+            return lambda: tool_load_tools(
+                a.get("group", a.get("name", a.get("groups", ""))),
+                unleashed=self._unleashed)
+        if n == "submit_flag":
+            return lambda: tool_submit_flag(
+                a.get("flag", a.get("value", "")), a.get("challenge", ""))
+        if n == "juiceshop_score":
+            return lambda: tool_juiceshop_score(
+                a.get("base_url", a.get("url", a.get("target",
+                      "http://localhost:3000"))))
+        if n == "juiceshop_report":
+            return lambda: tool_juiceshop_report(a.get("scored", a.get("result", a)))
+        if n == "juiceshop_next":
+            return lambda: tool_juiceshop_next(
+                a.get("base_url", a.get("url", "http://localhost:3000")),
+                a.get("max_difficulty", a.get("max_stars", 0)),
+                a.get("limit", 0), a.get("per_tier", a.get("per_star", 0)))
+        if n == "juiceshop_diff":
+            return lambda: tool_juiceshop_diff(
+                a.get("base_url", a.get("url", "http://localhost:3000")),
+                a.get("since", a.get("solved_names", a.get("previous"))))
+        if n == "juiceshop_source":
+            return lambda: tool_juiceshop_source(
+                a.get("action", "tree"), a.get("path", ""),
+                a.get("pattern", a.get("query", "")),
+                a.get("container", "juiceshop"),
+                a.get("base", a.get("base_path", "/juice-shop")))
+        if n == "jwt_forge":
+            return lambda: tool_jwt_forge(
+                a.get("token", ""), a.get("mode", "none"),
+                a.get("email", ""), a.get("role", ""),
+                a.get("public_key", a.get("pubkey", "")),
+                a.get("payload_overrides", a.get("overrides")))
+        if n == "nosql_injection":
+            return lambda: tool_nosql_injection(
+                a.get("mode", "auth_bypass"), a.get("field", "email"),
+                a.get("target", ""))
+        if n == "xxe_payload":
+            return lambda: tool_xxe_payload(
+                a.get("mode", "file_read"),
+                a.get("file_path", a.get("file", "/etc/passwd")))
+        if n == "coupon_forge":
+            return lambda: tool_coupon_forge(
+                a.get("mode", "tamper"), a.get("discount", 20),
+                a.get("scheme", "z85"), a.get("value", a.get("campaign", "")))
+        if n == "captcha_solve":
+            return lambda: tool_captcha_solve(
+                a.get("url", ""),
+                a.get("captcha_text", a.get("text", a.get("captcha", ""))),
+                a.get("base_url", ""))
+        if n == "reset_password":
+            return lambda: tool_reset_password(
+                a.get("mode", "methodology"), a.get("email", ""),
+                a.get("new_password", a.get("password", "Pwned123!")))
+        if n == "business_logic":
+            return lambda: tool_business_logic(
+                a.get("area", a.get("category", "all")))
+        if n == "ssti_payload":
+            return lambda: tool_ssti_payload(
+                a.get("engine", "detect"), a.get("cmd", a.get("command", "id")))
+        if n == "ssrf_payload":
+            return lambda: tool_ssrf_payload(
+                a.get("mode", "internal"),
+                a.get("target_url", a.get("url", "http://localhost/")),
+                a.get("host", "169.254.169.254"))
+        if n == "deserialization_payload":
+            return lambda: tool_deserialization_payload(
+                a.get("platform", "node"), a.get("cmd", a.get("command", "id")))
+        if n == "prototype_pollution":
+            return lambda: tool_prototype_pollution(
+                a.get("prop", a.get("property", "isAdmin")),
+                a.get("value", "true"), a.get("vector", "json"))
+        if n == "path_traversal":
+            return lambda: tool_path_traversal(
+                a.get("mode", "read"),
+                a.get("file_path", a.get("file", "/etc/passwd")),
+                a.get("filename", "malicious.md"))
+        if n == "xss_payload":
+            return lambda: tool_xss_payload(
+                a.get("context", "html"), a.get("mode", "basic"))
+        if n == "sqli_payload":
+            return lambda: tool_sqli_payload(
+                a.get("mode", "auth_bypass"), a.get("dbms", "generic"),
+                a.get("columns", 3), a.get("table", "users"))
+        if n == "payload_encoder":
+            return lambda: tool_payload_encoder(
+                a.get("payload", a.get("text", "")), a.get("scheme", "all"),
+                a.get("decode", False))
+        if n == "tech_fingerprint":
+            return lambda: tool_tech_fingerprint(
+                a.get("headers", ""), a.get("body", ""))
+        if n == "waf_detect":
+            return lambda: tool_waf_detect(
+                a.get("blocked_payload", a.get("payload", "")),
+                a.get("response_body", a.get("body", "")),
+                a.get("status_code", a.get("status", 0)))
+        if n == "trick_detect":
+            return lambda: tool_trick_detect(
+                a.get("text", a.get("body", a.get("content", ""))))
+        if n == "payload_mutate":
+            return lambda: tool_payload_mutate(
+                a.get("body", a.get("request", "")),
+                a.get("payload", "' OR 1=1--"),
+                a.get("fmt", a.get("format", "auto")), a.get("mode", "replace"))
+        if n == "session_flow":
+            return lambda: tool_session_flow(
+                a.get("mode", "extract"),
+                a.get("response", a.get("body", "")), a.get("flow", ""))
+        if n == "oracle_analyze":
+            return lambda: tool_oracle_analyze(
+                a.get("mode", "diff"), a.get("baseline", ""), a.get("test", ""),
+                a.get("baseline_status", 0), a.get("test_status", 0),
+                a.get("baseline_times", ""), a.get("payload_times", ""))
+        if n == "command_injection":
+            return lambda: tool_command_injection(
+                a.get("os_type", a.get("os", "unix")),
+                a.get("mode", "inline"),
+                a.get("cmd", a.get("command", "id")))
+        if n == "idor_probe":
+            return lambda: tool_idor_probe(
+                a.get("base", a.get("url", "")),
+                a.get("id_value", a.get("id", "1")),
+                a.get("strategy", "all"))
+        if n == "race_condition":
+            return lambda: tool_race_condition(
+                a.get("method", "POST"),
+                a.get("url", a.get("target", "")),
+                a.get("body", a.get("data", "")),
+                a.get("headers", ""),
+                a.get("parallel", a.get("count", 20)))
+        if n == "upload_bypass":
+            return lambda: tool_upload_bypass(
+                a.get("filename", a.get("name", "shell.php")),
+                a.get("content_type", a.get("mime", "image/png")),
+                a.get("technique", "all"))
+        if n == "graphql_probe":
+            return lambda: tool_graphql_probe(
+                a.get("mode", "introspect"),
+                a.get("field", ""),
+                a.get("payload", ""))
+        if n == "open_redirect":
+            return lambda: tool_open_redirect(
+                a.get("target", a.get("url", "http://evil.example")),
+                a.get("param", "redirect"),
+                a.get("legit_host", a.get("host", "example.com")))
+        if n == "cors_probe":
+            return lambda: tool_cors_probe(
+                a.get("origin", "https://evil.example"),
+                a.get("target_host", a.get("host", "example.com")))
+        if n == "ldap_injection":
+            return lambda: tool_ldap_injection(
+                a.get("mode", "auth_bypass"), a.get("field", "username"))
+        if n == "xpath_injection":
+            return lambda: tool_xpath_injection(a.get("mode", "auth_bypass"))
+        if n == "crlf_injection":
+            return lambda: tool_crlf_injection(
+                a.get("mode", "header"), a.get("value", ""))
+        if n == "host_header_injection":
+            return lambda: tool_host_header_injection(
+                a.get("mode", "reset"), a.get("host", "evil.example"))
+        if n == "ssi_injection":
+            return lambda: tool_ssi_injection(a.get("mode", "ssi"))
+        if n == "csv_injection":
+            return lambda: tool_csv_injection(a.get("mode", "detect"))
+        if n == "request_smuggling":
+            return lambda: tool_request_smuggling(a.get("mode", "clte"))
+        if n == "csrf_poc":
+            return lambda: tool_csrf_poc(
+                a.get("method", "POST"), a.get("url", a.get("target", "")),
+                a.get("body", a.get("data", "")), a.get("mode", "form"))
+        if n == "clickjacking":
+            return lambda: tool_clickjacking(
+                a.get("url", a.get("target", "")), a.get("mode", "check"))
+        if n == "mass_assignment":
+            return lambda: tool_mass_assignment(
+                a.get("base_body", a.get("body", "{}")), a.get("fields", ""))
+        if n == "auth_bypass_headers":
+            return lambda: tool_auth_bypass_headers(
+                a.get("url", a.get("target", "")), a.get("mode", "headers"))
+        if n == "auth_attack":
+            return lambda: tool_auth_attack(
+                a.get("mode", "spray"), a.get("url", a.get("target", "")),
+                a.get("users", "users.txt"), a.get("passwords", ""))
+        if n == "jwt_attack":
+            return lambda: tool_jwt_attack(
+                a.get("mode", "weak_secret"), a.get("token", ""),
+                a.get("wordlist", "rockyou.txt"))
+        if n == "api_test":
+            return lambda: tool_api_test(
+                a.get("mode", "verb"), a.get("base", a.get("url", "")))
+        if n == "cache_poisoning":
+            return lambda: tool_cache_poisoning(
+                a.get("url", a.get("target", "")), a.get("mode", "poison"))
+        if n == "email_header_injection":
+            return lambda: tool_email_header_injection(
+                a.get("mode", "inject"), a.get("value", ""))
+        if n == "websocket_probe":
+            return lambda: tool_websocket_probe(
+                a.get("url", a.get("target", "")), a.get("mode", "cswsh"))
+        if n == "oauth_probe":
+            return lambda: tool_oauth_probe(
+                a.get("mode", "redirect_uri"),
+                a.get("redirect_uri", a.get("uri", "https://evil.example")))
+        if n == "attack_surface":
+            return lambda: tool_attack_surface(
+                a.get("content", a.get("body", a.get("text", ""))),
+                a.get("base_url", a.get("url", "")))
+        if n == "verify_solve":
+            return lambda: tool_verify_solve(
+                a.get("mode", "scoreboard"), a.get("before", ""),
+                a.get("after", ""), a.get("target", ""),
+                a.get("category", ""), a.get("expected", ""),
+                a.get("observed", ""))
+        if n == "webapp_recon":
+            return lambda: tool_webapp_recon(
+                a.get("base_url", a.get("url", a.get("target",
+                      "http://localhost:3000"))),
+                a.get("extra_paths", a.get("paths")),
+                a.get("max_paths", 40))
+        if n == "xbow_score":
+            return lambda: tool_xbow_score(
+                a.get("results", a.get("records", a.get("items", []))))
+        if n == "xbow_report":
+            return lambda: tool_xbow_report(a.get("scored", a.get("result", a)))
+        # Pure system / desktop sensing (independent subprocesses).
+        if n == "system_info":
+            return tool_system_info
+        if n == "disk_usage":
+            return tool_disk_usage
+        if n == "processes":
+            return lambda: tool_processes(i(a.get("top_n", 15), 15))
+        if n == "network_status":
+            return tool_network_status
+        if n == "recent_downloads":
+            return lambda: tool_recent_downloads(i(a.get("limit", 20), 20))
+        if n == "service_status":
+            return lambda: tool_service_status(a.get("name"))
+        if n == "journal_tail":
+            return lambda: tool_journal_tail(
+                i(a.get("lines", 50), 50), a.get("unit"))
+        if n == "desktop_info":
+            return tool_desktop_info
+        if n == "list_apps":
+            return lambda: tool_list_apps(
+                a.get("filter", a.get("filter_text", "")))
+        if n == "list_windows":
+            return tool_list_windows
+        if n == "list_dir":
+            return lambda: tool_list_dir(a.get("path", "."))
+        if n == "find_file":
+            return lambda: tool_find_file(
+                a.get("pattern", "*"), a.get("search_path", "~"),
+                i(a.get("max_results", 50), 50),
+                a.get("min_size_kb", 0), a.get("max_size_kb", 0),
+                a.get("modified_within_days", 0))
+        if n == "path_info":
+            return lambda: tool_path_info(a.get("path", ""))
+        if n == "quick_facts":
+            return lambda: tool_quick_facts()
+        if n == "read_file":
+            p = a.get("path", "")
+            # Sensitive reads keep their confirm gate — never auto-batched.
+            if p and not is_sensitive_path(p):
+                return lambda: tool_read_file(p)
+            return None
+        return None
+
+    def _execute_tool_batch(self, calls):
+        """Run several read-only tools concurrently and feed ONE combined
+        tool_result back.  A multi-lookup turn then costs a single model
+        round-trip (and a single chain step) instead of one per tool."""
+        chat_id = self.streaming_chat_id or self.current_chat_id
+        for c in calls:
+            self.store.add_message(
+                chat_id, "tool",
+                f"⚙ tool: {c.name}({json.dumps(c.args)})",
+                meta={"kind": "call"})
+        names = ", ".join(c.name for c in calls)
+        self.terminal_log(f"→ batch: {names} ({len(calls)} in parallel)", "info")
+        # ── THE REPEAT GUARD MUST SEE BOTH EXECUTION PATHS ──
+        # It was called only from _execute_tool_calls, so a batch was never
+        # repeat-checked at all — and worse, a batch recorded ONE combined
+        # recall entry ("system_info + disk_usage + processes"), which no
+        # per-tool lookup can ever match.  So `system_info` could run inside a
+        # batch and again on its own a turn later, forever, with the guard
+        # blind to both halves.  That is visible in the operator's log.
+        #
+        # Same drift class as _pure_tool_fn vs dispatch (tests/test_dispatch.py
+        # exists because those two got out of step); this time it was the guard
+        # that sat on one path.
+        #
+        # Individually-blocked calls are DROPPED from the batch rather than
+        # failing the whole thing — the other tools in it are still useful, and
+        # a batch is a convenience, not an atomic unit.
+        # ── AND SO MUST ARGUMENT NORMALISATION ──
+        # Same drift, one layer along. _normalise_tool_args is called at
+        # exactly one place — the SINGLE-call path — so everything it enforces
+        # (the synonym map, the required-argument check, and the null-stripping
+        # above it) was absent from a batched call. `pentest_plan` bundled with
+        # `system_info` therefore ran with arguments that would have been
+        # corrected, or refused, had it arrived on its own: the same tool, the
+        # same arguments, a different answer depending only on what the model
+        # happened to call alongside it.
+        #
+        # A member whose arguments are unusable is DROPPED from the batch with
+        # its reason recorded, exactly as the repeat guard drops one — the rest
+        # of the batch is still useful, and a batch is a convenience, not an
+        # atomic unit.
+        _argerrs = []
+        for c in calls:
+            _na, _ae = _normalise_tool_args(c.name, c.args)
+            if _ae:
+                _argerrs.append((c, _ae))
+            else:
+                c.args = _na
+        if _argerrs:
+            _bad = {id(c) for c, _ in _argerrs}
+            calls = [c for c in calls if id(c) not in _bad]
+            for c, e in _argerrs:
+                self.terminal_log(f"✗ {c.name}: {e}", "error")
+                self._activity_note(f"{c.name} rejected: {e}", "gate")
+            self._deferred_note = (getattr(self, "_deferred_note", "") or "") + (
+                "\n\n[system] These calls in that batch were NOT run: "
+                + "; ".join(f"{c.name} — {e}" for c, e in _argerrs)
+                + " Re-issue them with the argument names named above.")
+            if not calls:
+                self._feed_tool_result(
+                    "NOT RUN — every tool in that batch was called with "
+                    "unusable arguments.")
+                return
+            names = ", ".join(c.name for c in calls)
+        _kept, _dropped = [], []
+        for c in calls:
+            if self._repeat_guard_blocks(self._action_label(c)):
+                _dropped.append(c)
+            else:
+                _kept.append(c)
+        if _dropped and not _kept:
+            self._feed_tool_result(
+                self._repeat_guard(self._action_label(_dropped[0]))
+                or "NOT RUN — repeat guard: every tool in that batch has "
+                   "already been run. Pick a different next action.")
+            return
+        if _dropped:
+            calls = _kept
+            names = ", ".join(c.name for c in calls)
+            self.terminal_log(
+                f"⛔ repeat guard: dropped {len(_dropped)} already-run "
+                f"tool(s) from the batch", "error")
+            self._activity_note(
+                "repeat guard dropped %d already-run tool(s): %s"
+                % (len(_dropped),
+                   ", ".join(c.name for c in _dropped)[:120]), "gate")
+        # Per-tool recall entries so a later SOLO call of the same tool is
+        # recognised as a repeat.  The combined label still names the action
+        # for the log, but the per-tool keys are what the guard counts.
+        self._pending_action = " + ".join(
+            self._action_label(c) for c in calls)[:400]
+        self._batch_members = [self._action_label(c) for c in calls]
+        # ── AND SO MUST THE USED-TOOL RECORD ──
+        # `_tools_used_this_request` is what the promise gate and the
+        # verification gate both read to decide whether a turn is ending
+        # without having fetched / without having checked. It was written at
+        # exactly one place — the SINGLE-call path — under a comment claiming
+        # it was "recorded at the one place that dispatches, so it cannot
+        # drift from reality". There are two places that dispatch. This is the
+        # third time that sentence has been wrong in this method's
+        # neighbourhood (the repeat guard, then argument normalisation, now
+        # this), which is why tests/test_gates.py asserts the pairing
+        # structurally rather than trusting a comment.
+        #
+        # No gate set intersects the batchable allow-list TODAY, so nothing is
+        # currently misreported — this is closing the seam, not chasing a
+        # symptom. A tool added to both lists later would silently blind a
+        # gate, and a gate that fails open fails on exactly the turn it exists
+        # to catch.
+        for _c in calls:
+            try:
+                self._tools_used_this_request.add(_c.name)
+            except Exception:
+                self._tools_used_this_request = {_c.name}
+        # ONE ROW PER TOOL. A parallel batch is the exact case the single
+        # status line could not represent honestly: it has one slot and four
+        # tools are running in it. Each row closes on its own worker's result,
+        # so a slow member is visibly the slow one instead of the whole batch
+        # looking stalled. _activity_sid stays 0 on this path — the combined
+        # result must not close a row that a worker already closed.
+        self._activity_sid = 0
+        _sids = [self._activity_begin(c.name, c.args) for c in calls]
+        self._activity_batch_sids = list(_sids)
+
+        def _bg(feed):
+            import concurrent.futures
+            results: list = [None] * len(calls)
+
+            def run_one(pair):
+                idx, c = pair
+                fn = self._pure_tool_fn(c)
+                try:
+                    res = fn()
+                    txt = json.dumps(res, indent=2, default=str)
+                except Exception as e:
+                    txt = f"error: {type(e).__name__}: {str(e)[:200]}"
+                # Close THIS member's row the moment it lands, from the worker
+                # thread, marshalled onto the main loop. Waiting for ex.map to
+                # drain would make four rows all finish at the slowest one's
+                # time, which is a picture of the run that is simply false.
+                _ok = not txt.lstrip().lower().startswith("error")
+                GLib.idle_add(
+                    lambda i=idx, o=_ok, t=txt: (
+                        self._activity_end(_sids[i] if i < len(_sids) else 0,
+                                           ok=o, preview=_feed_preview(t))
+                        or False))
+                return idx, c.name, txt
+
+            workers = max(1, min(TOOL_BATCH_MAX_WORKERS, len(calls)))
+            try:
+                with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=workers) as ex:
+                    for idx, name, txt in ex.map(
+                            run_one, list(enumerate(calls))):
+                        results[idx] = (name, txt)
+            except Exception as e:
+                feed(f"batch error: {e}")
+                return
+
+            blocks = []
+            for n, slot in enumerate(results, 1):
+                # A slot is None only if ex.map skipped one — unpacking it
+                # blind raised inside this worker thread, and an exception here
+                # means no tool result is ever fed and the turn hangs.
+                if slot is None:
+                    blocks.append(f"[tool {n}/{len(results)}: unknown]\n"
+                                  f"error: no result returned")
+                    continue
+                name, txt = slot
+                blocks.append(f"[tool {n}/{len(results)}: {name}]\n{txt}")
+            combined = "\n\n".join(blocks)
+            GLib.idle_add(lambda: self.terminal_log(
+                f"✓ batch done ({len(calls)} tools)", "ok") or False)
+            feed(combined)
+
+        self._tool_thread(_bg, f"batch({names})")
+
+    def _warn_db_quarantined(self, moved_to: str) -> bool:
+        """Tell the operator the chat database was unreadable and what was
+        done about it. Never silent, never fatal."""
+        if moved_to == "(memory-only)":
+            msg = ("Your chat database could not be opened OR moved aside, so "
+                   "this session is running in memory — chats will NOT be "
+                   "saved. Check permissions on the Basilisk data directory.")
+        else:
+            msg = ("Your chat database was unreadable and has been moved to "
+                   f"{moved_to} — a fresh one was started, so past chats are "
+                   "not in the sidebar. Nothing was deleted; the old file is "
+                   "still there if you want to recover it.")
+        try:
+            self.terminal_log("! " + msg, "error")
+        except Exception:
+            pass
+        try:
+            self._show_toast(msg, timeout=12)
+        except Exception:
+            pass
+        return False
+
+    def _execute_tool_calls(self, calls):
+        call = calls[0]
+        # ── ACTION RECALL: name the action, then check we are not redoing it ──
+        # Set BEFORE dispatch so the result that comes back can be attached to
+        # it in _feed_tool_result. The guard sits here rather than at each tool
+        # because this is the one place every single-tool call passes through.
+        self._pending_action = self._action_label(call)
+        _blocked = self._repeat_guard(self._pending_action)
+        if _blocked is not None:
+            self._activity_note(
+                "repeat guard: %s already ran - not repeating"
+                % self._action_label(call)[:110], "gate")
+            self._pending_action = None
+            self._feed_tool_result(_blocked)
+            return
+        # `propose` and `propose_edit` are advisory — the card (command or
+        # diff) already rendered and carries its own Run/Apply button.
+        # They never execute here; if one slips through, end the turn so
+        # the card stands on its own.
+        if call.name in ("propose", "propose_edit", "write_file"):
+            # AUTONOMOUS MODE: never leave a card waiting — there's no operator
+            # watching. Execute the proposal directly and keep the chain going.
+            if self.settings.get("approval_mode", "none") == "none":
+                if call.name == "propose":
+                    _cmd = (call.args.get("command")
+                            or call.args.get("cmd") or "").strip()
+                    if _cmd:
+                        self.terminal_log("• autonomous: running proposed command "
+                                          "directly", "dim")
+                        self._run_proposed_command(
+                            _cmd, str(call.args.get("explanation", "")))
+                        return
+                else:  # propose_edit / write_file
+                    _p = (call.args.get("path") or "").strip()
+                    _c = call.args.get("content")
+                    _mode = str(call.args.get("mode") or "replace")
+                    if _p and _c is not None:
+                        self.terminal_log(
+                            "• autonomous: applying file write directly"
+                            + (" (append)" if _mode.lower().startswith("a")
+                               else ""), "dim")
+                        # A chunk landed — reset the failure budget so the NEXT
+                        # chunk (append) is judged on its own, not starved by an
+                        # earlier truncated attempt.
+                        self._bad_propose_retries = 0
+                        self._run_proposed_edit(_p, str(_c), mode=_mode)
+                        return
+                # args unusable — fall through to the normal re-emit handling
+            # …but ONLY if the card actually had the data to render.  A
+            # propose_edit whose JSON couldn't be parsed (e.g. unescaped
+            # quotes inside `content` that the lenient parser can't safely
+            # repair) arrives here with no path/content and renders NOTHING —
+            # and silently finishing the turn would leave the model believing
+            # a diff card is waiting when the screen is empty.  Catch that,
+            # tell the model plainly, and let it re-emit instead of lying to
+            # the operator about a card that doesn't exist.
+            if call.name == "propose":
+                card_ok = bool((call.args.get("command")
+                                or call.args.get("cmd") or "").strip())
+                what = "command proposal"
+            else:
+                card_ok = (bool((call.args.get("path") or "").strip())
+                           and call.args.get("content") is not None)
+                what = "file proposal (diff card)"
+            if not card_ok:
+                retries = getattr(self, "_bad_propose_retries", 0)
+                # ── WHY IT FAILED DECIDES THE FIX ──
+                # The commonest cause is NOT bad escaping — it is the call being
+                # CUT OFF at the token cap because the whole file was crammed
+                # into one `content` string. Telling the model to "re-send it as
+                # a single well-formed call" then makes it re-send the same
+                # giant blob and hit the same cap: the exact loop the operator
+                # filmed. So read the cut reason the host already has and, either
+                # way, MANDATE small append chunks — a call that only ever
+                # carries ~40 lines cannot be truncated.
+                _truncated = bool(getattr(self, "_last_stream_truncated", False)
+                                  or self._last_stream_cut_by == "length")
+                _timecut = self._last_stream_cut_by == "time"
+                # Recover the intended path even from an unparsed/truncated call,
+                # so the recipe can name the real file.
+                _rec_path = (call.args.get("path") or "").strip()
+                if not _rec_path:
+                    _raw = str(call.args.get("_raw") or "")
+                    _mp = re.search(r'"path"\s*:\s*"([^"\\]+)"', _raw)
+                    if _mp:
+                        _rec_path = _mp.group(1)
+                _pth = _rec_path or "<path>"
+                if retries < 4:
+                    self._bad_propose_retries = retries + 1
+                    if _truncated:
+                        _why = ("was CUT OFF at the response-token cap part-way "
+                                "through the file — the JSON never closed, so "
+                                "nothing was written")
+                    elif _timecut:
+                        _why = ("was cut off at the per-turn TIME limit mid-file "
+                                "— nothing was written")
+                    else:
+                        _why = ("could not be parsed (an unescaped \" or a "
+                                "control character in \"content\") — nothing "
+                                "was written")
+                    self.terminal_log(
+                        f"✗ {call.name} did not render ({'truncated' if _truncated or _timecut else 'unparseable args'})"
+                        f" — steering it to small append chunks", "error")
+                    self._feed_tool_result(
+                        f"Your {call.name} {_why}. NO {what} is on screen.\n\n"
+                        f"WRITE THE FILE IN SMALL CHUNKS — a call that carries "
+                        f"only a few dozen lines can never be cut off:\n"
+                        f'  1. write_file  {{"path": "{_pth}", "content": '
+                        f'"<first ~40 lines>", "mode": "create"}}\n'
+                        f'  2. write_file  {{"path": "{_pth}", "content": '
+                        f'"<next ~40 lines>", "mode": "append"}}\n'
+                        f"  3. repeat step 2 until the file is complete, then "
+                        f"verify.\n"
+                        f"Rules: keep EVERY chunk to about 40 lines or fewer; "
+                        f"never put a whole file in one call; do not use "
+                        f"propose_edit for a brand-new file; escape \" as \\\" "
+                        f"and newlines as \\n inside content. Start with the "
+                        f"create chunk now.")
+                    return
+                # Exhausted the guided retries — stop bouncing and let the turn
+                # end so we don't loop.  The recipe is in context for next turn.
+                self._bad_propose_retries = 0
+                self.terminal_log(
+                    f"✗ {call.name} still unparseable after retries — "
+                    f"ending turn", "error")
+            self._finish_turn_cleanup()
+            return
+        # Always write to the chat this turn was started in, not whichever
+        # one the user might have navigated to.
+        chat_id = self.streaming_chat_id or self.current_chat_id
+
+        # Update the working banner with a human phrase for this tool so the
+        # operator can see what's happening as a chain runs ("searching the
+        # web…", "running nmap…").  Hidden tool indicators in the message
+        # stream stay hidden — they're noisy.
+        self._set_working(True, self._status_for_call(call) + "…")
+
+        self.store.add_message(chat_id, "tool",
+                                f"⚙ tool: {call.name}({json.dumps(call.args)})",
+                                meta={"kind": "call"})
+
+        # Models drift and sometimes emit non-numeric values for numeric
+        # args ("fifteen", null, "15.5", {}).  A bare int() on those raises
+        # and kills the whole tool turn — coerce safely and fall back to
+        # the default instead.
+        # ONE definition, in basilisk_core. This used to be a second, weaker
+        # copy: `int(float(v))` still raises OverflowError on inf and
+        # ValueError on NaN, and quietly turns `true` into 1. Two functions
+        # with the same job is how one of them gets fixed alone.
+        _safe_int = _as_int
+
+        dispatch = {
+            "read_file":         lambda a: self._tool_read_file(a.get("path", "")),
+            "list_dir":          lambda a: self._tool_list_dir(a.get("path", ".")),
+            "find_file":         lambda a: self._tool_find_file(
+                a.get("pattern", "*"), a.get("search_path", "~"),
+                _safe_int(a.get("max_results", 50), 50),
+                a.get("min_size_kb", 0), a.get("max_size_kb", 0),
+                a.get("modified_within_days", 0)),
+            "quick_facts":       lambda a: self._tool_simple(
+                lambda: tool_quick_facts()),
+            "system_info":       lambda a: self._tool_simple(tool_system_info),
+            "disk_usage":        lambda a: self._tool_simple(tool_disk_usage),
+            "processes":         lambda a: self._tool_simple(
+                lambda: tool_processes(_safe_int(a.get("top_n", 15), 15))),
+            "network_status":    lambda a: self._tool_simple(tool_network_status),
+            "recent_downloads":  lambda a: self._tool_simple(
+                lambda: tool_recent_downloads(_safe_int(a.get("limit", 20), 20))),
+            "check_updates":     lambda a: self._tool_simple(tool_check_updates),
+            "service_status":    lambda a: self._tool_simple(
+                lambda: tool_service_status(a.get("name"))),
+            "journal_tail":      lambda a: self._tool_simple(
+                lambda: tool_journal_tail(
+                    _safe_int(a.get("lines", 50), 50), a.get("unit"))),
+            "run":               lambda a: self._tool_run(
+                a.get("command", ""), a.get("reason", "")),
+            "audit":             lambda a: self._tool_audit(),
+            "scan_net":          lambda a: self._tool_scan_net(a.get("cidr")),
+
+            # ── Desktop control (read-only: simple) ──
+            "desktop_info":      lambda a: self._tool_simple(tool_desktop_info),
+            "list_apps":         lambda a: self._tool_simple(
+                lambda: tool_list_apps(a.get("filter", a.get("filter_text", "")))),
+            "list_windows":      lambda a: self._tool_simple(tool_list_windows),
+            "media_control":     lambda a: self._tool_simple(
+                lambda: tool_media_control(a.get("action", "status"))),
+            "notify":            lambda a: self._tool_simple(
+                lambda: (self._add_notification(a.get("title", "Basilisk"),
+                                                a.get("message", "")),
+                         self._desktop_notify(a.get("title", "Basilisk"),
+                                              a.get("message", "")),
+                         {"ok": True, "notified": a.get("message", "")})[2]),
+
+            # ── Desktop control (actions: confirm-gated) ──
+            "launch_app":        lambda a: self._action_tool(
+                "launch_app", lambda: tool_launch_app(
+                    a.get("app", ""), a.get("args", "")),
+                f"launch app: {a.get('app','')}"),
+            "open_url":          lambda a: self._action_tool(
+                "open_url", lambda: tool_open_url(a.get("url", "")),
+                f"open URL: {a.get('url','')}"),
+            "focus_window":      lambda a: self._action_tool(
+                "focus_window", lambda: tool_focus_window(a.get("title", "")),
+                f"focus window: {a.get('title','')}"),
+            "close_window":      lambda a: self._action_tool(
+                "close_window", lambda: tool_close_window(a.get("title", "")),
+                f"close window: {a.get('title','')}"),
+            "type_text":         lambda a: self._action_tool(
+                "type_text", lambda: tool_type_text(a.get("text", "")),
+                f"type {len(a.get('text',''))} chars into focused window"),
+            "press_key":         lambda a: self._action_tool(
+                "press_key", lambda: tool_press_key(a.get("keys", "")),
+                f"press key: {a.get('keys','')}"),
+
+            # ── Screenshots & screen reading (read-only: simple) ──
+            "screenshot":        lambda a: self._tool_simple(
+                lambda: tool_screenshot(a.get("save_path", a.get("path", "")))),
+            "read_screen":       lambda a: self._tool_simple(
+                lambda: tool_read_screen(a.get("region", ""))),
+
+            # ── Filesystem (read-only: simple) ──
+            "path_info":         lambda a: self._tool_simple(
+                lambda: tool_path_info(a.get("path", ""))),
+            "make_dir":          lambda a: self._tool_simple(
+                lambda: tool_make_dir(a.get("path", ""))),
+            "copy_path":         lambda a: self._tool_simple(
+                lambda: tool_copy_path(a.get("src", ""), a.get("dst", ""))),
+
+            # ── Filesystem (destructive: confirm-gated) ──
+            "move_path":         lambda a: self._action_tool(
+                "move_path", lambda: tool_move_path(
+                    a.get("src", ""), a.get("dst", "")),
+                f"move {a.get('src','')} → {a.get('dst','')}"),
+            "delete_path":       lambda a: self._action_tool(
+                "delete_path", lambda: tool_delete_path(
+                    a.get("path", ""),
+                    bool(a.get("recursive", False))),
+                f"DELETE {a.get('path','')}"
+                f"{' (recursive)' if a.get('recursive') else ''}"),
+
+            # ── Trusted-source reference lookup (read-only, allow-listed) ──
+            # web_read refuses any host not on basilisk_core._WEB_READ_ALLOW, and
+            # the TWO-TIER gate (_web_read_gated) is enforced here in code:
+            # trusted sources fetch automatically; community/user-authored ones
+            # (GitHub, Wikipedia, SO, …) are held outside the autonomous loop
+            # and need the operator's approval via a notification. Redirects are
+            # re-validated and output shielded. Single-path (own fetch).
+            "web_read":          lambda a: self._tool_simple(
+                lambda: self._web_read_gated(
+                    a.get("url", a.get("u", "")),
+                    _safe_int(a.get("max_chars", 6000), 6000))),
+            "web_sources":       lambda a: self._tool_simple(tool_web_sources),
+            # SEARCH, PROPERLY. Several phrasings, several engines, merged
+            # and ranked by cross-engine agreement. Both route their fetches
+            # through _web_read_gated — the SAME door as a direct web_read —
+            # so the unleashed-mode domain approval, the SSRF floor and the
+            # shield apply here too. A second web path with its own idea of
+            # what is allowed is how a gate ends up guarding one door of two.
+            "web_search":        lambda a: self._tool_simple(
+                lambda: tool_web_search(
+                    a.get("query", a.get("q", a.get("terms", ""))),
+                    _safe_int(a.get("limit", a.get("max_results", 8)), 8),
+                    a.get("engines", a.get("engine", "")),
+                    read_fn=self._research_reader())),
+            "web_research":      lambda a: self._tool_simple(
+                lambda: tool_web_research(
+                    a.get("question", a.get("query", a.get("q", ""))),
+                    _safe_int(a.get("sources", a.get("max_sources", 3)), 3),
+                    a.get("queries", ""),
+                    read_fn=self._research_reader())),
+            "browser_status":    lambda a: self._tool_simple(
+                tool_browser_status),
+
+            # ── THE TASK LEDGER ──
+            # State the app OWNS, so "is this turn finished?" stops being a
+            # judgement about the model's prose. See basilisk_ext/tasks.py.
+            "plan_set":          lambda a: self._tool_simple(
+                lambda: self._plan_call("set", a)),
+            "plan_step":         lambda a: self._tool_simple(
+                lambda: self._plan_call("step", a)),
+            "plan_status":       lambda a: self._tool_simple(
+                lambda: self._plan_call("status", a)),
+
+            # ── Media: image search / analysis (read-only) ──
+            # image_search returns image URLs to RENDER, not page text to
+            # reason over.  (The web/OSINT/social/GitHub/CVE readers were
+            # removed — they fed attacker-controllable external text into the
+            # model, the indirect-prompt-injection surface.)
+            "image_search":      lambda a: self._tool_simple(
+                lambda: tool_image_search(
+                    a.get("query", a.get("q", "")),
+                    _safe_int(a.get("max_results", 4), 4))),
+            "analyze_image":     lambda a: self._tool_simple(
+                lambda: tool_analyze_image(
+                    a.get("image_path", a.get("path", a.get("url", ""))),
+                    a.get("question", a.get("prompt", "")),
+                    self._vision_key(), self._vision_base_url(),
+                    self.settings.get("vision_model", ""))),
+            "capture_photo":     lambda a: self._tool_simple(
+                lambda: tool_capture_photo(a.get("out_path", ""))),
+            "detect_faces":      lambda a: self._tool_simple(
+                lambda: tool_detect_faces(
+                    a.get("image_path", a.get("path", "")))),
+
+            # ── Pentest support (read-only / proposing only) ──
+            # None of these execute an attack: pentest_plan returns PROPOSED
+            # commands that still go through the approve-before-run gate; the
+            # rest are inventory, text parsing, filesystem lookups, reference
+            # knowledge and report formatting.
+            "tooling_check":     lambda a: self._tool_simple(
+                lambda: tool_tooling_check()),
+            "pentest_plan":      lambda a: self._tool_simple(
+                lambda: tool_pentest_plan(
+                    a.get("target", a.get("host", a.get("url", ""))),
+                    a.get("profile", a.get("mode", "web")),
+                    a.get("intensity", a.get("speed", "normal")))),
+            # cve_lookup is host-pinned to NVD / CISA KEV / FIRST EPSS (not a
+            # general web reader) — it fans out its own network calls, so it
+            # stays single-path (not in the pure/batch resolver).
+            "cve_lookup":        lambda a: self._tool_simple(
+                lambda: tool_cve_lookup(
+                    a.get("product", a.get("name", a.get("software", ""))),
+                    a.get("version", a.get("ver", "")),
+                    _safe_int(a.get("limit", 8), 8),
+                    a.get("enrich", True) not in (False, "false", "0", 0))),
+            "parse_output":      lambda a: self._tool_simple(
+                lambda: tool_parse_output(
+                    a.get("tool", a.get("name", "")),
+                    a.get("raw", a.get("output", a.get("text", ""))),
+                    a.get("enrich_cves", a.get("enrich", False)) not in
+                        (False, "false", "0", 0, None))),
+            "methodology":       lambda a: self._tool_simple(
+                lambda: tool_methodology(
+                    a.get("area", a.get("topic", "")),
+                    a.get("phase", ""))),
+            "wordlist_find":     lambda a: self._tool_simple(
+                lambda: tool_wordlist_find(
+                    a.get("kind", a.get("type", a.get("category", ""))))),
+            "cheatsheet":        lambda a: self._tool_simple(
+                lambda: tool_cheatsheet(
+                    a.get("topic", a.get("tool", a.get("name", ""))))),
+            "report_findings":   lambda a: self._tool_simple(
+                lambda: tool_report_findings(
+                    a.get("findings", a.get("items", [])),
+                    a.get("target", a.get("host", a.get("url", ""))),
+                    a.get("scope_note", a.get("scope", "")),
+                    a.get("title", ""))),
+            "evidence_report":   lambda a: self._tool_simple(
+                lambda: _evidence_report(
+                    a.get("engagement", a.get("name", None)))),
+            "evidence_verify":   lambda a: self._tool_simple(
+                lambda: (get_ledger().verify(a.get("engagement", None))
+                         if get_ledger() else {"error": "ledger unavailable"})),
+            "evidence_engagement": lambda a: self._tool_simple(
+                lambda: _evidence_set_engagement(
+                    a.get("engagement", a.get("name", a.get("value", ""))))),
+            "nuclei_template":   lambda a: self._tool_simple(
+                lambda: tool_nuclei_template(
+                    a.get("spec", a.get("template", a)),
+                    a.get("mode", "build"),
+                    a.get("yaml", a.get("yaml_text", "")))),
+            "reflect_findings":  lambda a: self._tool_simple(
+                lambda: tool_reflect_findings(
+                    a.get("findings", a.get("items", a)))),
+            "attack_writeup":    lambda a: self._tool_simple(
+                lambda: tool_attack_writeup(
+                    a.get("access", a.get("summary", "")),
+                    a.get("steps", a.get("path_steps", None)),
+                    a.get("target", a.get("host", a.get("url", ""))),
+                    a.get("scope_note", a.get("scope", "")),
+                    a.get("impact", ""), a.get("remediation", a.get("fix", "")),
+                    a.get("root_cause", a.get("cause", "")),
+                    a.get("ledger_events", a.get("events", None)))),
+            "workspace_import":   lambda a: self._tool_simple(
+                self._workspace_call("workspace_import", a)),
+            "workspace_status":   lambda a: self._tool_simple(
+                self._workspace_call("workspace_status", a)),
+            "workspace_overview": lambda a: self._tool_simple(
+                self._workspace_call("workspace_overview", a)),
+            "workspace_tree":     lambda a: self._tool_simple(
+                self._workspace_call("workspace_tree", a)),
+            "workspace_search":   lambda a: self._tool_simple(
+                self._workspace_call("workspace_search", a)),
+            "workspace_read":     lambda a: self._tool_simple(
+                self._workspace_call("workspace_read", a)),
+            "workspace_replace":  lambda a: self._tool_simple(
+                self._workspace_call("workspace_replace", a)),
+            "workspace_write":    lambda a: self._tool_simple(
+                self._workspace_call("workspace_write", a)),
+            # ── REPO-WORK PARITY ──
+            # Many edits per call, chunked writes for long files, positional
+            # insert, name-glob, batch read. See basilisk_ext/workspace.py
+            # for why each of these exists — every one of them is a ceiling
+            # a real repo job kept hitting.
+            "workspace_edits":    lambda a: self._tool_simple(
+                self._workspace_call("workspace_edits", a)),
+            "workspace_append":   lambda a: self._tool_simple(
+                self._workspace_call("workspace_append", a)),
+            "workspace_insert":   lambda a: self._tool_simple(
+                self._workspace_call("workspace_insert", a)),
+            "workspace_glob":     lambda a: self._tool_simple(
+                self._workspace_call("workspace_glob", a)),
+            "workspace_read_many": lambda a: self._tool_simple(
+                self._workspace_call("workspace_read_many", a)),
+            "workspace_delete":   lambda a: self._tool_simple(
+                self._workspace_call("workspace_delete", a)),
+            "workspace_diff":     lambda a: self._tool_simple(
+                self._workspace_call("workspace_diff", a)),
+            "workspace_revert":   lambda a: self._tool_simple(
+                self._workspace_call("workspace_revert", a)),
+            "workspace_export":   lambda a: self._tool_simple(
+                self._workspace_call("workspace_export", a)),
+            "workspace_close":    lambda a: self._tool_simple(
+                self._workspace_call("workspace_close", a)),
+            "workspace_test_command": lambda a: self._tool_simple(
+                self._workspace_call("workspace_test_command", a)),
+            "workspace_baseline": lambda a: self._tool_simple(
+                self._workspace_call("workspace_baseline", a)),
+            "workspace_verify":   lambda a: self._tool_simple(
+                self._workspace_call("workspace_verify", a)),
+            "workspace_health":   lambda a: self._tool_simple(
+                self._workspace_call("workspace_health", a)),
+            "code_tooling_check": lambda a: self._tool_simple(
+                lambda: tool_code_tooling_check()),
+            "code_scan_plan":     lambda a: self._tool_simple(
+                lambda: tool_code_scan_plan(
+                    a.get("path", a.get("dir", a.get("target", "."))),
+                    a.get("kind", a.get("type", "auto")),
+                    a.get("intensity", a.get("depth", "normal")))),
+            "zday_scan":          lambda a: self._tool_simple(
+                _ext_unavailable("zday_scan", "zdayfind") if _zdayfind is None
+                else lambda: _zdayfind.zday_scan(
+                    path=_ws_path(a.get("path", a.get("dir", a.get("target", "")))),
+                    code=a.get("code", a.get("source", "")),
+                    like=a.get("like", a.get("variant_of", a.get("snippet", ""))),
+                    focus=a.get("focus", a.get("classes", "")),
+                    filename=a.get("filename", a.get("name", "snippet")))),
+            "zday_signatures":    lambda a: self._tool_simple(
+                _ext_unavailable("zday_signatures", "zdayfind") if _zdayfind is None
+                else lambda: _zdayfind.signature_catalog()),
+            "saml_attack":        lambda a: self._tool_simple(
+                _ext_unavailable("saml_attack", "exploits") if _exploits is None
+                else lambda: _exploits.saml_attack(
+                    a.get("mode", a.get("technique", "signature_wrapping")),
+                    a.get("assertion", a.get("response", "")))),
+            "cloud_storage":      lambda a: self._tool_simple(
+                _ext_unavailable("cloud_storage", "exploits") if _exploits is None
+                else lambda: _exploits.cloud_storage(
+                    a.get("provider", a.get("cloud", "s3")),
+                    a.get("bucket", a.get("container", a.get("name", ""))))),
+            "subdomain_takeover": lambda a: self._tool_simple(
+                _ext_unavailable("subdomain_takeover", "exploits") if _exploits is None
+                else lambda: _exploits.subdomain_takeover(
+                    a.get("host", a.get("subdomain", a.get("domain", ""))),
+                    a.get("cname", a.get("target", "")))),
+            "padding_oracle":     lambda a: self._tool_simple(
+                _ext_unavailable("padding_oracle", "exploits") if _exploits is None
+                else lambda: _exploits.padding_oracle(
+                    a.get("mode", "detect"),
+                    a.get("ciphertext", a.get("data", "")),
+                    a.get("block_size", a.get("blocksize", 16)))),
+            "xslt_injection":     lambda a: self._tool_simple(
+                _ext_unavailable("xslt_injection", "exploits") if _exploits is None
+                else lambda: _exploits.xslt_injection(
+                    a.get("mode", "detect"), a.get("cmd", a.get("command", "id")))),
+            "parse_scan":         lambda a: self._tool_simple(
+                lambda: tool_parse_scan(
+                    a.get("tool", a.get("scanner", a.get("name", ""))),
+                    a.get("raw", a.get("output", a.get("json", a.get("text", "")))))),
+            "triage_findings":    lambda a: self._tool_simple(
+                lambda: tool_triage_findings(
+                    a.get("findings", a.get("items", [])))),
+            "remediation_hint":   lambda a: self._tool_simple(
+                lambda: tool_remediation_hint(
+                    a.get("finding", a.get("item", a)))),
+            "scope_set":          lambda a: self._tool_simple(
+                lambda: tool_scope_set(
+                    a.get("targets", a.get("scope", a.get("hosts", []))),
+                    a.get("mode", "replace"))),
+            "scope_check":        lambda a: self._tool_simple(
+                lambda: tool_scope_check(
+                    a.get("target", a.get("host", a.get("url", ""))))),
+            "scope_show":         lambda a: self._tool_simple(
+                lambda: tool_scope_show()),
+            "scope_exclude":      lambda a: self._tool_simple(
+                lambda: tool_scope_exclude(
+                    a.get("targets", a.get("exclusions", a.get("hosts", []))),
+                    a.get("mode", "replace"))),
+            "scope_window":       lambda a: self._tool_simple(
+                lambda: tool_scope_window(
+                    a.get("start", ""), a.get("end", ""),
+                    bool(a.get("clear", False)))),
+            "scope_authorisation": lambda a: self._tool_simple(
+                lambda: tool_scope_authorisation(
+                    a.get("client", ""),
+                    a.get("authorised_by", a.get("authorized_by", "")),
+                    a.get("reference", a.get("ref", "")))),
+            "asset_record":       lambda a: self._tool_simple(
+                lambda: tool_asset_record(
+                    a.get("host", a.get("target", "")), a.get("service", ""),
+                    a.get("port", None), a.get("finding", ""),
+                    a.get("access", ""), a.get("note", ""))),
+            "engagement_graph":   lambda a: self._tool_simple(
+                lambda: tool_engagement_graph(a.get("host", ""))),
+            "loot_record":        lambda a: self._tool_simple(
+                lambda: tool_loot_record(
+                    a.get("host", ""), a.get("kind", "credential"),
+                    a.get("username", a.get("user", "")),
+                    a.get("secret", a.get("password", a.get("hash", ""))),
+                    a.get("service", ""), a.get("note", ""))),
+            "loot_list":          lambda a: self._tool_simple(
+                lambda: tool_loot_list()),
+            "loot_reuse":         lambda a: self._tool_simple(
+                lambda: tool_loot_reuse()),
+            "graph_ingest":       lambda a: self._tool_simple(
+                lambda: tool_graph_ingest(
+                    a.get("parsed", a.get("findings", a.get("result", a))))),
+            "sqlmap_plan":        lambda a: self._tool_simple(
+                lambda: tool_sqlmap_plan(
+                    a.get("target", a.get("url", a.get("host", ""))),
+                    a.get("mode", "detect"), a.get("data", ""), a.get("cookie", ""),
+                    a.get("headers", ""), a.get("level", 1), a.get("risk", 1),
+                    a.get("dbms", ""), a.get("technique", ""), a.get("db", ""),
+                    a.get("table", ""), a.get("request_file", a.get("r", "")),
+                    a.get("extra", ""))),
+            "benchmark_targets":  lambda a: self._tool_simple(
+                lambda: tool_benchmark_targets(a.get("target", ""))),
+            "benchmark_score":    lambda a: self._tool_simple(
+                lambda: tool_benchmark_score(
+                    a.get("target", ""), a.get("findings", a.get("items", [])),
+                    a.get("ground_truth", a.get("gt", None)), a.get("tool", "basilisk"))),
+            "benchmark_report":   lambda a: self._tool_simple(
+                lambda: tool_benchmark_report(a.get("scored", a.get("result", a)))),
+            "benchmark_compare":  lambda a: self._tool_simple(
+                lambda: tool_benchmark_compare(
+                    a.get("runs", a.get("results", a.get("items", []))))),
+            "load_tools":         lambda a: self._tool_simple(
+                lambda: tool_load_tools(
+                    a.get("group", a.get("name", a.get("groups", ""))),
+                    unleashed=self._unleashed)),
+            "submit_flag":        lambda a: self._tool_simple(
+                lambda: tool_submit_flag(
+                    a.get("flag", a.get("value", "")), a.get("challenge", ""))),
+            "juiceshop_score":    lambda a: self._tool_simple(
+                lambda: tool_juiceshop_score(
+                    a.get("base_url", a.get("url", a.get("target",
+                          "http://localhost:3000"))))),
+            "juiceshop_report":   lambda a: self._tool_simple(
+                lambda: tool_juiceshop_report(a.get("scored", a.get("result", a)))),
+            "juiceshop_next":     lambda a: self._tool_simple(
+                lambda: tool_juiceshop_next(
+                    a.get("base_url", a.get("url", "http://localhost:3000")),
+                    a.get("max_difficulty", a.get("max_stars", 0)),
+                    a.get("limit", 0), a.get("per_tier", a.get("per_star", 0)))),
+            "juiceshop_diff":     lambda a: self._tool_simple(
+                lambda: tool_juiceshop_diff(
+                    a.get("base_url", a.get("url", "http://localhost:3000")),
+                    a.get("since", a.get("solved_names", a.get("previous"))))),
+            "juiceshop_source":   lambda a: self._tool_simple(
+                lambda: tool_juiceshop_source(
+                    a.get("action", "tree"), a.get("path", ""),
+                    a.get("pattern", a.get("query", "")),
+                    a.get("container", "juiceshop"),
+                    a.get("base", a.get("base_path", "/juice-shop")))),
+            "jwt_forge":          lambda a: self._tool_simple(
+                lambda: tool_jwt_forge(
+                    a.get("token", ""), a.get("mode", "none"),
+                    a.get("email", ""), a.get("role", ""),
+                    a.get("public_key", a.get("pubkey", "")),
+                    a.get("payload_overrides", a.get("overrides")))),
+            "nosql_injection":    lambda a: self._tool_simple(
+                lambda: tool_nosql_injection(
+                    a.get("mode", "auth_bypass"), a.get("field", "email"),
+                    a.get("target", ""))),
+            "xxe_payload":        lambda a: self._tool_simple(
+                lambda: tool_xxe_payload(
+                    a.get("mode", "file_read"),
+                    a.get("file_path", a.get("file", "/etc/passwd")))),
+            "coupon_forge":       lambda a: self._tool_simple(
+                lambda: tool_coupon_forge(
+                    a.get("mode", "tamper"), a.get("discount", 20),
+                    a.get("scheme", "z85"), a.get("value", a.get("campaign", "")))),
+            "captcha_solve":      lambda a: self._tool_simple(
+                lambda: tool_captcha_solve(
+                    a.get("url", ""),
+                    a.get("captcha_text", a.get("text", a.get("captcha", ""))),
+                    a.get("base_url", ""))),
+            "reset_password":     lambda a: self._tool_simple(
+                lambda: tool_reset_password(
+                    a.get("mode", "methodology"), a.get("email", ""),
+                    a.get("new_password", a.get("password", "Pwned123!")))),
+            "business_logic":     lambda a: self._tool_simple(
+                lambda: tool_business_logic(
+                    a.get("area", a.get("category", "all")))),
+            "ssti_payload":       lambda a: self._tool_simple(
+                lambda: tool_ssti_payload(
+                    a.get("engine", "detect"),
+                    a.get("cmd", a.get("command", "id")))),
+            "ssrf_payload":       lambda a: self._tool_simple(
+                lambda: tool_ssrf_payload(
+                    a.get("mode", "internal"),
+                    a.get("target_url", a.get("url", "http://localhost/")),
+                    a.get("host", "169.254.169.254"))),
+            "deserialization_payload": lambda a: self._tool_simple(
+                lambda: tool_deserialization_payload(
+                    a.get("platform", "node"),
+                    a.get("cmd", a.get("command", "id")))),
+            "prototype_pollution": lambda a: self._tool_simple(
+                lambda: tool_prototype_pollution(
+                    a.get("prop", a.get("property", "isAdmin")),
+                    a.get("value", "true"), a.get("vector", "json"))),
+            "path_traversal":     lambda a: self._tool_simple(
+                lambda: tool_path_traversal(
+                    a.get("mode", "read"),
+                    a.get("file_path", a.get("file", "/etc/passwd")),
+                    a.get("filename", "malicious.md"))),
+            "xss_payload":        lambda a: self._tool_simple(
+                lambda: tool_xss_payload(
+                    a.get("context", "html"), a.get("mode", "basic"))),
+            "sqli_payload":       lambda a: self._tool_simple(
+                lambda: tool_sqli_payload(
+                    a.get("mode", "auth_bypass"), a.get("dbms", "generic"),
+                    a.get("columns", 3), a.get("table", "users"))),
+            "payload_encoder":    lambda a: self._tool_simple(
+                lambda: tool_payload_encoder(
+                    a.get("payload", a.get("text", "")),
+                    a.get("scheme", "all"), a.get("decode", False))),
+            "tech_fingerprint":   lambda a: self._tool_simple(
+                lambda: tool_tech_fingerprint(
+                    a.get("headers", ""), a.get("body", ""))),
+            "waf_detect":         lambda a: self._tool_simple(
+                lambda: tool_waf_detect(
+                    a.get("blocked_payload", a.get("payload", "")),
+                    a.get("response_body", a.get("body", "")),
+                    a.get("status_code", a.get("status", 0)))),
+            "trick_detect":       lambda a: self._tool_simple(
+                lambda: tool_trick_detect(
+                    a.get("text", a.get("body", a.get("content", ""))))),
+            "payload_mutate":     lambda a: self._tool_simple(
+                lambda: tool_payload_mutate(
+                    a.get("body", a.get("request", "")),
+                    a.get("payload", "' OR 1=1--"),
+                    a.get("fmt", a.get("format", "auto")), a.get("mode", "replace"))),
+            "session_flow":       lambda a: self._tool_simple(
+                lambda: tool_session_flow(
+                    a.get("mode", "extract"),
+                    a.get("response", a.get("body", "")), a.get("flow", ""))),
+            "oracle_analyze":     lambda a: self._tool_simple(
+                lambda: tool_oracle_analyze(
+                    a.get("mode", "diff"), a.get("baseline", ""), a.get("test", ""),
+                    a.get("baseline_status", 0), a.get("test_status", 0),
+                    a.get("baseline_times", ""), a.get("payload_times", ""))),
+            "command_injection":  lambda a: self._tool_simple(
+                lambda: tool_command_injection(
+                    a.get("os_type", a.get("os", "unix")),
+                    a.get("mode", "inline"),
+                    a.get("cmd", a.get("command", "id")))),
+            "idor_probe":         lambda a: self._tool_simple(
+                lambda: tool_idor_probe(
+                    a.get("base", a.get("url", "")),
+                    a.get("id_value", a.get("id", "1")),
+                    a.get("strategy", "all"))),
+            "race_condition":     lambda a: self._tool_simple(
+                lambda: tool_race_condition(
+                    a.get("method", "POST"),
+                    a.get("url", a.get("target", "")),
+                    a.get("body", a.get("data", "")),
+                    a.get("headers", ""),
+                    a.get("parallel", a.get("count", 20)))),
+            "upload_bypass":      lambda a: self._tool_simple(
+                lambda: tool_upload_bypass(
+                    a.get("filename", a.get("name", "shell.php")),
+                    a.get("content_type", a.get("mime", "image/png")),
+                    a.get("technique", "all"))),
+            "graphql_probe":      lambda a: self._tool_simple(
+                lambda: tool_graphql_probe(
+                    a.get("mode", "introspect"),
+                    a.get("field", ""),
+                    a.get("payload", ""))),
+            "open_redirect":      lambda a: self._tool_simple(
+                lambda: tool_open_redirect(
+                    a.get("target", a.get("url", "http://evil.example")),
+                    a.get("param", "redirect"),
+                    a.get("legit_host", a.get("host", "example.com")))),
+            "cors_probe":         lambda a: self._tool_simple(
+                lambda: tool_cors_probe(
+                    a.get("origin", "https://evil.example"),
+                    a.get("target_host", a.get("host", "example.com")))),
+            "ldap_injection":     lambda a: self._tool_simple(
+                lambda: tool_ldap_injection(
+                    a.get("mode", "auth_bypass"), a.get("field", "username"))),
+            "xpath_injection":    lambda a: self._tool_simple(
+                lambda: tool_xpath_injection(a.get("mode", "auth_bypass"))),
+            "crlf_injection":     lambda a: self._tool_simple(
+                lambda: tool_crlf_injection(
+                    a.get("mode", "header"), a.get("value", ""))),
+            "host_header_injection": lambda a: self._tool_simple(
+                lambda: tool_host_header_injection(
+                    a.get("mode", "reset"), a.get("host", "evil.example"))),
+            "ssi_injection":      lambda a: self._tool_simple(
+                lambda: tool_ssi_injection(a.get("mode", "ssi"))),
+            "csv_injection":      lambda a: self._tool_simple(
+                lambda: tool_csv_injection(a.get("mode", "detect"))),
+            "request_smuggling":  lambda a: self._tool_simple(
+                lambda: tool_request_smuggling(a.get("mode", "clte"))),
+            "csrf_poc":           lambda a: self._tool_simple(
+                lambda: tool_csrf_poc(
+                    a.get("method", "POST"), a.get("url", a.get("target", "")),
+                    a.get("body", a.get("data", "")), a.get("mode", "form"))),
+            "clickjacking":       lambda a: self._tool_simple(
+                lambda: tool_clickjacking(
+                    a.get("url", a.get("target", "")), a.get("mode", "check"))),
+            "mass_assignment":    lambda a: self._tool_simple(
+                lambda: tool_mass_assignment(
+                    a.get("base_body", a.get("body", "{}")), a.get("fields", ""))),
+            "auth_bypass_headers": lambda a: self._tool_simple(
+                lambda: tool_auth_bypass_headers(
+                    a.get("url", a.get("target", "")), a.get("mode", "headers"))),
+            "auth_attack":        lambda a: self._tool_simple(
+                lambda: tool_auth_attack(
+                    a.get("mode", "spray"), a.get("url", a.get("target", "")),
+                    a.get("users", "users.txt"), a.get("passwords", ""))),
+            "jwt_attack":         lambda a: self._tool_simple(
+                lambda: tool_jwt_attack(
+                    a.get("mode", "weak_secret"), a.get("token", ""),
+                    a.get("wordlist", "rockyou.txt"))),
+            "api_test":           lambda a: self._tool_simple(
+                lambda: tool_api_test(
+                    a.get("mode", "verb"), a.get("base", a.get("url", "")))),
+            "cache_poisoning":    lambda a: self._tool_simple(
+                lambda: tool_cache_poisoning(
+                    a.get("url", a.get("target", "")), a.get("mode", "poison"))),
+            "email_header_injection": lambda a: self._tool_simple(
+                lambda: tool_email_header_injection(
+                    a.get("mode", "inject"), a.get("value", ""))),
+            "websocket_probe":    lambda a: self._tool_simple(
+                lambda: tool_websocket_probe(
+                    a.get("url", a.get("target", "")), a.get("mode", "cswsh"))),
+            "oauth_probe":        lambda a: self._tool_simple(
+                lambda: tool_oauth_probe(
+                    a.get("mode", "redirect_uri"),
+                    a.get("redirect_uri", a.get("uri", "https://evil.example")))),
+            "attack_surface":     lambda a: self._tool_simple(
+                lambda: tool_attack_surface(
+                    a.get("content", a.get("body", a.get("text", ""))),
+                    a.get("base_url", a.get("url", "")))),
+            "verify_solve":       lambda a: self._tool_simple(
+                lambda: tool_verify_solve(
+                    a.get("mode", "scoreboard"), a.get("before", ""),
+                    a.get("after", ""), a.get("target", ""),
+                    a.get("category", ""), a.get("expected", ""),
+                    a.get("observed", ""))),
+            "webapp_recon":       lambda a: self._tool_simple(
+                lambda: tool_webapp_recon(
+                    a.get("base_url", a.get("url", a.get("target",
+                          "http://localhost:3000"))),
+                    a.get("extra_paths", a.get("paths")),
+                    a.get("max_paths", 40))),
+            "xbow_score":         lambda a: self._tool_simple(
+                lambda: tool_xbow_score(
+                    a.get("results", a.get("records", a.get("items", []))))),
+            "xbow_report":        lambda a: self._tool_simple(
+                lambda: tool_xbow_report(a.get("scored", a.get("result", a)))),
+        }
+        # Merge sidecar tools (memory_*, skill_list, skill_run).  Returns an
+        # empty dict unless the matching feature is enabled, so stock Basilisk is
+        # unchanged.  skill_write is registered here (not in the sidecar) so
+        # the save goes through Basilisk's own confirm dialog.
+        if getattr(self, "_ext", None):
+            try:
+                for _tname, _tfn in self._ext.extra_tools(self).items():
+                    # Sidecar tools return a result STRING.  Run each off the
+                    # GTK main loop (this dispatch runs ON it) and feed the
+                    # result back via the loop — skill_run spawns a sandbox
+                    # subprocess that can take many seconds, and running it
+                    # inline here froze the whole UI until it returned.
+                    dispatch[_tname] = (lambda f:
+                                        (lambda a: self._bg_feed_text(
+                                            lambda: f(a))))(_tfn)
+                if self.settings.get("skills_enabled", False):
+                    dispatch["skill_write"] = self._tool_skill_write
+            except Exception:
+                pass
+        # ── ORACLE: single-call path ──
+        # These four were wired ONLY into _pure_tool_fn (the parallel read-only
+        # batch path) and were missing from this map, which is the one a SINGLE
+        # tool call goes through. So `oracle_check` on its own — the normal way
+        # it is used, right after firing an exploit — fell through to
+        # "Unknown tool 'oracle_check'". The oracle is the verified-exploitation
+        # core: no proof, no finding. Losing it silently turns every confirmed
+        # hit back into a guess. Exactly the two-dispatch-path drift v7.10.0
+        # documented and routed the workspace tools through one mapper to avoid.
+        dispatch.setdefault("oracle_arm", lambda a: self._tool_simple(
+            lambda: tool_oracle_arm(
+                a.get("objective", a.get("goal", a.get("what", ""))),
+                a.get("target", a.get("url", a.get("host", ""))),
+                a.get("technique", a.get("vuln", a.get("class",
+                                                       a.get("attack", "")))),
+                a.get("criterion_type", a.get("type", a.get(
+                    "criterion", a.get("check", "contains")))),
+                a.get("criterion_value", a.get("value", a.get(
+                    "marker", a.get("expect", a.get(
+                        "expected", a.get("pattern", "")))))),
+                a.get("blind", a.get("oob", False)),
+                a.get("oob_host", a.get("host", a.get("callback_host", ""))))))
+        dispatch.setdefault("oracle_check", lambda a: self._tool_simple(
+            lambda: tool_oracle_check(
+                a.get("attempt_id", a.get("id", a.get("attempt", ""))),
+                a.get("evidence", a.get("response", a.get("body", a.get(
+                    "output", a.get("text", a.get("resp", "")))))),
+                a.get("status", a.get("code", a.get("status_code", None))),
+                a.get("baseline", a.get("base", a.get("normal",
+                                                      a.get("control", "")))))))
+        dispatch.setdefault("oracle_status",
+                            lambda a: self._tool_simple(tool_oracle_status))
+        dispatch.setdefault("oracle_listen", lambda a: self._tool_simple(
+            lambda: tool_oracle_listen(
+                a.get("port", 0),
+                a.get("host", a.get("callback_host", a.get("ip", ""))))))
+
+        fn = dispatch.get(call.name)
+        if fn:
+            # ── ARGUMENTS THE TOOL CANNOT SEE MUST NOT BE SILENTLY DROPPED ──
+            # Every handler below reads its arguments with `a.get("src")`,
+            # `a.get("cidr")` and friends, so a key the tool does not know is
+            # simply invisible and the call proceeds on defaults. Two live
+            # examples from the operator's own tool audit:
+            #
+            #   copy_path{"path": "/etc/hostname"}  -> src="" -> "source not
+            #       found: ''", which reads like the FILE is missing rather
+            #       than like the argument never arrived; and
+            #   scan_net{"target": "127.0.0.1"}     -> cidr=None -> swept the
+            #       default gateway subnet instead. On a scanner that is worse
+            #       than a no-op: it ran an unrequested active scan of a
+            #       network nobody named.
+            #
+            # `_normalise_tool_args` maps the obvious synonyms onto the real
+            # keys, and refuses outright when NONE of the supplied keys are
+            # ones this tool accepts — telling the model the accepted names so
+            # it can re-issue. Same principle the tool-DIALECT handling already
+            # uses: an unreadable call costs a round trip, never a wrong action.
+            _args, _argerr = _normalise_tool_args(call.name, call.args)
+            if _argerr:
+                self.terminal_log(
+                    f"✗ {call.name}: {_argerr}", "error")
+                self._activity_note(f"{call.name} rejected: {_argerr}", "gate")
+                self._feed_tool_result(f"NOT RUN — {_argerr}")
+                return
+            call.args = _args
+            self.terminal_log(f"→ tool: {call.name}({json.dumps(call.args, separators=(',',':'))[:80]})", "info")
+            # Open the feed row HERE — after normalisation, so the row shows
+            # the arguments that actually ran, not the ones the model emitted.
+            # Closed in _feed_tool_result, the single point every result
+            # passes through.
+            self._activity_sid = self._activity_begin(call.name, call.args)
+            # The name the log line below should use. Set here because this is
+            # the ONE place that knows it; _tool_simple reads it synchronously
+            # inside fn(). Cleared in finally so a later stray call cannot
+            # inherit a stale name and mislabel itself — an unnamed tool is
+            # honest, a wrongly-named one is not.
+            # WHICH tools have actually run this request, by name. The
+            # end-of-turn promise gate needs more than "a tool ran": the
+            # failure it exists to stop is a turn that announced a web fetch,
+            # ran something else (or nothing), and ended. Recorded at the one
+            # place that dispatches, so it cannot drift from reality — and
+            # recorded on ATTEMPT, because a fetch that ran and failed is a
+            # result the model has to reckon with, not a reason to fetch again
+            # behind its back.
+            try:
+                self._tools_used_this_request.add(call.name)
+            except Exception:
+                self._tools_used_this_request = {call.name}
+            self._dispatching_tool = call.name
+            try:
+                fn(call.args)
+            except Exception as _te:
+                # ── THE MIRROR OF THE BATCH PATH'S MISSING NORMALISER ──
+                # _execute_tool_batch wraps each member in try/except and turns
+                # a raise into an "error: …" string the model reads and works
+                # around. This path had no such guard: a handler that raised
+                # unwound to _on_stream_done's catch-all, which ends the TURN.
+                # The tool result is never fed back, so the model is never told
+                # its call failed — an autonomous run simply stops mid-mission,
+                # and the operator sees "internal error finishing that reply".
+                # Each of the two dispatch paths had exactly the protection the
+                # other was missing.
+                log(f"tool {call.name} raised: {traceback.format_exc()}")
+                self.terminal_log(
+                    f"✗ {call.name} raised {type(_te).__name__}: "
+                    f"{str(_te)[:160]}", "error")
+                try:
+                    self._activity_end(getattr(self, "_activity_sid", 0),
+                                       ok=False,
+                                       preview=f"{type(_te).__name__}")
+                except Exception:
+                    pass
+                self._feed_tool_result(
+                    f"error: {call.name} failed with "
+                    f"{type(_te).__name__}: {str(_te)[:300]}. The tool did "
+                    f"NOT run. Check the argument types and values and try a "
+                    f"different approach — do not re-send the identical call.")
+            finally:
+                self._dispatching_tool = ""
+        else:
+            self.terminal_log(f"✗ unknown tool: {call.name}", "error")
+            self._activity_note(f"unknown tool: {call.name}", "gate")
+            self._feed_tool_result(f"Unknown tool '{call.name}'.")
+
+    def _feed_tool_result(self, result_text):
+        # A TOOL HAS NOW ACTUALLY RUN this request. This is the single point
+        # every tool result passes through (ACTION RECALL and the activity
+        # feed both hang off it for the same reason), so it is the right place
+        # to record the fact the continuation directives depend on — see
+        # _kick_assistant_turn's _continuation. Setting it anywhere upstream
+        # of a real result would let a dropped/blocked call count as a run.
+        self._tool_ran_this_request = True
+        # PROGRESS CLEARS THE STALL RECORD. See ANSWER_STALL_NUDGE_MAX: the
+        # consecutive-stall counter is what stops a model that only ever
+        # narrates, and a tool result is proof this one is not that. Resetting
+        # here (rather than per request) is what lets a long job stall, recover
+        # and keep going instead of dying quietly forty steps in.
+        self._answer_stall_nudges = 0
+        # Carry any "these calls did not run" note into the SAME result, so the
+        # model reads it at exactly the moment it is wondering where the other
+        # answers went. See the deferred branch in _on_stream_done_body.
+        _note = getattr(self, "_deferred_note", "")
+        if _note:
+            self._deferred_note = ""
+            result_text = (result_text or "") + _note
+
+        # The pending action is `"<tool>: <argument>"` (see _action_label), so
+        # the tool name is already here — capture it BEFORE the recall block
+        # below clears it, and tag the envelope with it further down.  Same
+        # single hook, same reason: instrumenting thirty-odd dispatch sites is
+        # how they drift apart.
+        _tool = ""
+        try:
+            _pa = self._pending_action or ""
+            _tool = _pa.split(":", 1)[0].strip() if ":" in _pa else _pa.strip()
+        except Exception:
+            _tool = ""
+
+        # Keep the most recent web result so the follow-through gate can read
+        # the TOP result of a search the host already ran — the fix for the
+        # model that searches, gets a page of links, then narrates "let me read
+        # a real page" turn after turn without ever emitting web_read.
+        try:
+            if str(_tool) in _WEB_TOOL_NAMES and (result_text or "").strip():
+                self._last_web_result = result_text
+        except Exception:
+            pass
+
+        # ACTION RECALL: attach this result to whatever action produced it. One
+        # hook here covers every tool, instead of instrumenting each of the
+        # thirty-odd dispatch sites (which is how they drift apart).
+        try:
+            if self._action_log is not None and self._pending_action:
+                self._action_log.record(
+                    self._pending_action, result_text or "",
+                    changes_state=_action_changes_state(self._pending_action))
+                # A batch also records each MEMBER under its own label, so a
+                # later solo call of the same tool is seen as the repeat it is.
+                # The combined entry above stays for the digest the model
+                # reads; these are what times_run() can actually match.
+                for _m in (getattr(self, "_batch_members", None) or []):
+                    if _m and _m != self._pending_action:
+                        self._action_log.record(
+                            _m, result_text or "",
+                            changes_state=_action_changes_state(_m))
+        except Exception:
+            pass
+        finally:
+            self._pending_action = None
+            self._batch_members = []
+
+        # ── GROUND TRUTH FROM THE VERIFIER, AT THE ONE CHOKE POINT ──
+        # What the check SAID, read off the result itself. The failing-
+        # verification gate reads this and nothing else: the model's account
+        # of a red suite is prose, and prose is what this app has learned
+        # not to make turn-ending decisions from. Recorded here because this
+        # is the single method every tool result passes through — the same
+        # reason ACTION RECALL and the activity feed hang off it, and the
+        # opposite of the `_tools_used_this_request` drift that had to be
+        # fixed at v1.1.4.0 because it was written at one of two sites.
+        try:
+            _vv = verifier_verdict(_tool, result_text or "")
+            if _vv:
+                self._verify_red = _vv
+            elif str(_tool or "") in ("workspace_verify", "workspace_health"):
+                # A verifier that came back clean CLEARS the flag: the gate
+                # must not hold a turn open over a failure that has since
+                # been fixed.
+                self._verify_red = ""
+        except Exception:
+            pass
+
+        # Close the live feed row with what actually came back, BEFORE the
+        # turn advances. One hook here covers every tool, for the same reason
+        # ACTION RECALL hangs off this method rather than the dispatch sites.
+        try:
+            self._activity_close_result(result_text)
+        except Exception:
+            pass
+
+        self._mark_turn_progress()
+        # Route to the chat this turn was started in.  Resolved from
+        # streaming_chat_id; if the turn was torn down (stop / delete)
+        # it's None and we fall back to the current chat.
+        #
+        # EVERYTHING BELOW IS GUARDED. This method is the ONLY thing that
+        # advances the turn loop after a tool runs; if it raised — a store write
+        # failing, a deleted chat id, a full disk — _kick_assistant_turn was
+        # never reached and the turn hung in "working…" with no way out but
+        # restarting the app. A failure here must still hand the loop back.
+        try:
+            chat_id = self.streaming_chat_id or self.current_chat_id
+            # ── NAME THE SOURCE TOOL, INSIDE the envelope ──
+            # The compressor needs to know what produced a block: a page of
+            # prose and an nmap dump want opposite treatment, and guessing from
+            # content alone is fragile.  The tag goes on its OWN LINE INSIDE
+            # `<tool_result>` rather than as an attribute on the opening tag,
+            # which is the obvious way to do it and would have been a silent
+            # disaster: nine places in this file test `"<tool_result>" in
+            # content` as a literal, plus headroom's _TOOL_RE and
+            # _trim_tool_result's synthesised closing tag.  Changing the opener
+            # to `<tool_result source="web_read">` breaks every one of them
+            # without an error — operational-message detection, dedup and
+            # history trimming would all just quietly stop matching.
+            #
+            # So the envelope stays byte-identical and the identity rides
+            # inside it, where adding it can't break a matcher.
+            _src = (_tool or "").strip()
+            _hdr = f"[tool: {_src}]\n" if _src else ""
+            self.store.add_message(
+                chat_id, "user",
+                f"<tool_result>\n{_hdr}{result_text}\n</tool_result>",
+                meta={"kind": "tool_result", "tool": _src or None})
+        except Exception as e:
+            log(f"feed_tool_result: store write failed: {e}")
+            self.terminal_log(f"✗ could not record the tool result: {e}",
+                              "error")
+        self.streaming_msg_widget = None
+        self.streaming_msg_db_id = None
+        # If the operator stopped while the tool was running, record the
+        # result for context but don't start another model turn.
+        if self._stop_requested:
+            self._finish_turn_cleanup()
+            return
+        # streaming_chat_id stays set — _kick_assistant_turn will preserve it
+        try:
+            self._kick_assistant_turn()
+        except Exception:
+            log(f"kick after tool result failed: {traceback.format_exc()}")
+            self.terminal_log("✗ could not start the next step — turn ended",
+                              "error")
+            self._finish_turn_cleanup()
+
+    # ── action recall ───────────────────────────────────────────
+    def _reset_action_log(self):
+        """A new objective was latched — the previous run's actions are no
+        longer 'what we already tried'."""
+        if self._action_log is not None:
+            self._action_log.reset()
+        self._pending_action = None
+
+    def _action_label(self, call) -> str:
+        """One short, comparable line describing a tool call.
+
+        This is what the repeat check compares and what the model reads back, so
+        it has to carry the ARGUMENT that makes the call distinct — `run` alone
+        is not an action, `run: nmap -sV 10.0.0.5` is.
+        """
+        n = (getattr(call, "name", "") or "tool").strip()
+        a = getattr(call, "args", None) or {}
+        # For a content-writing tool, the CONTENT is what makes one call
+        # distinct from the next — not the path. Fold a short fingerprint of
+        # the mutating payload into the label so successive edits of the same
+        # file are seen as different actions (and never false-blocked), while
+        # a byte-identical re-write still collapses to the same label and is
+        # still caught as the no-op repeat it is.
+        _fp = ""
+        if n in _CONTENT_WRITE_TOOLS:
+            try:
+                _blob = "\x00".join(
+                    str(a.get(k)) for k in _CONTENT_ARG_KEYS
+                    if a.get(k) is not None)
+            except Exception:
+                _blob = ""
+            if _blob:
+                _fp = " #" + hashlib.sha1(
+                    _blob.encode("utf-8", "replace")).hexdigest()[:8]
+        for k in ("command", "cmd", "path", "url", "query", "target",
+                  "pattern", "name", "host"):
+            v = a.get(k)
+            if v:
+                return f"{n}: {str(v).strip()[:180]}{_fp}"
+        if a:
+            try:
+                return (f"{n}: "
+                        f"{json.dumps(a, sort_keys=True, default=str)[:180]}"
+                        f"{_fp}")
+            except Exception:
+                pass
+        return n
+
+    def _repeat_guard_blocks(self, label: str) -> bool:
+        """Would the repeat guard refuse this action?  Decision only, no
+        message and no logging — the batch path needs to ask about each of
+        several tools before it knows what it is running."""
+        if self._action_log is None or not label:
+            return False
+        limit = int(self.settings.get("repeat_block_after", 2) or 0)
+        if limit <= 0:
+            return False
+        return self._action_log.should_block(label, limit)
+
+    def _repeat_guard(self, label: str):
+        """Deterministic backstop for a model that ignores the already-done list.
+
+        Returns the text to feed back INSTEAD of running, or None to proceed.
+
+        Two executions of the same action are always allowed: re-running a check
+        after changing something is how verification works, and blocking that
+        would break correct behaviour. A THIRD is not verification — by then the
+        result is not being read, and running it again costs a round-trip, real
+        side effects, and (on a scanner) minutes.
+        """
+        if self._action_log is None or not label:
+            return None
+        limit = int(self.settings.get("repeat_block_after", 2) or 0)
+        if limit <= 0:
+            return None
+        if not self._action_log.should_block(label, limit):
+            return None
+        prev = self._action_log.previous(label) or {}
+        self.terminal_log(f"⛔ repeat guard: {label[:70]} already run "
+                          f"{self._action_log.times_run(label)}× — not "
+                          f"running it again", "error")
+        return (f"NOT RUN — repeat guard. You have already performed this exact "
+                f"action {self._action_log.times_run(label)} times this run:\n"
+                f"    {label}\n"
+                f"Its result last time was:\n    {prev.get('outcome', 'n/a')}\n"
+                f"Running it a third time cannot tell you anything new. Read "
+                f"the ALREADY DONE list, pick a DIFFERENT next action — verify "
+                f"the state another way, change the parameters, or conclude "
+                f"with what you have.")
+
+    def _tool_thread(self, body, label="tool"):
+        """Run a tool body on a worker thread with a GUARANTEED tool result.
+
+        THIS IS THE FIX FOR "IT JUST HANGS".  The assistant turn loop only ever
+        advances when something feeds it — a stream callback, or a tool result.
+        Every tool runs on a daemon thread, and before this helper existed each
+        one was individually responsible for making sure a result came back.
+        Several did not: `tool_run_command` (the hottest path in the app),
+        `tool_list_dir`, `tool_find_file` and `tool_write_file` were all called
+        with no exception handling, and their results indexed with `r['rc']` /
+        `r['entries']` / `r['size']` rather than `.get`.  An OSError spawning a
+        process, a KeyError on an unexpected result shape, a UnicodeDecodeError
+        on binary output — any of them killed the worker thread silently, no
+        tool result was ever fed, and the turn sat in "working…" forever with no
+        way out but restarting the app.
+
+        `body(feed)` receives a ONE-SHOT feed callable.  Whatever the body does
+        — returns without feeding, raises halfway, feeds and then raises —
+        exactly one result reaches the model, so the loop always advances and
+        the failure is something the model can read and route around.
+        """
+        state = {"fed": False}
+        lock = threading.Lock()
+
+        def feed(text):
+            with lock:
+                if state["fed"]:
+                    return
+                state["fed"] = True
+            GLib.idle_add(self._feed_tool_result, text)
+
+        def _run():
+            try:
+                body(feed)
+            except Exception as e:
+                log(f"tool thread [{label}] failed: {traceback.format_exc()}")
+                try:
+                    GLib.idle_add(
+                        lambda m=str(e): self.terminal_log(
+                            f"✗ {label} failed: {m}", "error") or False)
+                except Exception:
+                    pass
+                feed(f"error: {label} failed with "
+                     f"{type(e).__name__}: {e}\nThe tool did not complete. "
+                     f"Do not retry it identically — check the arguments or "
+                     f"use a different approach.")
+            finally:
+                # Belt and braces: a body that returns without feeding (an early
+                # `return` down some branch) would otherwise strand the turn.
+                feed(f"error: {label} produced no result (internal fault). "
+                     f"Treat this as a failure and try a different approach.")
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _bg_feed_text(self, fn):
+        """Run fn() — which returns the final result STRING — on a background
+        thread, then feed that string back via the main loop.  Like
+        _tool_simple, but for callables that already produce the finished text
+        (no JSON re-encoding), e.g. the sidecar's memory_*/skill_* tools."""
+        def _bg():
+            try:
+                text = fn()
+            except Exception as e:
+                text = f"error: {type(e).__name__}: {e}"
+            if not isinstance(text, str):
+                text = json.dumps(text, default=str)
+            GLib.idle_add(self._feed_tool_result, text)
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _load_notifications(self):
+        try:
+            with open(self._notif_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def _save_notifications(self):
+        try:
+            os.makedirs(os.path.dirname(self._notif_path), exist_ok=True)
+            with open(self._notif_path, "w", encoding="utf-8") as f:
+                json.dump(self._notifications[-200:], f)
+        except Exception:
+            pass
+
+    def _add_notification(self, title: str, message: str):
+        """Record a notification into the in-app inbox and refresh the bell."""
+        import time as _t
+        self._notifications.append({
+            "title": (title or "Basilisk").strip(),
+            "message": (message or "").strip(),
+            "ts": _t.strftime("%Y-%m-%d %H:%M"),
+            "read": False,
+        })
+        self._notifications = self._notifications[-200:]
+        self._save_notifications()
+        self._play_notification_sound()
+        try:
+            GLib.idle_add(self._refresh_notifications)
+        except Exception:
+            pass
+
+    def _play_notification_sound(self):
+        """Chime when a notification arrives.  Best-effort and non-blocking:
+        synthesises a small WAV once (cached in the data dir), then fires it
+        through whatever audio player exists.  Silent no-op when disabled in
+        settings or no player is available."""
+        try:
+            if not self.settings.get("notif_sound", True):
+                return
+        except Exception:
+            return
+        import shutil as _sh, subprocess as _sp
+        player = getattr(self, "_notif_player", "unset")
+        if player == "unset":
+            player = None
+            for cand in (["paplay"], ["pw-play"], ["aplay", "-q"],
+                         ["ffplay", "-nodisp", "-autoexit",
+                          "-loglevel", "quiet"], ["play", "-q"]):
+                if _sh.which(cand[0]):
+                    player = cand
+                    break
+            self._notif_player = player
+        if not player:
+            return
+        path = os.path.expanduser("~/.local/share/basilisk/notify.wav")
+        if not os.path.isfile(path):
+            try:
+                self._write_notify_wav(path)
+            except Exception:
+                return
+        try:
+            _sp.Popen(list(player) + [path], stdin=_sp.DEVNULL,
+                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _write_notify_wav(path):
+        """Synthesise a soft two-note ascending chime (G5 -> C6) once."""
+        import wave as _wave, struct as _st, math as _m
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        sr = 44100
+        notes = [(784.0, 0.0, 0.16), (1046.5, 0.10, 0.30)]
+        n = int(sr * 0.44)
+        samples = [0.0] * n
+        for freq, start, dur in notes:
+            s0 = int(start * sr)
+            s1 = min(n, int((start + dur) * sr))
+            for i in range(s0, s1):
+                t = (i - s0) / sr
+                env = _m.exp(-t * 5.5)
+                atk = min(1.0, (i - s0) / (0.005 * sr))   # tiny attack, no click
+                samples[i] += 0.5 * env * atk * _m.sin(2 * _m.pi * freq * t)
+        peak = max(1e-6, max(abs(s) for s in samples))
+        with _wave.open(path, "w") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sr)
+            w.writeframes(b"".join(
+                _st.pack("<h", int(max(-1.0, min(1.0, s / peak * 0.9)) * 32767))
+                for s in samples))
+
+    def _unread_count(self) -> int:
+        return sum(1 for n in self._notifications if not n.get("read"))
+
+    # ── Community-source approval gate (enforced in code, not the prompt) ──
+    def _desktop_notify(self, title: str, body: str = "",
+                        nid: str = "basilisk-notify"):
+        """Fire a REAL desktop notification through the GTK application (Gio).
+        This uses the app's own D-Bus connection and the installed .desktop
+        file, so it works on GNOME / Phosh / KDE WITHOUT libnotify-bin and
+        without a notify-send binary in PATH. Falls back to notify-send /
+        kdialog only if the Gio path is unavailable."""
+        title = (title or "Basilisk").strip()
+        body = (body or "").strip()
+        sent = False
+        try:
+            app = self.get_application()
+            if app is not None:
+                note = Gio.Notification.new(title)
+                if body:
+                    note.set_body(body)
+                try:
+                    note.set_priority(Gio.NotificationPriority.HIGH)
+                except Exception:
+                    pass
+                app.send_notification(nid, note)
+                sent = True
+        except Exception:
+            sent = False
+        if not sent:
+            try:
+                tool_notify(body or title, title)
+            except Exception:
+                pass
+
+    def _url_host(self, url: str) -> str:
+        try:
+            from urllib.parse import urlsplit
+            u = url if "://" in (url or "") else "https://" + (url or "")
+            return (urlsplit(u).hostname or "").lower().rstrip(".")
+        except Exception:
+            return ""
+
+    def _web_grant_domain(self, host: str) -> str:
+        """The domain an approval covers for `host` — so allowing one URL covers
+        the whole site (approving one github.com URL covers *.github.com). Now
+        that ANY non-trusted public host is approval-gated (not just a fixed
+        community list), this returns the registrable domain for any public host,
+        and '' only for a trusted host (auto, no grant needed) or an internal one
+        (refused, never granted)."""
+        try:
+            from basilisk_core import (web_read_tier, _grant_domain_for,
+                                   _is_internal_host)
+        except Exception:
+            return ""
+        h = (host or "").lower().rstrip(".")
+        if not h or _is_internal_host(h):
+            return ""
+        if web_read_tier(h) == "trusted":
+            return ""            # trusted → fetched automatically, no grant
+        return _grant_domain_for(h)
+
+    def _web_read_gated(self, url: str, max_chars: int):
+        """Access gate for web_read, enforced HERE in code (never left to the
+        model).
+
+        LEASHED (normal) mode: the operator is in the loop for every single turn
+        and Basilisk gives one answer and stops, so the prompt-injection risk the
+        community gate defends against is minimal — read ANY public page directly
+        (GitHub, a vendor blog, a news site, any URL) so research is unrestricted.
+
+        UNLEASHED (autonomous) mode: the gate holds — TRUSTED sources fetch
+        immediately; any OTHER public host is held outside the autonomous loop and
+        needs a one-tap Allow, so a compromised page can't redirect a relentless
+        run to an unvetted host on its own.
+
+        Either mode: internal / private / metadata hosts are refused by
+        tool_web_read regardless (SSRF floor — no approval overrides that)."""
+        if self._unleashed and web_read_tier(url) == "community":
+            dom = self._web_grant_domain(self._url_host(url))
+            if dom and dom not in self._web_grants:
+                self._request_web_approval(dom, url)
+                return {
+                    "ok": False,
+                    "pending_approval": True,
+                    "host": dom,
+                    "error": (
+                        f"'{dom}' isn't on the trusted-source list, so while "
+                        "UNLEASHED it's held outside the autonomous loop and I "
+                        "can't read it on my own. I've put an access request in "
+                        "the notifications bell — the operator can Allow it (which "
+                        "unlocks that domain for the rest of this session) or "
+                        "ignore it. It is NOT auto-granted: I'll continue without "
+                        "it and look for another way. Don't re-request it in a "
+                        "loop — move on, and if it gets approved I'll read it."),
+                }
+        return tool_web_read(url, max_chars)
+
+    def _request_web_approval(self, domain: str, url: str):
+        """Post a NON-BLOCKING approval request for a community-tier domain: an
+        inbox notification with an Allow button + a desktop popup. Deduped by
+        domain so a retry loop can't spam the inbox; ignoring it leaves the run
+        going and the request waiting in the bell until the operator gets to it."""
+        domain = (domain or "").strip().lower()
+        if not domain:
+            return
+        for n in self._notifications:
+            if (n.get("kind") == "approval"
+                    and (n.get("host") or "").lower() == domain
+                    and n.get("state") in ("pending", "granted")):
+                return  # already waiting or already handled this session
+        import time as _t
+        self._notifications.append({
+            "kind": "approval",
+            "host": domain,
+            "url": url,
+            "state": "pending",
+            "title": f"Access requested: {domain}",
+            "message": (f"Basilisk wants to read {domain} — a source that isn't "
+                        "on the trusted-auto list, so it's held outside the "
+                        "autonomous loop. Allow it to let Basilisk read this "
+                        "domain for the rest of this session, or ignore it and "
+                        "the run keeps going."),
+            "ts": _t.strftime("%Y-%m-%d %H:%M"),
+            "read": False,
+        })
+        self._notifications = self._notifications[-200:]
+        self._save_notifications()
+        self._play_notification_sound()
+        try:
+            GLib.idle_add(self._refresh_notifications)
+        except Exception:
+            pass
+        try:  # real desktop notification (Gio), per-domain so they don't clobber
+            self._desktop_notify(
+                f"Access requested: {domain}",
+                "Basilisk wants to read this source — open it to Allow or ignore.",
+                nid=f"basilisk-approval-{domain}")
+        except Exception:
+            pass
+
+    def _grant_web_host(self, domain: str):
+        """Operator approved a community-tier domain — grant it for this session
+        and mark the request done. Future web_read to that domain (and its
+        subdomains) fetches without asking again until the app restarts.
+
+        Crucially, this also SIGNALS the agent that the block just cleared:
+        without it, the model was told to 'carry on without this source' and has
+        no way to learn the operator said yes, so it never retries. We collect
+        the exact URL(s) it was blocked on and hand them straight back."""
+        domain = (domain or "").strip().lower()
+        pending_urls = []
+        if domain:
+            self._web_grants.add(domain)
+        for n in self._notifications:
+            if n.get("kind") == "approval" and (n.get("host") or "").lower() == domain:
+                if n.get("state") != "granted" and n.get("url"):
+                    pending_urls.append(n.get("url"))
+                n["state"] = "granted"
+                n["read"] = True
+        self._save_notifications()
+        self._refresh_notifications()
+        try:
+            self.toast_overlay.add_toast(Adw.Toast.new(
+                f"Allowed {domain} for this session — Basilisk can read it now."))
+        except Exception:
+            pass
+        # Tell the agent, right now, that it can proceed.
+        self._notify_web_grant_to_agent(domain, pending_urls)
+
+    def _notify_web_grant_to_agent(self, domain: str, pending_urls):
+        """Drop a note into the conversation naming the approved domain (and the
+        exact URL the agent was blocked on) so it retries. If no turn is running
+        the run had already settled — re-kick one so it acts immediately; if a
+        turn IS in flight, the running loop reads the note on its next step
+        (same contract as an operator suggestion), so we don't interrupt it."""
+        cid = self.current_chat_id
+        if cid is None:
+            return
+        if pending_urls:
+            first = pending_urls[0]
+            extra = ""
+            if len(pending_urls) > 1:
+                extra = (" Other now-allowed URLs you had queued: "
+                         + ", ".join(pending_urls[1:4]) + ".")
+            note = (f"[operator APPROVED access to {domain}] web_read is now "
+                    f"unlocked for {domain} (and its subdomains) for the rest of "
+                    f"this session. Retry the fetch you were blocked on now — "
+                    f"web_read {first} — and continue the task with what it "
+                    f"returns.{extra}")
+        else:
+            note = (f"[operator APPROVED access to {domain}] web_read is now "
+                    f"unlocked for {domain} for the rest of this session. If you "
+                    f"still need that source, read it now and continue.")
+        try:
+            self.store.add_message(cid, "user", note)
+        except Exception:
+            return
+        if not self._is_busy():
+            # The run had stopped — surface a clean line and start a turn so the
+            # agent acts on the approval instead of waiting for the operator.
+            try:
+                self._append_message_widget(
+                    "user", f"\u2713 Approved {domain} \u2014 Basilisk is "
+                            f"retrying that source now.")
+            except Exception:
+                pass
+            try:
+                GLib.idle_add(lambda: (self._kick_assistant_turn(), False)[1])
+            except Exception:
+                self._kick_assistant_turn()
+
+    def _refresh_notifications(self):
+        """Rebuild the bell badge + the popover list from the store."""
+        try:
+            n = self._unread_count()
+            if hasattr(self, "notif_badge_lbl"):
+                self.notif_badge_lbl.set_label(str(n) if n else "")
+                self.notif_badge_lbl.set_visible(n > 0)
+            if hasattr(self, "notif_list_box"):
+                child = self.notif_list_box.get_first_child()
+                while child:
+                    nxt = child.get_next_sibling()
+                    self.notif_list_box.remove(child)
+                    child = nxt
+                if not self._notifications:
+                    empty = Gtk.Label(label="No notifications yet.")
+                    empty.add_css_class("dim-label")
+                    empty.set_margin_top(18)
+                    empty.set_margin_bottom(18)
+                    self.notif_list_box.append(empty)
+                else:
+                    for item in reversed(self._notifications[-50:]):
+                        row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                      spacing=2)
+                        row.set_margin_top(8)
+                        row.set_margin_bottom(8)
+                        row.set_margin_start(10)
+                        row.set_margin_end(10)
+                        t = Gtk.Label(xalign=0.0,
+                                      label=item.get("title", "Basilisk"))
+                        t.add_css_class("notif-title")
+                        t.set_wrap(True)
+                        m = Gtk.Label(xalign=0.0, label=item.get("message", ""))
+                        m.add_css_class("notif-body")
+                        m.set_wrap(True)
+                        ts = Gtk.Label(xalign=0.0, label=item.get("ts", ""))
+                        ts.add_css_class("notif-time")
+                        ts.add_css_class("dim-label")
+                        row.append(t)
+                        row.append(m)
+                        row.append(ts)
+                        # Community-source access requests carry an inline
+                        # Allow button (pending) or an "allowed" marker (granted).
+                        if item.get("kind") == "approval":
+                            st = item.get("state", "pending")
+                            if st == "granted":
+                                done = Gtk.Label(
+                                    xalign=0.0, label="✓ Allowed this session")
+                                done.add_css_class("dim-label")
+                                done.set_margin_top(4)
+                                row.append(done)
+                            else:
+                                _host = item.get("host", "")
+                                btn = Gtk.Button(label=f"Allow {_host}")
+                                btn.add_css_class("suggested-action")
+                                btn.set_halign(Gtk.Align.START)
+                                btn.set_margin_top(6)
+                                btn.connect(
+                                    "clicked",
+                                    lambda _b, h=_host: self._grant_web_host(h))
+                                row.append(btn)
+                        self.notif_list_box.append(row)
+        except Exception:
+            pass
+        return False
+
+    def _mark_notifications_read(self):
+        for n in self._notifications:
+            n["read"] = True
+        self._save_notifications()
+        self._refresh_notifications()
+
+    def _clear_notifications(self, *_a):
+        self._notifications = []
+        self._save_notifications()
+        self._refresh_notifications()
+
+    def _vision_key(self) -> str:
+        prov = self.settings.get("vision_provider", "siliconflow")
+        return (self.settings.get(f"{prov}_api_key", "") or "").strip()
+
+    def _vision_base_url(self) -> str:
+        prov = self.settings.get("vision_provider", "siliconflow")
+        spec = PROVIDERS_BY_KEY.get(prov)
+        return spec.base_url if spec else ""
+
+    def _tool_simple(self, fn, name=None):
+        # LABEL, NOT LOGIC — but a log that lies is a debugging tax you pay on
+        # every future bug. `fn.__name__` works only when a bare function is
+        # passed; 150 of the 151 dispatch entries wrap the call in a lambda to
+        # bind its arguments, so every one of them logged `→ running <lambda>…`
+        # and the terminal could not tell you WHICH tool ran. The dispatcher
+        # already knows the name — take it from there rather than reflecting on
+        # a closure. Read synchronously here, in the dispatcher's own call
+        # stack, before any thread starts, so there is no race with the next
+        # tool in the chain.
+        name = (name
+                or getattr(self, "_dispatching_tool", "")
+                or getattr(fn, "__name__", "") or "tool")
+        if name == "<lambda>":
+            name = getattr(self, "_dispatching_tool", "") or "tool"
+        def _bg(feed):
+            GLib.idle_add(lambda: self.terminal_log(
+                f"→ running {name}…", "info") or False)
+            result = fn()
+            text = json.dumps(result, indent=2, default=str)
+            # A tool that reported ok:false / error is NOT "✓ done". Printing
+            # a tick over a failure is the same lie the DSML bug told — the
+            # run looks healthy while nothing is actually being learned, so
+            # the first place you look for the cause is the last place that
+            # will show it. Say what happened.
+            _bad = ""
+            if isinstance(result, dict):
+                if result.get("ok") is False or result.get("error"):
+                    _bad = str(result.get("error")
+                               or result.get("reason") or "failed")
+            GLib.idle_add(lambda: self.terminal_log(
+                (f"✗ {name}: {_bad[:120]}" if _bad else "✓ done"),
+                ("error" if _bad else "ok")) or False)
+            feed(text)
+        self._tool_thread(_bg, name)
+
+    def _action_tool(self, name, fn, description):
+        """Run an action tool (one with side effects: launching apps,
+        typing, moving/deleting files).  Honours the SAME 'Confirm every
+        command' toggle the shell `run` tool uses — when it's on, the
+        operator approves via a dialog first; when off (auto mode), the
+        action runs immediately.  Either way the result is fed back to
+        the model."""
+        def _go(allow=True, password=None):
+            if not allow:
+                self._feed_tool_result(f"operator declined: {description}")
+                return
+            self._tool_simple(fn)
+
+        # No confirmation — autonomous. The action just runs.
+        _go(True)
+
+    def _tool_skill_write(self, a):
+        """Self-written skill.  The model supplies name/code/test/description/
+        capabilities.  Saving is gated by the same confirm dialog the operator
+        uses for commands: on approval the sidecar ast-checks the code, runs
+        its test IN THE SANDBOX, and keeps it only if the test passes.  Nothing
+        executes in Basilisk's own process."""
+        name = str(a.get("name", "")).strip()
+        code = str(a.get("code", ""))
+        test = str(a.get("test", ""))
+        desc = str(a.get("description", ""))
+        caps = list(a.get("capabilities", []) or [])
+
+        def _go(allow=True, password=None):
+            if not allow:
+                self._feed_tool_result(f"operator declined saving skill {name!r}")
+                return
+
+            def _bg(feed):
+                try:
+                    r = self._ext.commit_skill(name, code, test, desc, caps)
+                except Exception as e:
+                    r = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                if r.get("ok"):
+                    self.terminal_log(f"✓ skill saved: {name} "
+                                      f"(sandbox: {r.get('tier')})", "ok")
+                else:
+                    self.terminal_log(f"✗ skill rejected: "
+                                      f"{r.get('reason') or r.get('error')}",
+                                      "error")
+                feed(json.dumps(r, indent=2, default=str))
+            self._tool_thread(_bg, f"skill_save {name}")
+
+        descr = (f"save self-written skill '{name}'"
+                 + (f" (caps: {', '.join(caps)})" if caps else "")
+                 + " — sandbox-tested before keeping")
+        # No confirmation — autonomous. The skill is saved directly (it's still
+        # ast-checked and sandbox-tested before being kept, so nothing unsafe
+        # runs in Basilisk's own process regardless).
+        _go(True)
+
+
+    def _tool_read_file(self, path):
+        if not path:
+            self._feed_tool_result("error: no path")
+            return
+        def do_read():
+            def _bg(feed):
+                feed(self._format_read(tool_read_file(path)))
+            self._tool_thread(_bg, "read_file")
+        if is_sensitive_path(path):
+            confirm_sensitive_read_dialog(self, path, lambda allow:
+                do_read() if allow
+                else self._feed_tool_result(f"denied: {path}"))
+        else:
+            do_read()
+
+    def _format_read(self, r):
+        """Turn a tool_read_file result into the text the model sees.
+
+        Was _render_read, which fed the result itself and indexed r["content"] /
+        r["path"] / r["size"] directly — so an unexpected result shape raised
+        inside a worker thread and the turn hung.  Now it only FORMATS; the
+        feeding (and the guarantee that one happens) belongs to _tool_thread."""
+        r = r or {}
+        if not r.get("ok"):
+            return f"read_file error: {r.get('error')}"
+        body = r.get("content", "")
+        header = (f"file: {r.get('path')} ({r.get('size')} bytes"
+                  f"{' truncated' if r.get('truncated') else ''})")
+        return f"{header}\n\n{body}"
+
+    def _tool_list_dir(self, path):
+        def _bg(feed):
+            self.terminal_log(f"→ list_dir {path}", "info")
+            r = tool_list_dir(path) or {}
+            if not r.get("ok"):
+                text = f"list_dir error: {r.get('error')}"
+                self.terminal_log(f"✗ {r.get('error')}", "error")
+            else:
+                entries = r.get("entries") or []
+                lines = [f"dir: {r.get('path', path)}", ""]
+                for e in entries:
+                    sz = "" if e.get("is_dir") else f"  ({e.get('size')}B)"
+                    lines.append(f"  {e.get('name')}{sz}")
+                text = "\n".join(lines)
+                self.terminal_log(f"✓ {len(entries)} entries", "ok")
+            feed(text)
+        self._tool_thread(_bg, "list_dir")
+
+    def _tool_find_file(self, pattern, search_path, max_results=50,
+                        min_size_kb=0, max_size_kb=0,
+                        modified_within_days=0):
+        def _bg(feed):
+            self.terminal_log(f"→ find {pattern} in {search_path}", "info")
+            r = tool_find_file(pattern, search_path, max_results,
+                               min_size_kb, max_size_kb,
+                               modified_within_days) or {}
+            if r.get("ok"):
+                found = r.get("found") or []
+                count = r.get("count", len(found))
+                lines = [f"find {pattern} in {r.get('search_path', search_path)}: "
+                         f"{count} hit(s)"]
+                for hit in found:
+                    if isinstance(hit, dict):
+                        sz = hit.get("size")
+                        szs = f"  ({sz}B)" if sz is not None else ""
+                        lines.append(f"  {hit.get('path')}{szs}")
+                    else:
+                        lines.append(f"  {hit}")
+                text = "\n".join(lines)
+                self.terminal_log(f"✓ {count} found", "ok")
+            else:
+                text = f"find_file error: {r.get('error')}"
+                self.terminal_log(f"✗ {r.get('error')}", "error")
+            feed(text)
+        self._tool_thread(_bg, "find_file")
+
+    def _tool_run(self, command, reason):
+        # Reached only when the model emits <tool name="run"> after the
+        # operator approved.  Goes through the same gate as the card.
+        self._execute_command(command, reason)
+
+    def _reload_persona(self) -> bool:
+        """Hot-reload basilisk_persona after a self-edit and rebind the names this
+        module imported from it, so a change to Basilisk's persona applies on the
+        next reply without a relaunch.  basilisk.py / basilisk_core.py changes still
+        need a relaunch (you can't safely swap a running app's own modules)."""
+        try:
+            import importlib
+            import basilisk_persona as _kp
+            importlib.reload(_kp)
+            # Every persona symbol this module imported must be rebound, or a
+            # self-edit silently keeps calling the stale one.
+            global build_system_prompt, assemble_messages, volatile_block
+            global title_from_first_message
+            build_system_prompt = _kp.build_system_prompt
+            assemble_messages = _kp.assemble_messages
+            volatile_block = _kp.volatile_block
+            title_from_first_message = _kp.title_from_first_message
+            log("persona hot-reloaded")
+            return True
+        except Exception as e:
+            log(f"persona reload failed: {e}")
+            return False
+
+    def _run_proposed_edit(self, path, content, card=None, mode="replace"):
+        """Called when the operator clicks Apply on a proposed-edit card.
+        The click IS the approval.  Mirrors _run_proposed_command: set up
+        a turn context, write the file (with the parse-check + backup net
+        in tool_write_file), then feed the result back so Basilisk confirms.
+
+        A file write is the same kind of action as a command — it goes
+        through the same confirm-by-clicking gate.  We surface a sudo
+        prompt only if the write lands somewhere the user can't write,
+        in which case we tell Basilisk to retry via `sudo tee` rather than
+        silently failing."""
+        if not path:
+            if card is not None:
+                card.reset_apply_button()
+            return
+        # The busy guard is for OPERATOR CLICKS (card is not None) — don't apply a
+        # file mid-task from a click. When called programmatically in autonomous
+        # mode (card is None, from _execute_tool_calls mid-turn) we ARE the task
+        # and must proceed, or the model's write_file silently does nothing.
+        if card is not None and self._is_busy():
+            self._show_toast("Busy — let the current task finish or stop it.")
+            card.reset_apply_button()
+            return
+        self._stop_requested = False
+        if self.current_chat_id is None:
+            self._new_chat()
+        self.streaming_chat_id = self.current_chat_id
+        self._tool_chain_depth = 0
+        self._set_working(True, "writing file…")
+        self._set_send_mode(True)
+
+        def _bg(feed):
+            r = tool_write_file(path, content, mode=mode) or {}
+            if r.get("ok"):
+                # SAY WHICH HALF OF A SECTIONED WRITE THIS WAS. A model
+                # writing a large file in parts needs to know the earlier
+                # parts are still there; "wrote 4KB" after an append reads
+                # like the file was replaced by the fragment.
+                if r.get("mode") == "append":
+                    parts = [f"appended {r.get('appended')} bytes to "
+                             f"{r.get('path', path)} — the file is now "
+                             f"{r.get('size')} bytes. Keep appending until "
+                             f"it is complete."]
+                else:
+                    parts = [f"wrote {r.get('path', path)} ({r.get('size')} bytes)"]
+                if r.get("created"):
+                    parts.append("(new file created)")
+                if r.get("backup"):
+                    parts.append(f"backup: {r['backup']}")
+                if r.get("is_python"):
+                    base = os.path.basename(r.get("path") or path)
+                    if base == "basilisk_persona.py":
+                        if self._reload_persona():
+                            parts.append("Persona reloaded live — the new "
+                                         "character takes effect on my next "
+                                         "reply, no relaunch needed.")
+                        else:
+                            parts.append("Python syntax was checked, but the "
+                                         "live persona reload failed — "
+                                         "relaunch to apply.")
+                    elif base in ("basilisk.py", "basilisk_core.py"):
+                        parts.append("Python syntax was checked before "
+                                     "writing. This is a core file (basilisk.py / "
+                                     "basilisk_core.py) — relaunch to load it.")
+                    else:
+                        # An ordinary .py (a scratch script, a project file)
+                        # is NOT a core file: it does not need the running app
+                        # reloaded, and saying so made the host look confused
+                        # about its own write. Only the two modules the RUNNING
+                        # process imported are named as core.
+                        parts.append("Python syntax was checked before writing.")
+                out = "\n".join(parts)
+            else:
+                out = f"write failed for {path}\nerror: {r.get('error')}"
+            feed(out)
+        self._tool_thread(_bg, f"write_file {path}")
+
+    def _run_proposed_command(self, command, explanation="", card=None):
+        """Called when the operator clicks Run on a proposed-command card.
+        The click IS the approval — we set up a turn context and execute,
+        then Basilisk interprets the output."""
+        if not command:
+            if card is not None:
+                card.reset_run_button()
+            return
+        # Busy guard is for OPERATOR CLICKS only (card is not None). The
+        # programmatic autonomous path (card is None) IS the running task and
+        # must proceed.
+        if card is not None and self._is_busy():
+            self._show_toast("Busy — let the current task finish or stop it.")
+            card.reset_run_button()
+            return
+        self._stop_requested = False
+        if self.current_chat_id is None:
+            self._new_chat()
+        # This is the start of a turn — capture the chat and show the
+        # stop affordance so a long command can be interrupted.
+        self.streaming_chat_id = self.current_chat_id
+        self._tool_chain_depth = 0
+        _cmd_head = command.strip().split()[0] if command.strip() else ""
+        self._set_working(True, f"running {_cmd_head}…" if _cmd_head else "running…")
+        self._set_send_mode(True)
+        # The click on the card IS the approval, so don't re-confirm a safe
+        # command — only stop for a sudo password when root is required.
+        self._execute_command(command, explanation or "operator approved",
+                              from_card=True)
+
+    def _sudo_pw_valid(self) -> bool:
+        """A cached sudo password exists and hasn't hit its 30-minute expiry."""
+        import time
+        return bool(self._sudo_pw) and (time.time() - self._sudo_pw_time) < 1800
+
+    def _cache_sudo_pw(self, pw):
+        """Hold the sudo password in memory for this chat (30-min TTL). It is
+        never written to disk, the log, the ledger, or the conversation — the
+        model has no way to read it."""
+        import time
+        self._sudo_pw = pw or None
+        self._sudo_pw_time = time.time() if pw else 0.0
+
+    def _clear_sudo_pw(self):
+        """Wipe the cached sudo password (new chat, expiry, or a failed auth)."""
+        self._sudo_pw = None
+        self._sudo_pw_time = 0.0
+
+    def _foresight_rule_floor(self, command):
+        """Foresight's DETERMINISTIC verdict only — no model, no network.
+
+        Used when the optional model pass blows its deadline.  Falling back to
+        this rather than to a bare `allow` matters: the rule floor is the tier
+        that catches the irreversible shapes (mkfs, dd onto a block device,
+        partition edits, fork bombs), and the model pass may only ever ESCALATE
+        above it.  So a timeout costs us the refinement, never the floor."""
+        try:
+            from basilisk_ext.foresight import _rule_floor
+            return _rule_floor(command or "")
+        except Exception:
+            return {"verdict": "allow", "reasons": ["foresight unavailable"]}
+
+    def _execute_command(self, command, reason, from_card=False,
+                         _foresight=None):
+        """Confirm (with sudo password if needed), run, feed result back.
+        Shared by the model's `run` tool and the card's Run button.
+
+        from_card=True means the operator already approved by clicking Run,
+        so we skip the redundant y/n and only surface a dialog when the
+        command needs root (to collect the password).
+
+        _foresight is internal: None means "not assessed yet" and a dict means
+        "already assessed, don't re-enter the gate".  It is a PARAMETER rather
+        than instance state deliberately — the previous instance-flag version
+        was cleared in a `finally` as soon as this method returned, which is
+        while the command it launched is still running on a worker thread."""
+        self._mark_turn_progress()
+        if not command:
+            self._feed_tool_result("error: no command")
+            return
+
+        # ── HARD BLOCK — the one gate with no override ──
+        # A command in the catastrophic class (rm -rf /, mkfs, dd onto a disk,
+        # fork bomb, recursive delete of root/system dirs, …) is REFUSED
+        # outright, before any confirm dialog, before foresight, before the
+        # shell.  There is no "Run anyway" button and no setting that turns
+        # this off: Basilisk, as an AI, will never be the thing that runs a
+        # system-destroying command.  A human who truly needs such an op does
+        # it themselves in a real terminal.
+        if is_catastrophic_command(command):
+            self.terminal_log("■ BLOCKED — catastrophic command refused "
+                              "(no override)", "error")
+            self._activity_note(
+                "BLOCKED (no override): catastrophic command  " + command[:90],
+                "gate")
+            self._feed_tool_result(
+                "REFUSED. This command is in the catastrophic class — it would "
+                "irreversibly destroy the system or its data — so Basilisk will not "
+                "run it under any circumstances. There is no override; this is "
+                "a hard safety floor. If a human genuinely needs this, they "
+                "must do it themselves in a real terminal.\n\n  " + command)
+            return
+
+        # ── foresight gate ──
+        # Predict consequences before running.  Off unless foresight_enabled.
+        #
+        # Three things were wrong with the old version of this block and all
+        # three are fixed here:
+        #
+        #  1. A `block` verdict did NOTHING.  The old code computed a
+        #     `force_confirm` flag, stored it on self as `_fs_force_confirm`,
+        #     and then no code anywhere ever read that attribute — so foresight
+        #     printed an alarming card and ran the command regardless.  A safety
+        #     layer that logs and proceeds is not a safety layer.  A block now
+        #     actually refuses, AND the refusal is fed back as a tool result so
+        #     the model can pick a different approach instead of the turn simply
+        #     dangling with nothing to answer.
+        #
+        #  2. The assessment had NO deadline.  With the optional model pass on,
+        #     `_ext.foresight()` makes a full network round-trip; if that hung,
+        #     `_resume` never ran, the command never executed, no tool result was
+        #     ever fed back, and the whole turn sat in "working" until the app
+        #     was restarted.  The assessment is now watchdogged: if it does not
+        #     land inside `foresight_timeout_s`, we proceed on the deterministic
+        #     rule floor (instant, local, and the part that actually carries the
+        #     safety weight) and say so in the log.  Latency never wedges a turn.
+        #
+        #  3. Re-entrancy rode on an INSTANCE flag (`_fs_cleared`) that was
+        #     cleared in a `finally` the moment `_execute_command` returned —
+        #     which is long before the command it started has finished.  The
+        #     verdict is now passed down as a parameter, so it belongs to this
+        #     one call and cannot be clobbered by a concurrent one.
+        if (_foresight is None
+                and getattr(self, "_ext", None)
+                and self.settings.get("foresight_enabled", False)):
+            _fs_deadline = max(
+                1.0, float(self.settings.get("foresight_timeout_s",
+                                             FORESIGHT_TIMEOUT_S) or
+                           FORESIGHT_TIMEOUT_S))
+            _slot = {"v": None}
+            _landed = threading.Event()
+
+            def _fbg():
+                try:
+                    _slot["v"] = self._ext.foresight(command)
+                except Exception as e:
+                    _slot["v"] = {"verdict": "allow",
+                                  "reasons": [f"foresight error: {e}"]}
+                finally:
+                    _landed.set()
+
+            def _resume():
+                v = _slot["v"]
+                timed_out = v is None
+                if timed_out:
+                    # The assessment is still in flight.  Fall back to the
+                    # deterministic rule floor, which is pure pattern matching
+                    # over the command string: no network, no model, sub-100us.
+                    # The catastrophic floor at the execution primitive is
+                    # untouched by any of this and still applies.
+                    v = self._foresight_rule_floor(command)
+                    self.terminal_log(
+                        f"⏱ foresight model pass exceeded {_fs_deadline:.0f}s "
+                        f"— proceeding on the deterministic rules", "error")
+                try:
+                    from basilisk_ext.foresight import render_card
+                except Exception:
+                    render_card = lambda x: ""
+                verdict = (v or {}).get("verdict", "allow")
+                if verdict in ("block", "caution"):
+                    # Show the consequence card either way so the operator
+                    # sees foresight's read in the log.
+                    card = render_card(v)
+                    if card:
+                        self.terminal_log(card, "error")
+                if verdict == "block":
+                    # BLOCK is the whole point of the layer: an irreversible,
+                    # system-destroying shape (disk wipe, mkfs, partition edit,
+                    # fork bomb) — never an ordinary hacking command, and never
+                    # something the model can argue down, because the rule floor
+                    # sets it and the model may only escalate.  Refuse, and TELL
+                    # THE MODEL, so it adapts rather than waiting on a result
+                    # that would never come.
+                    _why = "; ".join((v or {}).get("reasons") or []) \
+                        or "predicted irreversible damage to this machine"
+                    self.terminal_log(
+                        "■ BLOCKED by foresight — not run", "error")
+                    self._activity_note(
+                        "BLOCKED by foresight: " + _why[:110], "gate")
+                    self._feed_tool_result(
+                        "REFUSED by foresight. Predicted consequence: " + _why
+                        + ".\nThis command was NOT run. Do not retry it as-is. "
+                        "Use a reversible form, narrow the target, or ask the "
+                        "operator to do it himself in a real terminal.\n\n  "
+                        + command)
+                    return False
+                # In autonomous walk-away mode, foresight's CAUTION layer is
+                # advisory ONLY — it logs and lets the command run, so risky-
+                # but-normal pentest commands (curl|bash to fetch a tool,
+                # kill -9 a hung scan, a firewall/route tweak) never interrupt
+                # an unattended engagement.  Supervised mode still stops on a
+                # caution through the normal confirm path below.
+                self._execute_command(command, reason, from_card=from_card,
+                                      _foresight=(v or {"verdict": "allow"}))
+                return False
+
+            def _watch():
+                _landed.wait(_fs_deadline)
+                GLib.idle_add(_resume)
+
+            threading.Thread(target=_fbg, daemon=True).start()
+            threading.Thread(target=_watch, daemon=True).start()
+            return
+
+        # ── (#4) command de-duplication ──
+        # Record every command that reaches execution; if the operator opted
+        # in, warn when the exact command was already run very recently (a
+        # stale re-issue or an accidental double-tap).  Non-blocking.
+        if self.settings.get("warn_duplicate_commands", False):
+            try:
+                if recent_duplicate(command, 600):
+                    self._show_toast(
+                        "You just ran this command. Intentional, or stale?",
+                        timeout=5)
+                    self.terminal_log(
+                        f"⚠ duplicate command within 10m: {command[:60]}",
+                        "dim")
+            except Exception:
+                pass
+        try:
+            note_command(command)
+        except Exception:
+            pass
+
+        # ── loop-break bookkeeping ──
+        # Track the tail of executed commands so _kick_assistant_turn / _mission_
+        # continue can spot the model firing the SAME command over and over (a
+        # stuck autonomous loop). Placed AFTER the foresight gate so it records
+        # each command exactly once — _execute_command re-enters itself through
+        # foresight, and appending at the top double-counted with foresight on.
+        try:
+            self._recent_commands.append((command or "").strip())
+            self._recent_commands = self._recent_commands[-8:]
+        except Exception:
+            self._recent_commands = [(command or "").strip()]
+
+        # How long should this command take, and when do we give up? The
+        # estimator knows a quick command from a build from a server that will
+        # NEVER return on its own — so a hung start is terminated in ~25s
+        # instead of blocking for the full window.
+        _est = estimate_runtime(command)
+        timeout = _est["hard_timeout_seconds"]
+        if _est.get("is_server") and not _est.get("backgrounded"):
+            self._show_toast(
+                "That's a server — capping the start at 25s. Background it "
+                "(append ' &') so it doesn't block.", timeout=6)
+
+        def run_bg(password=None):
+            def _bg(feed):
+                # Log the command but DON'T force the panel open — the
+                # operator opens the log themselves with the toggle when
+                # they want it.  The command still shows in the status line.
+                self.terminal_log(f"$ {command}", "cmd")
+                # ── RUN IN THE REPO, NOT IN $HOME ──
+                # With a workspace open, `pytest -q` meant "run the tests in
+                # my home directory", which finds nothing and reports it as
+                # if the repo had no tests. The model's answer was to prefix
+                # every command with a `cd` it had to remember, derived from
+                # a path it was never told — so it guessed, and a guessed cd
+                # is a command that runs somewhere nobody intended.
+                # The host KNOWS the root; a command's cwd is not a decision
+                # the model should have to make. An explicit `cd` in the
+                # command still wins, because it is relative to this cwd.
+                _cwd = None
+                try:
+                    _cwd = workspace_cwd() or None
+                except Exception:
+                    _cwd = None
+                r = tool_run_command(command, timeout=timeout, cwd=_cwd,
+                                     sudo_password=password) or {}
+                # Record to the evidence ledger (fail-safe: a ledger error must
+                # never affect the command result the operator sees).
+                try:
+                    _led = get_ledger()
+                    if _led is not None:
+                        _led.record(command, reason, r)
+                except Exception:
+                    pass
+                if r.get("ok"):
+                    # `.get` throughout, not `r['rc']`.  This runs on a worker
+                    # thread whose only job is to produce a tool result; a
+                    # KeyError here used to kill the thread, and with it the
+                    # turn — the loop has no other way to advance.
+                    rc = r.get("rc")
+                    stdout = r.get("stdout") or ""
+                    stderr = r.get("stderr") or ""
+                    parts = [f"$ {command}", f"(rc={rc})"]
+                    if stdout:
+                        # Stream stdout to terminal log line by line
+                        for line in stdout.splitlines()[:80]:
+                            GLib.idle_add(lambda l=line: self.terminal_log(l, "stdout") or False)
+                        parts.append(stdout)
+                    if stderr:
+                        for line in stderr.splitlines()[:20]:
+                            GLib.idle_add(lambda l=line: self.terminal_log(l, "stderr") or False)
+                        parts.append(f"stderr:\n{stderr}")
+                    if r.get("sudo_auth_failed"):
+                        parts.append(
+                            "\n[note] sudo could not authenticate "
+                            "non-interactively. The password may have been "
+                            "wrong, or sudo timed out its cached credential.")
+                        self.terminal_log("✗ sudo auth failed", "error")
+                        # Drop the bad/expired cached password so the next root
+                        # command asks for it again instead of failing silently.
+                        GLib.idle_add(self._clear_sudo_pw)
+                    else:
+                        self.terminal_log(f"✓ rc={rc}",
+                                          "ok" if rc == 0 else "error")
+                    out = "\n".join(parts)
+                elif r.get("partial"):
+                    # A STALL, not a clean failure. The output collected before
+                    # it stalled is real work and goes back to the model in
+                    # full, with the diagnosis — otherwise it re-runs the whole
+                    # command and stalls in exactly the same place.
+                    parts = [f"$ {command}", "(STALLED — partial result)"]
+                    if r.get("stdout"):
+                        for line in r["stdout"].splitlines()[:80]:
+                            GLib.idle_add(lambda l=line: self.terminal_log(l, "stdout") or False)
+                        parts.append(r["stdout"])
+                    if r.get("stderr"):
+                        parts.append(f"stderr:\n{r['stderr']}")
+                    if r.get("diagnosis"):
+                        parts.append(f"\n[stall diagnosis]\n{r['diagnosis']}")
+                    self.terminal_log(
+                        f"⏸ stalled after {r.get('elapsed_s', '?')}s — kept "
+                        f"{len(r.get('stdout') or '')} chars of output", "error")
+                    out = "\n".join(parts)
+                else:
+                    out = f"$ {command}\nerror: {r.get('error')}"
+                    self.terminal_log(f"✗ {r.get('error')}", "error")
+                feed(out)
+            self._tool_thread(_bg, f"run {command.strip().split()[0]}"
+                              if command.strip() else "run")
+
+        def decide(allow, password=None):
+            if not allow:
+                self._feed_tool_result(f"operator declined: {command}")
+                return
+            run_bg(password)
+
+        # Sudo password: held in an in-app cache, entered ONCE per chat, reused
+        # silently for 30 minutes, then asked again; wiped on a new chat. The
+        # password lives only in memory and is passed straight to sudo — never
+        # logged, stored, or shown to the model.
+        sudo_needed = command_needs_sudo(command)
+        reason_txt = reason or "no reason"
+        # ── NO CONFIRMATION. Basilisk is autonomous, full stop. ──
+        # There is no "confirm every command", no approval card, no mode. Every
+        # command just runs. The ONLY two exceptions, and neither is a
+        # "may I?" prompt:
+        #   1. Catastrophic/system-destroying commands are REFUSED (already
+        #      hard-blocked at the top of this method) — a hard floor, no dialog.
+        #   2. A raw shell write to Basilisk's OWN source is refused too, so a
+        #      malicious page/tool can't overwrite the safety code — also no
+        #      dialog, just refused.
+        # The one dialog that can appear is to COLLECT A SUDO PASSWORD, once per
+        # chat, when a root command has no valid cached credential.
+        if command_tampers_self(command):
+            self.terminal_log("■ refused — raw write to Basilisk's own source "
+                              "(use the guarded edit path)", "error")
+            self._activity_note(
+                "REFUSED: raw write to Basilisk's own source", "gate")
+            self._feed_tool_result(
+                "REFUSED — this command writes directly to one of Basilisk's own "
+                "source files, bypassing the guarded edit path. Not run (this "
+                "protects the safety code from being overwritten). Use propose_edit "
+                "/ write_file for legitimate self-edits.\n\n  " + command)
+            return
+        if sudo_needed:
+            if self._sudo_pw_valid():
+                # Cached this chat and still inside the 30-min window — run silently.
+                self.terminal_log("• using cached sudo credential (this chat)", "dim")
+                run_bg(self._sudo_pw)
+            else:
+                # Never entered this chat, or the 30-min cache expired: ask once,
+                # cache it for this chat, then run.
+                self._clear_sudo_pw()
+
+                def _decide_and_cache(allow, password=None):
+                    if allow and password:
+                        self._cache_sudo_pw(password)
+                    decide(allow, password)
+                confirm_command_dialog(self, command, reason_txt,
+                                       _decide_and_cache, catastrophic=False)
+        else:
+            run_bg(None)
+
+    def _tool_audit(self):
+        self._show_toast("Auditing…")
+        def _bg(feed):
+            def _prog(title, done, total):
+                self.terminal_log(f"[{done}/{total}] {title}", "info")
+            audit = run_security_audit(on_progress=_prog)
+            text = format_audit_for_chat(audit)
+            self.terminal_log(f"✓ audit complete — grade {audit.get('grade')}", "ok")
+            feed(text)
+        self._tool_thread(_bg, "audit")
+
+    def _tool_scan_net(self, cidr=None):
+        self._show_toast("Scanning network…")
+        def _bg(feed):
+            def _prog(msg):
+                self.terminal_log(f"nmap: {msg}", "info")
+            scan = run_network_scan(cidr, on_progress=_prog)
+            text = format_scan_for_chat(scan)
+            if scan.get("ok"):
+                self.terminal_log(f"✓ scan complete — "
+                                  f"{len(scan.get('hosts', []))} hosts", "ok")
+            else:
+                self.terminal_log(f"✗ scan failed: {scan.get('error')}",
+                                  "error")
+            feed(text)
+        self._tool_thread(_bg, "scan_net")
+
+    # ── user-initiated chip actions ─────────────────────────────
+
+    def _is_busy(self) -> bool:
+        """True when an assistant turn or tool call is in flight."""
+        if self.streaming_thread and self.streaming_thread.is_alive():
+            return True
+        if self.streaming_msg_widget is not None:
+            return True
+        if self.streaming_chat_id is not None:
+            return True
+        # A kick already queued IS the turn, even though every field above
+        # has been cleared in preparation for it. Without this the app
+        # answers "idle" for up to a minute of error back-off and accepts a
+        # second turn on top of the one already coming.
+        if getattr(self, "_pending_kick_id", 0):
+            return True
+        return False
+
+    def _begin_chip_action(self) -> bool:
+        """Snapshot the current chat for an upcoming chip-triggered tool
+        and switch the primary button to Stop.  Returns False if busy."""
+        if self._is_busy():
+            self._show_toast("Already busy — stop the current task first.")
+            return False
+        self._stop_requested = False
+        # Capture the chat NOW so that when the async tool finishes and
+        # _feed_tool_result fires (could be many seconds later), the
+        # result lands in the chat the user clicked from, not whichever
+        # they happen to be looking at when the result arrives.
+        if self.current_chat_id is None:
+            self._new_chat()
+        self.streaming_chat_id = self.current_chat_id
+        self._tool_chain_depth = 0
+        self._set_working(True, "working…")
+        self._set_send_mode(True)
+        return True
+
+    def _maybe_set_title_from_first(self, chat_id: int, first_text: str):
+        """If this is the first user message in the chat, derive a title
+        from it.  Called from both regular send and chip actions."""
+        if self.store.count_messages_by_role(chat_id, "user") == 1:
+            title = title_from_first_message(first_text)
+            self.store.rename_chat(chat_id, title)
+            if chat_id == self.current_chat_id:
+                self.chat_title_lbl.set_text(title)
+                # Auto-titling from the first message renames the open
+                # document, so the window title has to follow it too.
+                try:
+                    self.set_title(f"{title} - {APP_NAME}")
+                except Exception:
+                    pass
+            self._refresh_sidebar()
+
+    def _inject_user_request(self, text: str):
+        if self.current_chat_id is None:
+            self._new_chat()
+        cid = self.current_chat_id
+        # First message of this chat freezes its reasoning depth. Done BEFORE
+        # the message is stored, so _effort_locked (which counts messages) is
+        # still answering for an unstarted chat when the level is read.
+        self._latch_effort(cid)
+        self.store.add_message(cid, "user", text)
+        self._append_message_widget("user", text)
+        # ONE feed for this whole turn, however many round-trips it takes.
+        self._activity_new_turn()
+        self._maybe_set_title_from_first(cid, text)
+
+    def _user_action_audit(self):
+        if not self._begin_chip_action(): return
+        self._inject_user_request("Audit my system and tell me what to fix.")
+        self._tool_audit()
+
+    def _user_action_scan(self):
+        if not self._begin_chip_action(): return
+        self._inject_user_request("Scan the local network.")
+        self._tool_scan_net()
+
+    def _user_action_sysinfo(self):
+        if not self._begin_chip_action(): return
+        self._inject_user_request("Give me a system overview.")
+        self._tool_simple(tool_system_info)
+
+    def _user_action_updates(self):
+        if not self._begin_chip_action(): return
+        self._inject_user_request("What security updates are pending?")
+        self._tool_simple(tool_check_updates)
+
+    def _user_action_downloads(self):
+        if not self._begin_chip_action(): return
+        self._inject_user_request("What's in my Downloads recently?")
+        self._tool_simple(lambda: tool_recent_downloads(20))
+
+    def _user_action_camera(self):
+        """Capture a photo off-thread, then drop it into the composer as an
+        image so it renders and Basilisk can see it with analyze_image."""
+        self._show_toast("Taking a photo…")
+
+        def _bg():
+            r = tool_capture_photo()
+            GLib.idle_add(lambda: self._finish_camera(r) or False)
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _finish_camera(self, r):
+        if not r.get("ok"):
+            self._show_toast(r.get("error", "Camera failed"))
+            return False
+        path = r.get("path", "")
+        buf = self.input_view.get_buffer()
+        cur = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
+        ref = f"![photo](file://{path})"
+        prompt = "What do you see in this photo?"
+        new = (f"{cur}\n{ref}\n{prompt}" if cur.strip()
+               else f"{ref}\n{prompt}")
+        buf.set_text(new)
+        self._show_toast("Photo captured")
+        return False
+
+    # ── ATTACHMENT TRAY ─────────────────────────────────────────
+    # Attachments used to be pasted INTO the composer: a 40KB text file became
+    # 40KB of text in the box you are trying to type in, and an image became a
+    # line of raw markdown. You could not see your own message, editing it
+    # meant editing around the payload, and removing an attachment meant
+    # hand-deleting the right fence.
+    #
+    # They live ABOVE the composer now, as chips. The message you type stays
+    # the message you type; the payload is folded in at SEND, in exactly the
+    # form the old code produced — so what reaches the model and what is
+    # stored are byte-for-byte what they were before. This is a composer
+    # change only, deliberately: the send path is not where you want a
+    # surprise.
+
+    _ATTACH_MAX_CHIP_NAME = 28
+
+    def _build_attach_tray(self) -> Gtk.Widget:
+        self.attach_tray = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                   spacing=6)
+        self.attach_tray.add_css_class("attach-tray")
+        # Horizontal scroller for the same reason the action chips have one: a
+        # narrow window must scroll them, never be forced wider than the screen.
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        scroll.set_propagate_natural_height(True)
+        scroll.set_kinetic_scrolling(True)
+        scroll.set_overlay_scrolling(True)
+        scroll.set_child(self.attach_tray)
+        self._attach_revealer = Gtk.Revealer()
+        self._attach_revealer.set_transition_type(
+            Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self._attach_revealer.set_transition_duration(150)
+        self._attach_revealer.set_child(scroll)
+        self._attach_revealer.set_reveal_child(False)
+        return self._attach_revealer
+
+    def _attach_add(self, kind: str, path: str, payload: str):
+        """Record one attachment and draw its chip. `payload` is the exact text
+        this attachment will contribute to the sent message."""
+        self._attachments.append(
+            {"kind": kind, "path": path, "payload": payload})
+        self._refresh_attach_tray()
+
+    def _refresh_attach_tray(self):
+        tray = getattr(self, "attach_tray", None)
+        if tray is None:
+            return
+        child = tray.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            tray.remove(child)
+            child = nxt
+        for i, att in enumerate(list(self._attachments)):
+            tray.append(self._attach_chip(i, att))
+        self._attach_revealer.set_reveal_child(bool(self._attachments))
+
+    def _attach_chip(self, idx: int, att: Dict[str, Any]) -> Gtk.Widget:
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=7)
+        row.add_css_class("attach-chip")
+        row.add_css_class("image" if att["kind"] == "image" else "file")
+
+        icon = Gtk.Label(label="IMG" if att["kind"] == "image" else "TXT")
+        icon.add_css_class("attach-chip-kind")
+        row.append(icon)
+
+        name = os.path.basename(att["path"]) or att["path"]
+        if len(name) > self._ATTACH_MAX_CHIP_NAME:
+            # Middle-elide by hand: the EXTENSION is the part that says what
+            # the file is, so a plain end-ellipsis throws away the useful half.
+            keep = self._ATTACH_MAX_CHIP_NAME - 3
+            name = name[:keep // 2] + "..." + name[-(keep - keep // 2):]
+        lbl = Gtk.Label(label=name, xalign=0.0)
+        lbl.add_css_class("attach-chip-name")
+        row.append(lbl)
+
+        size = ""
+        try:
+            n = os.path.getsize(att["path"])
+            size = ("%d B" % n if n < 1024 else
+                    "%.0f KB" % (n / 1024) if n < 1024 * 1024 else
+                    "%.1f MB" % (n / (1024 * 1024)))
+        except Exception:
+            size = ""
+        if size:
+            sl = Gtk.Label(label=size)
+            sl.add_css_class("attach-chip-size")
+            row.append(sl)
+
+        rm = Gtk.Button(label="×")          # MULTIPLICATION SIGN
+        rm.add_css_class("attach-chip-remove")
+        rm.set_has_frame(False)
+        rm.set_tooltip_text("Remove this attachment")
+        rm.connect("clicked", lambda *_a, i=idx: self._attach_remove(i))
+        row.append(rm)
+        return row
+
+    def _attach_remove(self, idx: int):
+        # Index into a list that is rebuilt on every refresh, so a stale chip
+        # can only ever point past the end — never at the wrong file.
+        if 0 <= idx < len(self._attachments):
+            self._attachments.pop(idx)
+            self._refresh_attach_tray()
+
+    def _attach_clear(self):
+        self._attachments = []
+        self._refresh_attach_tray()
+
+    def _drain_attachments(self) -> str:
+        """The text the pending attachments contribute, and clear them.
+
+        Byte-identical to what the old in-composer version produced, so the
+        stored message, the rendered bubble and what the model reads are all
+        exactly what they were before the tray existed."""
+        if not self._attachments:
+            return ""
+        parts = [a["payload"] for a in self._attachments]
+        self._attach_clear()
+        return "\n".join(parts)
+
+    def _pick_attachment(self):
+        # Gtk.FileDialog is GTK 4.10+.  On an older GTK it doesn't
+        # exist, so the attach button silently did nothing — fall back to
+        # FileChooserNative there so attaching works on every device.
+        if hasattr(Gtk, "FileDialog"):
+            try:
+                dlg = Gtk.FileDialog()
+                dlg.set_title("Attach file or image")
+
+                def _cb(d, res):
+                    try:
+                        f = d.open_finish(res)
+                        if f:
+                            self._attach_file(f.get_path())
+                    except Exception:
+                        pass
+                dlg.open(self, None, _cb)
+                return
+            except Exception as e:
+                log(f"FileDialog failed, falling back: {e}")
+        try:
+            chooser = Gtk.FileChooserNative.new(
+                "Attach file or image", self,
+                Gtk.FileChooserAction.OPEN, "Attach", "Cancel")
+
+            def _resp(c, resp):
+                try:
+                    if resp == Gtk.ResponseType.ACCEPT:
+                        f = c.get_file()
+                        if f:
+                            self._attach_file(f.get_path())
+                finally:
+                    c.destroy()
+            chooser.connect("response", _resp)
+            chooser.show()
+        except Exception as e:
+            self._show_toast(f"Could not open file picker: {e}")
+
+    # image types Basilisk can SHOW inline (rendered by ImageWidget)
+    _ATTACH_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp",
+                          ".bmp", ".svg"}
+
+    def _attach_file(self, path):
+        if not path:
+            self._show_toast("Could not get file path.")
+            return
+        ext = os.path.splitext(path)[1].lower()
+        if ext in self._ATTACH_IMAGE_EXTS:
+            # Markdown pointing at the local file, so it renders inline in the
+            # chat (ImageWidget handles file:// URLs) instead of being read as
+            # binary garbage. Staged as a chip; folded in at send.
+            name = os.path.basename(path)
+            self._attach_add("image", path, f"![{name}](file://{path})")
+            self._show_toast(f"Attached image: {name}")
+            return
+        # Text-like file: read its contents into the message.
+        def _bg():
+            r = tool_read_file(path, max_bytes=40_000)
+            GLib.idle_add(self._finish_attach, path, r)
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _finish_attach(self, path, r):
+        if not r.get("ok"):
+            self._show_toast(f"Read error: {r.get('error')}")
+            return False
+        body = r["content"]
+        self._attach_add("file", path,
+                         f"[attached: {path}]\n```\n{body}\n```")
+        self._show_toast(f"Attached: {os.path.basename(path)}")
+        return False
+
+    # ── history ─────────────────────────────────────────────────
+
+    def _trim_tool_result(self, content: str) -> str:
+        """Shrink an older, already-consumed tool_result so a long research
+        chat doesn't re-bill the full (sometimes huge) output every turn.
+
+        This is a SECOND, INDEPENDENT compression layer — headroom runs in the
+        router, this runs while building history — and the two do not know
+        about each other.  Fixing one leaves the other, which is why a page
+        could still arrive gutted after headroom was taught to skip web_read.
+
+        Two things were wrong beyond the size:
+
+          * It cut at a byte offset with no regard for structure, so a JSON
+            result was left with an unterminated string and a synthesised
+            `</tool_result>` glued on.  The model got malformed JSON and no
+            indication that it was malformed rather than genuinely short.
+          * Head-only.  A document's conclusion — the redress, the deadline,
+            the verdict — lives at the END, so a head-only cut reliably keeps
+            the preamble and drops the answer.
+
+        The budget is unchanged; this spends it better and says clearly that
+        the block is incomplete, so the model can re-read rather than conclude
+        the source did not contain what it was looking for.
+        """
+        if len(content) <= HISTORY_TRIM_HEAD_CHARS + 200:
+            return content
+        body = content
+        closer = ""
+        if body.rstrip().endswith("</tool_result>"):
+            # Trim the BODY and put the operator's real closing tag back,
+            # rather than truncating through it and inventing a new one.
+            cut = body.rstrip()[: -len("</tool_result>")]
+            closer = "\n</tool_result>"
+            body = cut
+        head_n = int(HISTORY_TRIM_HEAD_CHARS * 0.7)
+        tail_n = HISTORY_TRIM_HEAD_CHARS - head_n
+        head = body[:head_n]
+        tail = body[-tail_n:] if tail_n > 0 else ""
+        return (f"{head}\n…[INCOMPLETE — {len(content) - HISTORY_TRIM_HEAD_CHARS}"
+                f" chars of this earlier tool output were removed to save "
+                f"tokens; {len(content)} chars originally. The middle is gone, "
+                f"not empty — re-run the tool if you need it.]\n{tail}{closer}")
+
+    def _next_provider_with_key(self) -> Optional[str]:
+        """Pick the next cloud provider (after the current active one) that
+        has an API key set.  Returns None if no other configured provider is
+        available.
+
+        RETAINED BUT NOT WIRED INTO CHAT: the degraded-output path used to
+        call this to auto-hop clouds, which silently flipped the operator's
+        selected provider (e.g. DeepSeek -> Groq) and persisted it. That is
+        gone — the active provider is now pinned to the operator's choice and
+        only the manual model switcher changes it. Do not re-wire this into
+        the chat turn loop."""
+        cur = (self.settings.get("active_provider") or "").strip()
+        keys = [p.key for p in PROVIDERS]
+        if cur in keys:
+            order = keys[keys.index(cur) + 1:] + keys[:keys.index(cur)]
+        else:
+            order = keys
+        for k in order:
+            if (self.settings.get(f"{k}_api_key") or "").strip():
+                return k
+        return None
+
+    def _build_history_for_model(self, chat_id: Optional[int] = None):
+        out = []
+        msgs = self.store.list_messages(chat_id or self.current_chat_id)
+        # Keep only the most recent few tool_result blocks at full length;
+        # trim older ones (they've already been read and acted on).
+        tr_idx = [i for i, m in enumerate(msgs)
+                  if m.role == "user"
+                  and (m.meta or {}).get("kind") == "tool_result"]
+        keep_full = set(tr_idx[-HISTORY_KEEP_FULL_TOOL_RESULTS:]) \
+            if HISTORY_KEEP_FULL_TOOL_RESULTS > 0 else set()
+
+        # ── TRIM ON A WATERMARK, NOT A SLIDING WINDOW ──
+        # `keep_full` above is a sliding window, and a sliding window rewrites a
+        # message in the MIDDLE of the request on EVERY turn: the tool result
+        # that was sent in full last turn is sent trimmed this turn. Prefix
+        # caching cannot survive that. DeepSeek is explicit that "partial
+        # matches in the middle of the input will not trigger a cache hit", and
+        # Groq's matcher stops at the first differing byte just the same. The
+        # message it rewrites sits a few places from the end, so what got thrown
+        # away every turn was the largest and most expensive part of the
+        # history — the full-length recent tool results.
+        #
+        # Note the direction that actually helps: it is NOT "once trimmed,
+        # always trimmed" (the trimming IS the mutation, so that changes
+        # nothing). It is "once sent in full, KEEP sending it in full" — that
+        # makes the request strictly append-only and the whole head cacheable.
+        #
+        # Kept in full forever would grow without bound, which is why the
+        # trimming exists at all. So the two pressures are resolved by
+        # AMORTISING the mutation: hold the render stable until the history
+        # actually exceeds a size budget, then advance a watermark once and stay
+        # stable again for many turns. One cache miss occasionally instead of
+        # one every single turn.
+        _wm = getattr(self, "_trim_watermark", None)
+        if _wm is None:
+            _wm = self._trim_watermark = {}
+        _key = chat_id or self.current_chat_id
+        _mark = _wm.get(_key, 0)
+
+        # Size measured on what would actually be SENT, not on the raw store.
+        # Measuring the store instead is a trap: it only ever grows, so the
+        # "over budget" condition would latch true forever and the watermark
+        # would creep forward one place every turn — a sliding window again,
+        # exactly what this replaces.
+        _max_mark = max(0, len(tr_idx) - HISTORY_KEEP_FULL_TOOL_RESULTS)
+
+        def _rendered_size(mark: int) -> int:
+            trimmed = set(tr_idx[:mark])
+            total = 0
+            for _j, _m in enumerate(msgs):
+                _c = _m.content or ""
+                total += (HISTORY_TRIM_HEAD_CHARS if _j in trimmed
+                          else len(_c))
+            return total
+
+        if _rendered_size(_mark) > HISTORY_STABLE_BUDGET_CHARS:
+            # Over budget: jump the watermark ALL THE WAY, not by one. A
+            # one-step advance puts us straight back into per-turn mutation;
+            # jumping to the maximum drops the rendered size a long way and
+            # buys many stable turns before the next advance. One occasional
+            # cache miss instead of one every turn.
+            _mark = _max_mark
+            _wm[_key] = _mark
+
+        # Trim the first `_mark` tool results (stable set, only ever grows);
+        # everything newer stays full, which keeps the tail append-only.
+        _trim_idx = set(tr_idx[:_mark])
+        keep_full = set(tr_idx) - _trim_idx
+        for i, m in enumerate(msgs):
+            kind = (m.meta or {}).get("kind")
+            if m.role == "user":
+                content = m.content
+                # The "tool-step budget reached" note is only meant to make the
+                # model finalize the turn it was raised in (and the runtime lock
+                # enforces that regardless). Never replay it into later turns —
+                # otherwise the model keeps seeing "don't call tools" and refuses
+                # to continue when the operator says "keep going", even though the
+                # budget already reset. Drop it from history.
+                if "[system note: tool-step budget reached" in content:
+                    continue
+                if kind == "tool_result" and i not in keep_full:
+                    content = self._trim_tool_result(content)
+                out.append({"role": "user", "content": content})
+            elif m.role == "assistant":
+                # Don't replay the model's own chain-of-thought back to it —
+                # reasoning belongs to the turn that produced it, can be huge,
+                # and feeding it back wastes context and can derail the next
+                # turn.  Tool tags stay (the model needs to see its prior
+                # actions); only <think> blocks are removed.
+                out.append({"role": "assistant",
+                            "content": strip_think_blocks(m.content)})
+            elif m.role == "tool":
+                if kind == "result":
+                    out.append({"role": "user", "content": m.content})
+            elif m.role == "system":
+                out.append({"role": "system", "content": m.content})
+        return out
+
+    # ── agent toggle ────────────────────────────────────────────
+
+    def _on_agent_toggled(self, btn):
+        self.current_agent_mode = btn.get_active()
+        if btn.get_active():
+            btn.add_css_class("toggled")
+        else:
+            btn.remove_css_class("toggled")
+        if self.current_chat_id is not None:
+            self.store.set_agent_mode(self.current_chat_id,
+                                       self.current_agent_mode)
+        self._refresh_subtitle()
+
+    def _paint_unleash(self, btn, armed: bool):
+        """The LOOK of the Unleash control, and nothing else.
+
+        Split out of the toggle handler so restoring a chat's session can put
+        the button back into the right state without also re-running the arm
+        side effects (saving settings, forcing agent mode, toasting, standing
+        a mission down). Redrawing is not arming."""
+        lbl = getattr(btn, "_unleash_label", None)
+        if armed:
+            btn.add_css_class("toggled")
+            if lbl is not None:
+                lbl.set_text("UNLEASHED")
+            btn.set_tooltip_text(
+                "UNLEASHED \u2014 offensive suite armed and full autonomous. "
+                "Send an objective and it runs until complete. Click to stand "
+                "down. Applies to THIS chat only.")
+        else:
+            btn.remove_css_class("toggled")
+            if lbl is not None:
+                lbl.set_text("UNLEASH")
+            btn.set_tooltip_text(
+                "Unleash \u2014 arm the offensive suite and go full autonomous "
+                "for this chat. While off, Basilisk answers once and stops.")
+
+    def _on_unleash_toggled(self, btn):
+        """Arm/disarm Unleash — the master go-full-send switch."""
+        if self._restoring_session:
+            # A chat switch is repainting the button, not arming it.
+            return
+        self._unleashed = btn.get_active()
+        self._paint_unleash(btn, self._unleashed)
+        if self._unleashed:
+            # Unleash needs the tools and the mission loop → force agent mode on.
+            if not self.current_agent_mode:
+                self.agent_toggle.set_active(True)   # fires _on_agent_toggled
+            self.terminal_log(
+                "🔥 UNLEASHED — offensive suite armed, waiting for your objective",
+                "ok")
+            self._show_toast(
+                "Unleashed. Send an objective when you're ready.", timeout=4)
+            self._stop_requested = False
+            if self.current_chat_id is None:
+                self._new_chat()
+            # ARM ONLY — do NOT kick a turn or latch a mission here. Pressing
+            # Unleash arms the offensive suite and the mission loop and then
+            # WAITS, exactly like leashed mode waits: nothing runs until the
+            # operator actually sends an objective. The message they send next
+            # latches the mission (see _submit → "Mission latch") and kicks the
+            # turn. Auto-firing on arm — the old behaviour — made Basilisk "go
+            # off on its own" the instant the button was pressed, and made it
+            # latch a mission onto stale history the operator never re-issued.
+            self._unleash_kickoff_pending = False
+        else:
+            self._unleash_kickoff_pending = False
+            # Stand down: halt any running mission immediately.
+            self._stop_requested = True
+            self._mission_active = False
+            self.terminal_log("🧯 stood down — one answer per message now", "dim")
+            self._show_toast("Stood down. One answer per message.", timeout=3)
+        self._refresh_subtitle()
+
+    # ── menu ────────────────────────────────────────────────────
+
+    def _open_settings(self):
+        # Held so _refresh_effort_pill can keep an OPEN dialog's reasoning-depth
+        # row honest when the model or the chat changes behind it. Dropped on
+        # close so a stale dialog is never poked.
+        dlg = SettingsDialog(self)
+        self._settings_dialog = dlg
+        try:
+            dlg.connect("closed", lambda *_a: setattr(
+                self, "_settings_dialog", None))
+        except Exception:
+            pass
+        dlg.present(self)
+
+    def _open_about(self):
+        about = Adw.AboutDialog()
+        about.set_application_name(APP_NAME)
+        about.set_version(VERSION)
+        about.set_developer_name("The Priest")
+        about.set_comments(
+            "Personal, loyal AI assistant.\n"
+            "Multi-provider cloud AI · lives on your hardware.")
+        about.set_license_type(Gtk.License.MIT_X11)
+        about.present(self)
+
+    def _rename_current_chat(self):
+        if not self.current_chat_id:
+            return
+        chat = self.store.get_chat(self.current_chat_id)
+        if not chat:
+            return
+        dlg = Adw.AlertDialog.new("Rename chat", "")
+        entry = Gtk.Entry()
+        entry.set_text(chat.title)
+        dlg.set_extra_child(entry)
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("ok", "Rename")
+        dlg.set_default_response("ok")
+        def _cb(d, response):
+            if response == "ok":
+                new = entry.get_text().strip() or chat.title
+                self.store.rename_chat(self.current_chat_id, new)
+                self.chat_title_lbl.set_text(new)
+                self._refresh_sidebar()
+        dlg.connect("response", _cb)
+        dlg.present(self)
+
+    def _delete_current_chat(self):
+        if not self.current_chat_id:
+            return
+        dlg = Adw.AlertDialog.new("Delete chat?", "Can't undo.")
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("delete", "Delete")
+        dlg.set_response_appearance("delete",
+                                     Adw.ResponseAppearance.DESTRUCTIVE)
+        dlg.set_default_response("cancel")
+        dlg.set_close_response("cancel")
+
+        def _cb(d, response):
+            if response != "delete":
+                return
+            deleted_id = self.current_chat_id
+
+            # If the chat being deleted has a turn in flight, cancel it
+            # so it doesn't try to write to a now-gone chat row.
+            if self.streaming_chat_id == deleted_id:
+                if self.streaming_cancel:
+                    self.streaming_cancel.set()
+                self._stop_requested = True
+                self.streaming_msg_widget = None
+                self.streaming_msg_db_id = None
+                self.streaming_chat_id = None
+                self._tool_chain_depth = 0
+                self._set_working(False)
+                self._set_send_mode(False)
+
+            self.store.delete_chat(deleted_id)
+            self._forget_session(deleted_id)
+            self._forget_chat_effort(deleted_id)
+            self.current_chat_id = None
+
+            # Pick the next-most-recent chat to display, if any.  Only
+            # spawn a fresh one when there are literally no chats left.
+            remaining = self.store.list_chats(limit=1)
+            if remaining:
+                self._load_chat(remaining[0].id)
+            else:
+                # No chats at all — clear the view and let the user
+                # start fresh whenever they want via the + button.
+                child = self.msg_box.get_first_child()
+                while child is not None:
+                    nxt = child.get_next_sibling()
+                    self.msg_box.remove(child)
+                    child = nxt
+                self.chat_title_lbl.set_text("No chat")
+                self.chat_subtitle_lbl.set_text("Tap + to start a new chat")
+                self._show_empty_state()
+
+            self._refresh_sidebar()
+
+        dlg.connect("response", _cb)
+        dlg.present(self)
+
+    def _toggle_pin_current(self):
+        if not self.current_chat_id:
+            return
+        chat = self.store.get_chat(self.current_chat_id)
+        if not chat:
+            return
+        self.store.set_pinned(self.current_chat_id, not bool(chat.pinned))
+        self._refresh_sidebar()
+
+    # ── watcher event handler ──────────────────────────────────
+
+    def _on_watcher_event(self, event):
+        # Persist the event so it survives in the notification inbox (the bell),
+        # AND fire a real desktop notification — not just the transient banner,
+        # which vanishes after 15s and is missed if you're not looking.
+        _title = (event.get("title", "") or "Basilisk").strip()
+        _detail = (event.get("detail", "") or "").strip()
+        try:
+            self._add_notification(_title, _detail)
+        except Exception:
+            pass
+        try:
+            self._desktop_notify(_title, _detail, nid="basilisk-watcher")
+        except Exception:
+            pass
+
+        # banner appears at top of chat area
+        def _ui():
+            banner = Gtk.Label()
+            banner.add_css_class("watcher-banner")
+            banner.set_xalign(0.0)
+            banner.set_wrap(True)
+            # Escape user-controlled strings (filenames, journal lines)
+            # before composing pango markup, or set_markup will reject
+            # invalid input and the banner won't render.
+            title = GLib.markup_escape_text(event.get("title", ""))
+            detail = GLib.markup_escape_text(event.get("detail", ""))
+            try:
+                banner.set_markup(f"<b>{title}</b>\n{detail}")
+            except Exception:
+                # Final fallback if markup still fails for any reason
+                banner.set_text(f"{event.get('title','')}\n{event.get('detail','')}")
+            self.banner_box.append(banner)
+            # auto-remove after 15s
+            GLib.timeout_add_seconds(15,
+                lambda: (self.banner_box.remove(banner)
+                          if banner.get_parent() else None) or False)
+            return False
+        GLib.idle_add(_ui)
+
+    # ── terminal log panel ──────────────────────────────────────
+
+    def _toggle_terminal_panel(self, *_):
+        self._terminal_visible = not self._terminal_visible
+        self.terminal_panel.set_visible(self._terminal_visible)
+        if self._terminal_visible:
+            self.terminal_toggle_btn.add_css_class("active")
+            GLib.idle_add(self._terminal_scroll_to_bottom)
+        else:
+            self.terminal_toggle_btn.remove_css_class("active")
+
+    def _clear_terminal_log(self, *_):
+        self.terminal_log_buf.set_text("")
+        self._terminal_turn_offsets = []
+        self.terminal_status_lbl.set_text("cleared")
+
+    def _terminal_scroll_to_bottom(self):
+        adj = self.terminal_log_view.get_parent()
+        if adj is None:
+            return False
+        try:
+            # Walk up to find the ScrolledWindow
+            parent = self.terminal_log_view.get_parent()
+            while parent and not isinstance(parent, Gtk.ScrolledWindow):
+                parent = parent.get_parent()
+            if parent:
+                a = parent.get_vadjustment()
+                if a:
+                    a.set_value(a.get_upper())
+        except Exception:
+            pass
+        return False
+
+    def terminal_log(self, text: str, kind: str = "info"):
+        """Append a line to the terminal log panel.  Thread-safe via GLib.idle_add."""
+        text = text if isinstance(text, str) else str(text)
+        # Truncate a monster single line (a full HTTP body / base64 blob) BEFORE
+        # it enters the buffer — otherwise the line-count cap never trips and the
+        # buffer grows in bytes without bound during a pentest run.
+        if len(text) > MAX_TERMINAL_LINE_CHARS:
+            text = (text[:MAX_TERMINAL_LINE_CHARS]
+                    + "  …[+%d bytes truncated]" % (len(text) - MAX_TERMINAL_LINE_CHARS))
+
+        def _ui():
+            try:
+                buf = self.terminal_log_buf
+                # Turn tracking: each "$ cmd" line starts a new command-block.
+                # Keep only the last MAX_TERMINAL_TURNS; delete older blocks
+                # outright so their text leaves the buffer (and RAM).
+                if kind == "cmd":
+                    offs = getattr(self, "_terminal_turn_offsets", None)
+                    if offs is None:
+                        offs = []
+                        self._terminal_turn_offsets = offs
+                    offs.append(buf.get_char_count())
+                    if len(offs) > MAX_TERMINAL_TURNS:
+                        cut_off = offs[-MAX_TERMINAL_TURNS]
+                        if cut_off > 0:
+                            buf.delete(buf.get_start_iter(),
+                                       buf.get_iter_at_offset(cut_off))
+                        # shift remaining boundaries down by what we removed
+                        self._terminal_turn_offsets = [
+                            o - cut_off for o in offs if o >= cut_off]
+                buf.insert_with_tags_by_name(buf.get_end_iter(), text + "\n", kind)
+                # Backstop rolling window — bound BOTH lines and bytes. These also
+                # delete from the FRONT, so track how much and shift the turn
+                # offsets by the same amount (otherwise they'd point to the wrong
+                # place and a later turn-trim could wipe the buffer). The byte cap
+                # uses get_iter_at_offset (a plain iter, always succeeds).
+                deleted = 0
+                try:
+                    n = buf.get_line_count()
+                    if n > MAX_TERMINAL_LINES:
+                        res = buf.get_iter_at_line(n - MAX_TERMINAL_LINES)
+                        cut = res[1] if isinstance(res, tuple) else res
+                        deleted += cut.get_offset()
+                        buf.delete(buf.get_start_iter(), cut)
+                except Exception:
+                    pass
+                over = buf.get_char_count() - MAX_TERMINAL_CHARS
+                if over > 0:
+                    buf.delete(buf.get_start_iter(), buf.get_iter_at_offset(over))
+                    deleted += over
+                if deleted:
+                    _offs = getattr(self, "_terminal_turn_offsets", None)
+                    if _offs:
+                        self._terminal_turn_offsets = [
+                            o - deleted for o in _offs if o >= deleted]
+                self.terminal_status_lbl.set_text(text[:40].strip() or "…")
+                GLib.idle_add(self._terminal_scroll_to_bottom)
+            except Exception:
+                pass
+            return False
+        GLib.idle_add(_ui)
+
+    def terminal_log_and_show(self, text: str, kind: str = "cmd"):
+        """Log and auto-reveal the panel so the operator can see live output.
+        Thread-safe: terminal_log already defers its whole body to the main
+        loop, but the reveal below touches widgets directly, so it is queued
+        the same way. Without this, the first worker thread to call this
+        helper would mutate GTK off the main loop and segfault. Queuing the
+        reveal BEFORE the log call preserves ordering — idle callbacks run in
+        the order they were added."""
+        def _reveal():
+            if not self._terminal_visible:
+                self._terminal_visible = True
+                self.terminal_panel.set_visible(True)
+                self.terminal_toggle_btn.add_css_class("active")
+            return False
+        GLib.idle_add(_reveal)
+        self.terminal_log(text, kind)
+
+    # ── toast ──────────────────────────────────────────────────
+
+    def _show_toast(self, text, timeout=3):
+        t = Adw.Toast.new(text)
+        t.set_timeout(timeout)
+        self.toast_overlay.add_toast(t)
+        return False
+
+    # ── shutdown ───────────────────────────────────────────────
+
+    def shutdown(self):
+        if self.streaming_cancel:
+            self.streaming_cancel.set()
+        if getattr(self, "tts", None):
+            try:
+                self.tts.stop()
+            except Exception:
+                pass
+        if getattr(self, "stt", None):
+            try:
+                self.stt.cancel()
+            except Exception:
+                pass
+        self.watcher.stop()
+        # Bin the open chat if it was never written to.
+        if (self.settings.get("discard_empty_chats", True)
+                and self.current_chat_id is not None):
+            try:
+                if self.store.count_messages(self.current_chat_id) == 0:
+                    self.store.delete_chat(self.current_chat_id)
+                    self._forget_session(self.current_chat_id)
+                    self._forget_chat_effort(self.current_chat_id)
+            except Exception:
+                pass
+        try:
+            self.store.close()
+        except Exception:
+            pass
+
+
+# ═════════════════════════════════════════════════════════════════════
+# APPLICATION
+# ═════════════════════════════════════════════════════════════════════
+
+class DragonSplash(Gtk.Window):
+    """Startup splash: the chat-background dragon, dark, with a band of light
+    that sweeps UP from the bottom to its head — when the light reaches the top
+    the whole dragon is lit, then it fades and the main window opens behind it.
+
+    Entirely self-guarding: every path is wrapped so that ANY failure (no cairo,
+    no pixbuf, a draw error, an old GTK) just fires on_done and closes, so the
+    app always opens normally. It is NEVER allowed to wedge startup.
+
+    THE `import cairo` PROBE BELOW IS LOAD-BEARING, AND THE try/except INSIDE
+    _draw DOES NOT COVER IT. When pycairo is absent, PyGObject cannot marshal
+    the Gtk.Snapshot's cairo context into the Python callback at all: it raises
+    `TypeError: Couldn't find foreign struct converter for 'cairo.Context'` in
+    the BINDING layer, before a single line of _draw runs. So _draw's own
+    try/except never sees it, the splash paints nothing, and stderr gets that
+    line at 60fps for the whole animation. Measured in this sandbox, which has
+    GTK4 but no pycairo — exactly the shape of a box that installed via
+    install.sh, because that script installs python3-gi/gtk4/libadwaita and
+    (until now) never installed the cairo binding.
+
+    The claim in this docstring was false for the one failure mode it names.
+    Probing up front is what makes it true."""
+
+    def __init__(self, app, image_path, on_done):
+        super().__init__(application=app)
+        self.on_done = on_done
+        self._done = False
+        self._tick_id = 0
+        try:
+            self.set_decorated(False)
+            self.set_resizable(False)
+            self.add_css_class("splash-window")
+        except Exception:
+            pass
+        self._side = 460
+        self.set_default_size(self._side, self._side)
+        # Raise BEFORE building the DrawingArea if the binding cannot deliver a
+        # cairo context — the caller already treats a raise here as "skip the
+        # splash", which is the correct and only graceful outcome.
+        import cairo as _cairo_probe          # noqa: F401
+        self._pb = GdkPixbuf.Pixbuf.new_from_file(image_path)  # may raise → caught by caller
+        self.area = Gtk.DrawingArea()
+        self.area.set_content_width(self._side)
+        self.area.set_content_height(self._side)
+        self.area.set_draw_func(self._draw)
+        self.set_child(self.area)
+        import time
+        self._t0 = time.monotonic()
+        self._sweep = 0.95   # seconds: light travels bottom → head
+        self._hold = 0.40    # fully lit, held
+        self._fade = 0.35    # fade out to reveal the app
+        self._tick_id = GLib.timeout_add(16, self._tick)
+
+    def _elapsed(self) -> float:
+        import time
+        return time.monotonic() - self._t0
+
+    def _tick(self):
+        if self._elapsed() >= self._sweep + self._hold + self._fade:
+            self._finish()
+            return False
+        try:
+            self.area.queue_draw()
+        except Exception:
+            self._finish()
+            return False
+        return True
+
+    def _finish(self):
+        if self._done:
+            return
+        self._done = True
+        try:
+            if self._tick_id:
+                GLib.source_remove(self._tick_id)
+        except Exception:
+            pass
+        self._tick_id = 0
+        try:
+            self.on_done()
+        except Exception:
+            pass
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _draw(self, area, cr, w, h):
+        try:
+            import cairo
+            # dark backdrop (matches app chrome)
+            cr.set_source_rgb(0.055, 0.063, 0.075)
+            cr.paint()
+            pb = self._pb
+            iw, ih = pb.get_width(), pb.get_height()
+            scale = min(w / iw, h / ih)
+            dw, dh = iw * scale, ih * scale
+            ox, oy = (w - dw) / 2.0, (h - dh) / 2.0
+
+            t = self._elapsed()
+            sweep = min(1.0, t / self._sweep) if self._sweep > 0 else 1.0
+            prog = sweep * sweep * (3.0 - 2.0 * sweep)      # smoothstep ease
+            flash_y = oy + dh * (1.0 - prog)                # bottom → top
+
+            def blit(alpha=1.0):
+                cr.save()
+                cr.translate(ox, oy)
+                cr.scale(scale, scale)
+                Gdk.cairo_set_source_pixbuf(cr, pb, 0, 0)
+                cr.paint_with_alpha(alpha)
+                cr.restore()
+
+            # 1) dark dragon everywhere
+            blit(1.0)
+            cr.save()
+            cr.rectangle(ox, oy, dw, dh)
+            cr.clip()
+            cr.set_source_rgba(0, 0, 0, 0.78)
+            cr.paint()
+            cr.restore()
+
+            # 2) lit region below the flash line: full-bright dragon + warm ignite
+            lit_h = (oy + dh) - flash_y
+            if lit_h > 0:
+                cr.save()
+                cr.rectangle(ox, flash_y, dw, lit_h)
+                cr.clip()
+                blit(1.0)
+                cr.set_operator(cairo.OPERATOR_ADD)
+                cr.set_source_rgba(0.06, 0.36, 0.55, 0.15)
+                cr.rectangle(ox, flash_y, dw, lit_h)
+                cr.fill()
+                cr.set_operator(cairo.OPERATOR_OVER)
+                cr.restore()
+
+            # 3) the travelling flash band
+            if 0.0 < prog < 1.0:
+                band = 32.0
+                grad = cairo.LinearGradient(0, flash_y - band, 0, flash_y + band)
+                grad.add_color_stop_rgba(0.0, 0.90, 0.22, 0.12, 0.0)
+                grad.add_color_stop_rgba(0.5, 1.00, 0.55, 0.38, 0.60)
+                grad.add_color_stop_rgba(1.0, 0.90, 0.22, 0.12, 0.0)
+                cr.save()
+                cr.rectangle(ox, flash_y - band, dw, band * 2.0)
+                cr.clip()
+                cr.set_operator(cairo.OPERATOR_ADD)
+                cr.set_source(grad)
+                cr.paint()
+                cr.restore()
+
+            # 4) fade out at the end to reveal the app underneath
+            if t > self._sweep + self._hold:
+                fp = (t - self._sweep - self._hold) / self._fade
+                fp = max(0.0, min(1.0, fp))
+                cr.set_source_rgba(0.055, 0.063, 0.075, fp)
+                cr.paint()
+        except Exception:
+            GLib.idle_add(self._finish)
+
+
+class BasiliskApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID,
+                          flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+        self.win: Optional[MainWindow] = None
+        # Hold the CSS provider so we can rebuild it live when the
+        # user moves the UI-scale slider in Settings.  Without this
+        # the user has to restart Basilisk to see scale changes.
+        self.css_provider: Optional[Gtk.CssProvider] = None
+
+    def do_startup(self):
+        Adw.Application.do_startup(self)
+        self.css_provider = Gtk.CssProvider()
+        global _UI_SCALE
+        _UI_SCALE = _detect_ui_scale()
+        # AFTER scale is set, derive viewport-dependent metrics.
+        _compute_viewport_metrics()
+        self.css_provider.load_from_data(_scale_css(CSS, _UI_SCALE))
+        log(f"ui_scale = {_UI_SCALE:.2f}")
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), self.css_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        Adw.StyleManager.get_default().set_color_scheme(
+            Adw.ColorScheme.FORCE_DARK)
+
+    def reload_css(self, scale: float):
+        """Apply a new UI scale without restart.  Called from the
+        Settings UI-scale slider.  GTK4's CssProvider re-resolves
+        styles on widgets when load_from_data is called again, so
+        the change is visible immediately."""
+        global _UI_SCALE
+        if scale and 0.3 < scale < 3:
+            _UI_SCALE = float(scale)
+        else:
+            # 0 (or out-of-range) means "use auto-detect"
+            _UI_SCALE = _detect_ui_scale()
+        try:
+            self.css_provider.load_from_data(_scale_css(CSS, _UI_SCALE))
+            log(f"ui_scale reloaded → {_UI_SCALE:.2f}")
+        except Exception as e:
+            log(f"reload_css failed: {e}")
+
+    def do_activate(self):
+        # Already running (second activation) → just present the window.
+        if self.win:
+            self.win.present()
+            return
+
+        def _open_main():
+            if not self.win:
+                self.win = MainWindow(self)
+            self.win.present()
+
+        # Startup splash — the chat-background dragon lighting up bottom → head.
+        # Fully optional and self-guarding: gated by a setting (default on), only
+        # runs on a raster dragon image, and ANY failure falls straight through
+        # to opening the app. Can't visually test it here (no display), so it is
+        # wrapped to never block startup.
+        want_splash = True
+        try:
+            want_splash = bool(load_settings().get("startup_splash", True))
+        except Exception:
+            want_splash = True
+        if want_splash:
+            try:
+                img = _WATERMARK_SVG_PATH or _AVATAR_PNG_PATH
+                if img and img.lower().endswith(".png") and os.path.isfile(img):
+                    DragonSplash(self, img, _open_main).present()
+                    return
+            except Exception as e:
+                log(f"startup splash failed, opening app directly: {e}")
+        _open_main()
+
+    def do_shutdown(self):
+        if self.win:
+            self.win.shutdown()
+        Adw.Application.do_shutdown(self)
+
+
+def _default_window_size() -> tuple[int, int]:
+    """Pick a sensible default window size for the screen we're on.
+
+    The old code hardcoded 440x800 — a portrait phone shape.  On a
+    desktop or laptop that opens as a cramped vertical sliver with the
+    sidebar eating most of the width.  Instead: go portrait only on an
+    actually-narrow screen (phone / Phosh), and open a comfortable
+    landscape window on anything bigger, capped so we never exceed the
+    monitor's work area.
+    """
+    # Conservative fallbacks if we can't read the monitor.
+    phone = (440, 860)
+    desktop = (1100, 760)
+    try:
+        display = Gdk.Display.get_default()
+        if not display:
+            return desktop
+        monitors = display.get_monitors()
+        if monitors is None or monitors.get_n_items() == 0:
+            return desktop
+        geo = monitors.get_item(0).get_geometry()
+        sw, sh = int(geo.width), int(geo.height)
+        if sw <= 0 or sh <= 0:
+            return desktop
+
+        # Narrow screen → portrait, sized to fit (phones, split panes).
+        if sw < 720:
+            return (min(sw, phone[0]), min(sh, phone[1]))
+
+        # Desktop / laptop → landscape, but never larger than ~90% of
+        # the work area so the window isn't clipped or off-screen.
+        w = min(desktop[0], int(sw * 0.72))
+        h = min(desktop[1], int(sh * 0.85))
+        return (max(760, w), max(560, h))
+    except Exception as e:
+        log(f"default window size detection failed: {e}")
+        return desktop
+
+
+def _detect_ui_scale() -> float:
+    """Pick a UI scale based on physical screen size, not pixel width.
+
+    The old logic compared logical-pixel width to a threshold, but logical
+    pixels vary wildly depending on whether the compositor reports device
+    pixels (no HiDPI scaling) or scaled application pixels.  A phone with
+    1080 device-pixels wide might report as 360 (Phosh, scale=3) OR 1080
+    (no scaling).  Both are phones and both need the LARGE UI.
+
+    Use physical mm via width_mm if available — that's the actual screen
+    size and doesn't lie.  Fall back to monitor.get_scale_factor() (>1
+    means HiDPI which is almost always a phone or tablet) when width_mm
+    is 0 (some compositors don't report it).
+
+    Phone (< 100 mm wide)            → 0.9   (slightly smaller than CSS base;
+                                              the CSS sizes are already big
+                                              enough on the OP6's narrow width)
+    Tablet (100-200 mm)              → 1.0
+    Laptop (200-350 mm)              → 0.85
+    Desktop monitor (> 350 mm)       → 0.7
+    """
+    # Explicit override always wins
+    try:
+        s = load_settings().get("ui_scale", 0)
+        if isinstance(s, (int, float)) and 0.3 < s < 3:
+            log(f"ui_scale from settings: {s}")
+            return float(s)
+    except Exception:
+        pass
+
+    try:
+        display = Gdk.Display.get_default()
+        if not display:
+            return 1.0
+        monitors = display.get_monitors()
+        if monitors is None or monitors.get_n_items() == 0:
+            return 1.0
+        monitor = monitors.get_item(0)
+
+        # First try physical width (millimetres)
+        try:
+            width_mm = int(monitor.get_width_mm())
+        except Exception:
+            width_mm = 0
+
+        if width_mm > 0:
+            if width_mm < 100:
+                bucket = "phone"; scale = 0.9
+            elif width_mm < 200:
+                bucket = "tablet"; scale = 1.0
+            elif width_mm < 350:
+                bucket = "laptop"; scale = 0.85
+            else:
+                bucket = "desktop"; scale = 0.7
+            log(f"ui_scale: width_mm={width_mm} → {bucket} → {scale}")
+            return scale
+
+        # Fall back to scale_factor (HiDPI hint) + geometry
+        try:
+            sf = int(monitor.get_scale_factor())
+        except Exception:
+            sf = 1
+        geo = monitor.get_geometry()
+        # device pixels = logical pixels × scale_factor
+        device_w = int(geo.width) * sf
+
+        if sf >= 2 or device_w < 1280:
+            # HiDPI compositors (Phosh on a phone) already enlarge text via
+            # the scale factor.  Don't double up — use 1.0, let the user
+            # dial in further via the Settings slider if they want.
+            bucket = "phone/hidpi"; scale = 1.0
+        elif device_w < 1920:
+            bucket = "laptop"; scale = 0.85
+        else:
+            bucket = "desktop"; scale = 0.7
+        log(f"ui_scale: sf={sf} device_w={device_w} → {bucket} → {scale}")
+        return scale
+
+    except Exception as e:
+        log(f"ui_scale detection failed: {e} — defaulting to 1.0")
+        return 1.0
+
+
+# Cached UI scale.  Set once in do_startup so widgets created later (avatars,
+# buttons) can apply the same scale to their programmatic sizes that the CSS
+# uses for fonts/padding.
+_UI_SCALE: float = 1.0
+
+# Cached viewport width and derived max-chars for message bubbles.  Set
+# from real Gdk geometry in do_startup, used by _make_wrap_label.
+_VIEWPORT_WIDTH: int = 540   # OP6 portrait logical width
+_MAX_BUBBLE_CHARS: int = 25  # conservative default; recomputed at startup
+
+# Minimum wall-clock gap between two full re-renders of a streaming reply.
+# Stripping tool markup is a function of the entire buffer, so the per-token
+# render that preceded this was quadratic in reply length; this bounds the
+# number of full passes per second instead of per token.  50ms is 20fps —
+# above the rate at which text reads as continuous, and far below the point
+# where the cost tracks the reply size.
+_STREAM_RENDER_MIN_MS: int = 50
+_STREAM_RENDER_MIN_S: float = _STREAM_RENDER_MIN_MS / 1000.0
+
+
+def _ui_scale() -> float:
+    return _UI_SCALE
+
+
+def _compute_viewport_metrics() -> None:
+    """Pin down the actual logical viewport width via Gdk, then derive
+    a max-width-chars cap for message labels.  Without a cap that's
+    actually narrower than the viewport, Gtk.Label's natural width
+    blows the chat bubble out past the right edge of the screen on
+    the phone — see the message-bubble bug history."""
+    global _VIEWPORT_WIDTH, _MAX_BUBBLE_CHARS
+    try:
+        display = Gdk.Display.get_default()
+        if display:
+            mons = display.get_monitors()
+            if mons and mons.get_n_items() > 0:
+                mon = mons.get_item(0)
+                geo = mon.get_geometry()
+                _VIEWPORT_WIDTH = max(300, geo.width)
+                # Rough char width estimate.  The CSS default message
+                # font is 30 px; with a phone UI scale of 0.9 that
+                # renders ≈27 px, and avg glyph width is roughly
+                # half that → 13-14 px per char.  Leave ~100 px for
+                # avatar + margins.
+                avail = max(200, _VIEWPORT_WIDTH - 100)
+                char_w = max(8.0, 17.0 * _UI_SCALE)
+                _MAX_BUBBLE_CHARS = max(15, min(60, int(avail / char_w)))
+                log(f"viewport: {_VIEWPORT_WIDTH}px, scale={_UI_SCALE:.2f}"
+                    f" → max bubble chars: {_MAX_BUBBLE_CHARS}")
+                return
+    except Exception as e:
+        log(f"viewport detect failed: {e}")
+
+
+def _scaled(n: int, floor: int = 1) -> int:
+    return max(floor, int(round(n * _UI_SCALE)))
+
+
+_PX_RE = re.compile(r'(\d+)px')
+
+
+def _scale_css(css_bytes: bytes, scale: float) -> bytes:
+    """Multiply every Npx in the CSS by `scale`, with a sane floor so
+    border-widths and 1px lines don't disappear."""
+    if abs(scale - 1.0) < 0.01:
+        return css_bytes
+    text = css_bytes.decode("utf-8")
+    def repl(m):
+        n = int(m.group(1))
+        if n <= 2:
+            return f"{n}px"   # don't scale 1px/2px borders
+        scaled = max(1, int(round(n * scale)))
+        return f"{scaled}px"
+    return _PX_RE.sub(repl, text).encode("utf-8")
+
+
+def main():
+    try:
+        return BasiliskApp().run(sys.argv)
+    except KeyboardInterrupt:
+        # Ctrl+C from the terminal: GTK/PyGObject re-raises SIGINT as a
+        # KeyboardInterrupt while the main loop unwinds.  Swallow it and
+        # exit cleanly — the window is already shutting down by here, so a
+        # traceback would just be noise.
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
