@@ -6,8 +6,8 @@
 
 <br/>
 
-<img src="https://img.shields.io/badge/version-1.2.0.9-d97757?style=for-the-badge&labelColor=08090b" alt="version 1.2.0.9">
-<img src="https://img.shields.io/badge/tests-5140%20assertions-2ea043?style=for-the-badge&labelColor=08090b&logo=pytest&logoColor=2ea043" alt="5140 assertions">
+<img src="https://img.shields.io/badge/version-1.2.2.0-d97757?style=for-the-badge&labelColor=08090b" alt="version 1.2.2.0">
+<img src="https://img.shields.io/badge/tests-5162%20assertions-2ea043?style=for-the-badge&labelColor=08090b&logo=pytest&logoColor=2ea043" alt="5162 assertions">
 <img src="https://img.shields.io/badge/licence-MIT-e11d2b?style=for-the-badge&labelColor=08090b" alt="MIT">
 <img src="https://img.shields.io/badge/deps-stdlib%20%2B%20GTK-e11d2b?style=for-the-badge&labelColor=08090b" alt="stdlib + GTK">
 
@@ -37,20 +37,16 @@ Same engine, same discipline either way: *do the thing, then prove it worked.*
 
 ## 📦 Install
 
-> **This is the beta channel** — everything below installs the beta build from
-> [`the-priest/priestsbasiliskbeta`](https://github.com/the-priest/priestsbasiliskbeta).
-> For the stable release, use the main repo instead.
-
 Basilisk runs shell commands and edits files **as you**. Read the installer before you run it — that is not boilerplate, it is the security model.
 
 **Native packages** — recommended, because they resolve the GTK stack for you:
 
 ```bash
-sudo apt install ./priestsbasilisk_1.2.0.9-1_all.deb
+sudo apt install ./priestsbasilisk_1.2.2.0-1_all.deb
 ```
 
 ```bash
-sudo pacman -U priestsbasilisk-1.2.0.9-1-any.pkg.tar.zst
+sudo pacman -U priestsbasilisk-1.2.2.0-1-any.pkg.tar.zst
 ```
 
 An auditable `PKGBUILD` lives in `packaging/` and runs the whole test suite as its `check()` step. [`packaging/README.md`](packaging/README.md) covers what each package installs and where.
@@ -58,13 +54,13 @@ An auditable `PKGBUILD` lives in `packaging/` and runs the whole test suite as i
 **Or the script**, which detects your distro *and* your privilege-escalation tool (root → nothing, else `sudo`, else `doas`), parse-checks every file before it touches disk, backs up your chat history, and updates in place on the same command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/the-priest/priestsbasiliskbeta/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/the-priest/PriestsBasilisk/main/install.sh | bash
 ```
 
 Or clone, read, then run — the honest path:
 
 ```bash
-git clone https://github.com/the-priest/priestsbasiliskbeta.git basilisk
+git clone https://github.com/the-priest/PriestsBasilisk.git basilisk
 ```
 ```bash
 cd basilisk && less install.sh
@@ -297,7 +293,7 @@ Capability and safety are decoupled on purpose.
 
 ## 🔬 Engineering
 
-**Stdlib only** for the engine. No pytest, no network, no fixtures, no account — **5,140 assertions across 83 suites**, run in under a minute. Four of those suites are adversarial probes that report *findings* rather than a pass count, so their checks are not in that total.
+**Stdlib only** for the engine. No pytest, no network, no fixtures, no account — **5,162 assertions across 85 suites**, run in under a minute. Four of those suites are adversarial probes that report *findings* rather than a pass count, so their checks are not in that total.
 
 Every fix ships with a regression that *fails* on the old code and *passes* on the new. Real GTK is spun up under Xvfb for the UI suites; the chat-bubble layout alone is pinned by 140 fitting checks. Repo work is covered end-to-end rather than layer by layer — a deliberately broken repo is opened as a folder, baselined red, edited through four different tool-call dialects, verified green, diffed and exported, with a 6,000-line file paged and rewritten on the way past.
 
@@ -327,13 +323,13 @@ If it earns its place in your kit, star the repo and tell someone who would use 
 
 <br/>
 
-### Built by one person, around a day job. Verified by 5,140 assertions. Priced at nothing.
+### Built by one person, around a day job. Verified by 5,162 assertions. Priced at nothing.
 
 <sub>Clone it, read it, run the suite, then point it at something you own.</sub>
 
 <br/><br/>
 
-<a href="https://github.com/the-priest/priestsbasiliskbeta"><img src="https://img.shields.io/badge/★%20Star%20the%20beta%20repo-e11d2b?style=for-the-badge&labelColor=08090b" alt="Star the beta repo"></a>
+<a href="https://github.com/the-priest/PriestsBasilisk"><img src="https://img.shields.io/badge/★%20Star%20the%20repo-e11d2b?style=for-the-badge&labelColor=08090b" alt="Star the repo"></a>
 <a href="#-install"><img src="https://img.shields.io/badge/Install%20in%20one%20line-7d121b?style=for-the-badge&labelColor=08090b" alt="Install"></a>
 
 <img src="https://capsule-render.vercel.app/api?type=waving&color=0:08090b,50:4a0a11,100:e11d2b&height=130&section=footer&text=prove%20everything&fontColor=ffffff&fontSize=28&fontAlignY=72&animation=twinkling" width="100%" alt="prove everything"/>

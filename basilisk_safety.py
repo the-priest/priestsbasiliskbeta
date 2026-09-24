@@ -1201,9 +1201,15 @@ def is_catastrophic_command(command: str) -> bool:
 # `tee`, `dd of=`, etc. — would sidestep that entirely.  The auto-run gate
 # force-confirms these so the safety block can't be silently shell-stripped.
 # Reading the files (cat, grep) does NOT trip it.
-_PROT_SRC = r"(?:basilisk_persona|basilisk_core|basilisk_voice|basilisk_safety|basilisk)\.py"
+# basilisk_scope.py IS the authorization boundary and basilisk_ledger.py IS the
+# tamper-evidence store, so a raw `sed -i` / `> basilisk_scope.py` that strips
+# the scope gate or rewrites the evidence chain is exactly the self-tamper this
+# floor exists to force-confirm — they belong here alongside the others.
+_PROT_SRC = (r"(?:basilisk_persona|basilisk_core|basilisk_voice|basilisk_safety"
+             r"|basilisk_scope|basilisk_ledger|basilisk)\.py")
 _PROT_NAMES = {"basilisk_persona.py", "basilisk_core.py", "basilisk_voice.py",
-               "basilisk_safety.py", "basilisk.py"}
+               "basilisk_safety.py", "basilisk_scope.py", "basilisk_ledger.py",
+               "basilisk.py"}
 # Verbs where the protected name appearing ANYWHERE means a write/destroy of
 # it: a redirect, an in-place edit, a device write, a truncate/remove.  (cp /
 # mv / ln are handled separately — for those only the *destination* counts.)

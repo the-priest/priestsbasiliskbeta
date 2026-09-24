@@ -1,3 +1,31 @@
+# v1.2.1.0
+
+**The operator's two overnight fixes, pinned with tests, plus the restored
+API-key guard.**
+
+1. Synthesized native call reaches the TOKEN stream, not only meta["text"]. A
+structured delta.tool_calls with empty content folded to `<tool>` text but went
+only into the on_done payload; the widget buffers tokens and the host parses the
+widget, so the call read as "" -> "degraded" -> endless retry. Now emitted via
+on_token in both backends. Pinned by test_tokenchannel.py (parses the token
+buffer, which the old meta-only test never did).
+
+2. write_file accepts mode="create" (and aliases) -> replace. The persona tells
+the model to use create for new files; the normaliser rejected it as "unknown
+mode", so a build emitted a good write, got an error, and announce-stalled.
+Pinned by test_writemode.py.
+
+3. Colour re-tint: indigo ground + coral + violet secondary back on screen
+(the calm passes had drained it to black-and-white). Hue only.
+
+4. Restored the settings.json line in .gitignore (API-key guard a re-zip had
+dropped). test_secrets green.
+
+**5,162 assertions across 85 suites**, zero red. New: test_tokenchannel.py,
+test_writemode.py. GUARDRAIL byte-identical.
+
+---
+
 # v1.2.0.9
 
 **ROOT CAUSE of the empty loop fixed: DeepSeek's native tool-call syntax was

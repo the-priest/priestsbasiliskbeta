@@ -98,110 +98,10 @@ STT_PROVIDERS: Dict[str, Dict] = {
         "model_setting": "stt_model",
         "extra_fields":  ["response_format", "temperature", "language"],
     },
-# Offline whisper.cpp.  No key and no network — the model runs on this
-    # machine.  This is the only speech-to-text path that works when the
-    # configured provider carries no ASR model at all (SiliconFlow's
-    # international API answers the transcription endpoint with
-    # "Model disabled" and lists no speech-to-text model), so it exists as an
-    # explicit, offline option rather than a silent fallback.
-    "local": {
-        "label":         "Local (whisper.cpp — offline)",
-        "url":           "",
-        "kind":          "local",          # dispatched to whisper-cli, no HTTP
-        "key_setting":   "",               # deliberately keyless
-        "default_model": "",               # a ggml-*.bin path, found at runtime
-        "model_setting": "stt_model_local",
-        "extra_fields":  [],
-    },
 }
 # Preference order when settings say "auto" and the active provider can't
-# transcribe: try these in turn, first one with a key wins.  "local" is NOT in
-# this list on purpose — it is an explicit opt-in (stt_provider="local"),
-# because "auto" must keep meaning "a cloud provider you configured", and a box
-# with whisper.cpp installed should not silently override that choice.
+# transcribe: try these in turn, first one with a key wins.
 STT_AUTO_ORDER = ["siliconflow", "groq"]
-
-
-# ── local (offline) whisper.cpp discovery ────────────────────────────
-# A ggml model in one of these places lets voice work with NO key, NO network,
-# and no per-minute cost.  An explicit stt_model_local path wins; otherwise the
-# best model found is used (large > medium > base > small > tiny).
-_WHISPER_BINS = ("whisper-cli", "whisper-cpp", "whisper")
-_WHISPER_DIRS = (
-    "~/.local/share/whisper",
-    "~/.local/share/whisper.cpp",
-    "~/.cache/whisper",
-    "~/.cache/whisper.cpp",
-    "/usr/share/whisper",
-    "/usr/share/whisper.cpp",
-    "/usr/local/share/whisper",
-)
-
-
-def find_whisper_bin() -> Optional[str]:
-    """Path to a whisper.cpp CLI on PATH, or None."""
-    for name in _WHISPER_BINS:
-        p = shutil.which(name)
-        if p:
-            return p
-    return None
-
-
-def find_whisper_model(explicit: str = "") -> Optional[str]:
-    """Path to a ggml whisper model.
-
-    `explicit` (an operator-typed path) is honoured only if it exists;
-    otherwise the best model in the usual directories is returned, or None."""
-    p = (explicit or "").strip()
-    if p:
-        p = os.path.expanduser(p)
-        return p if os.path.isfile(p) else None
-    for d in _WHISPER_DIRS:
-        d = os.path.expanduser(d)
-        if not os.path.isdir(d):
-            continue
-        try:
-            names = [n for n in os.listdir(d)
-                     if n.lower().endswith(".bin") and "ggml" in n.lower()]
-        except Exception:
-            names = []
-        if not names:
-            continue
-
-        def _rank(n: str) -> tuple:
-            low = n.lower()
-            return (0 if "large" in low else
-                    1 if "medium" in low else
-                    2 if "base" in low else
-                    3 if "small" in low else 4, n)
-        names.sort(key=_rank)
-        return os.path.join(d, names[0])
-    return None
-
-
-def local_stt_available(settings: Dict) -> bool:
-    """True when this machine can transcribe offline (binary AND a model)."""
-    if not find_whisper_bin():
-        return False
-    return find_whisper_model(settings.get("stt_model_local", "")) is not None
-
-
-# Whisper hallucinates these on silence.  Typing a word the operator never
-# said is worse than an empty transcript, so treat them as empty.
-_WHISPER_SILENCE = {
-    "", ".", "you", "thank you", "thanks", "thanks for watching", "bye",
-    "please subscribe", "[blank_audio]", "[silence]",
-}
-
-
-def _clean_local_transcript(text: str) -> str:
-    t = (text or "").strip()
-    t = re.sub(r"\[[^\]]*\]", " ", t)      # [BLANK_AUDIO], [MUSIC], ...
-    t = re.sub(r"\([^)]*\)", " ", t)       # (upbeat music)
-    t = " ".join(t.split())
-    if t.strip().lower().strip(" .!?…") in _WHISPER_SILENCE:
-        return ""
-    return t
 
 
 def _stt_url(cfg: Dict, settings: Dict) -> str:
@@ -629,38 +529,27 @@ class SpeechToText:
     def _pick_stt(self) -> Optional[Tuple[str, Dict[str, str]]]:
         """Choose an STT provider: explicit setting wins, then the active
         chat provider if it can transcribe, then auto-order by first key
-        present.  Returns (provider_id, config) or None if nothing is usable.
-        A cloud provider counts as usable with a key set; "local" counts as
-        usable when whisper.cpp and a model are installed."""
+        present.  Returns (provider_id, config) or None if no key anywhere."""
         s = self.get_settings()
 
-        def available(pid: str) -> bool:
+        def has_key(pid: str) -> bool:
             cfg = STT_PROVIDERS.get(pid)
-            if not cfg:
-                return False
-            if cfg.get("kind") == "local":
-                return local_stt_available(s)
-            return bool((s.get(cfg["key_setting"]) or "").strip())
+            return bool(cfg and (s.get(cfg["key_setting"]) or "").strip())
 
         choice = (s.get("stt_provider") or "auto").strip().lower()
-        if choice in STT_PROVIDERS and available(choice):
+        if choice in STT_PROVIDERS and has_key(choice):
             return choice, STT_PROVIDERS[choice]
         if choice == "auto":
             active = (s.get("active_provider") or "").strip().lower()
-            if active in STT_PROVIDERS and available(active):
+            if active in STT_PROVIDERS and has_key(active):
                 return active, STT_PROVIDERS[active]
             for pid in STT_AUTO_ORDER:
-                if available(pid):
+                if has_key(pid):
                     return pid, STT_PROVIDERS[pid]
-        # Explicit choice but it isn't usable → still try anything that is
+        # Explicit choice but no key for it → still try anything with a key
         for pid in STT_AUTO_ORDER:
-            if available(pid):
+            if has_key(pid):
                 return pid, STT_PROVIDERS[pid]
-        # Last resort: offline whisper.cpp, if installed.  Only reached when the
-        # operator explicitly asked for a provider they cannot actually use
-        # (auto still means "cloud only", so a bare install is unchanged).
-        if choice != "auto" and local_stt_available(s):
-            return "local", STT_PROVIDERS["local"]
         return None
 
     def has_key(self) -> bool:
@@ -672,14 +561,9 @@ class SpeechToText:
                     "(parecord), pipewire-utils (pw-record), or alsa-utils "
                     "(arecord).")
         if not self.has_key():
-            if find_whisper_bin() and find_whisper_model() is None:
-                return ("No speech-to-text provider is ready.  Add a SiliconFlow "
-                        "or Groq key in Settings → Backends, or put a whisper.cpp "
-                        "ggml model (e.g. ggml-base.en.bin) in "
-                        "~/.local/share/whisper for offline voice.")
-            return ("No speech-to-text provider is ready.  Add a SiliconFlow or "
-                    "Groq key in Settings → Backends, or choose Local "
-                    "(whisper.cpp) to transcribe offline with no key.")
+            return ("No transcription key set.  Voice input needs a "
+                    "SiliconFlow or Groq key — add one in Settings → "
+                    "Backends.")
         return None
 
     # ── recording ──
@@ -917,22 +801,20 @@ class SpeechToText:
     def transcribe(self, wav_path: str) -> Tuple[str, Optional[str]]:
         """Returns (text, error).  Blocks — call from a worker thread.
 
-        Tries the chosen STT provider first (SiliconFlow's SenseVoiceSmall,
-        Groq's Whisper, or offline whisper.cpp — "local").  If a CLOUD
-        provider fails with an auth/endpoint error (401/403/404), a server
-        error, or is unreachable, AND another cloud provider has a key set, it
-        falls back to that one automatically — SiliconFlow -> Groq, the same
-        fallback chain chat uses.  This is why a SiliconFlow key that works for
-        chat but is forbidden (403) on the transcription endpoint no longer
-        kills voice: Groq Whisper picks up the slack.  "local" is never tried
-        implicitly; it runs only when the operator selects it."""
+        Tries the chosen STT provider first (SiliconFlow's SenseVoiceSmall
+        or Groq's Whisper).  If that provider fails with an auth/endpoint
+        error (401/403/404), a server error, or is unreachable, AND another
+        provider has a key set, it falls back to that one automatically —
+        SiliconFlow -> Groq, the same fallback chain chat uses.  This is why
+        a SiliconFlow key that works for chat but is forbidden (403) on the
+        transcription endpoint no longer kills voice: Groq Whisper picks up
+        the slack."""
         s = self.get_settings()
         candidates = self._stt_candidates(s)
         if not candidates:
             self._safe_remove(wav_path)
-            return "", ("No speech-to-text provider available — add a "
-                        "SiliconFlow or Groq key, or choose Local (whisper.cpp) "
-                        "in Settings → Backends.")
+            return "", ("No transcription key set — add a SiliconFlow or "
+                        "Groq key in Settings → Backends.")
         # Read the recording ONCE and keep the bytes so every fallback
         # attempt can reuse them; bin the temp file immediately after.
         try:
@@ -983,13 +865,7 @@ class SpeechToText:
         retryable=True means it's worth falling back to another provider
         (auth/endpoint/server/network failure); False means the request
         itself was rejected (e.g. 400) or the response was unparseable, so
-        retrying a different provider with the same audio won't help.
-
-        The offline "local" provider is dispatched to whisper-cli instead of an
-        HTTP endpoint; it needs no key and reports a non-retryable error if the
-        binary or model has gone missing since it was selected."""
-        if cfg.get("kind") == "local":
-            return self._transcribe_local(cfg, audio, s)
+        retrying a different provider with the same audio won't help."""
         key = (s.get(cfg["key_setting"]) or "").strip()
         model_setting = cfg.get("model_setting")
         model = ((s.get(model_setting) if model_setting else "") or "").strip()
@@ -1026,18 +902,8 @@ class SpeechToText:
             _log(f"transcribe HTTP {e.code} ({provider_id}): {body}")
             hint = ""
             retryable = e.code in (401, 403, 404) or e.code >= 500
-            _low = body.lower()
             if e.code in (401, 403):
-                if "model disabled" in _low or "30003" in body:
-                    # SiliconFlow's international API returns this for an ASR
-                    # model it does not carry ("Model disabled").  It is NOT a
-                    # bad key, so don't send the operator to chase one.
-                    hint = (f" — {provider_id} does not offer this "
-                            f"speech-to-text model on your account "
-                            f"('Model disabled'); choose Local (whisper.cpp) "
-                            f"or set a Groq key")
-                else:
-                    hint = f" — check your {provider_id} key in Settings"
+                hint = f" — check your {provider_id} key in Settings"
             elif e.code == 400:
                 hint = f" — {provider_id} rejected the request: {body[:120]}"
             return "", f"transcription failed (HTTP {e.code}){hint}", retryable
@@ -1054,60 +920,6 @@ class SpeechToText:
         except Exception as e:
             _log(f"transcribe parse error: {e}; raw={raw[:200]}")
             return "", "could not parse transcription response", False
-
-    def _transcribe_local(self, cfg: Dict[str, str], audio: bytes, s: Dict
-                          ) -> Tuple[str, Optional[str], bool]:
-        """Offline transcription through whisper.cpp.  No key, no network.
-
-        Re-materialises the recording (transcribe() bins it once the bytes are
-        read) because whisper-cli reads a FILE, then drops the temp files.
-        Non-retryable on any failure: the model/binary won't appear by trying a
-        different provider, and a bad clip would fail there too."""
-        binp = find_whisper_bin()
-        model = find_whisper_model(
-            s.get(cfg.get("model_setting") or "", "") or "")
-        if not binp or not model:
-            return "", ("local whisper.cpp is not available — install "
-                        "whisper-cli and a ggml model, or pick a cloud "
-                        "provider in Settings → Backends"), False
-        fd, path = tempfile.mkstemp(prefix="basilisk_stt_", suffix=".wav")
-        outbase = path[:-4]
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(audio)
-            cmd = [binp, "-m", model, "-f", path, "-nt", "-otxt",
-                   "-of", outbase]
-            lang = (s.get("stt_language") or "").strip()
-            if lang:
-                cmd += ["-l", lang]
-            _log(f"transcribe via local ({os.path.basename(model)}) -> {binp}")
-            proc = subprocess.run(cmd, capture_output=True, timeout=180)
-            txt_path = outbase + ".txt"
-            if os.path.exists(txt_path):
-                with open(txt_path, "r", encoding="utf-8",
-                          errors="replace") as f:
-                    text = f.read()
-            else:
-                text = (proc.stdout or b"").decode("utf-8", "replace")
-            if proc.returncode != 0:
-                err = (proc.stderr or b"").decode("utf-8", "replace").strip()
-                _log(f"transcribe local rc={proc.returncode}: {err[-200:]}")
-                return "", (f"local transcription failed (whisper-cli exited "
-                            f"{proc.returncode})"), False
-            return _clean_local_transcript(text), None, False
-        except subprocess.TimeoutExpired:
-            _log("transcribe local: whisper-cli timed out")
-            return "", "local transcription timed out (clip too long?)", False
-        except Exception as e:
-            _log(f"transcribe local error: {e}")
-            return "", f"local transcription failed: {e}", False
-        finally:
-            for p in (path, outbase + ".txt"):
-                try:
-                    if os.path.exists(p):
-                        os.remove(p)
-                except Exception:
-                    pass
 
     @staticmethod
     def _safe_remove(path: str) -> None:

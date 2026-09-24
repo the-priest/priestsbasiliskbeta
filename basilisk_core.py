@@ -241,11 +241,6 @@ SILICONFLOW_CATALOGUE: List[ModelInfo] = [
               "OpenAI tools function-calling flow. Falls back to V4-Flash.",
               tier="workhorse",
               cached_in_usd=0.028,
-              # Vision: verified against SiliconFlow's live API (Sep 2026) —
-              # a real image round-trips and the model answers correctly.  The
-              # default vision model is this same id, so the chat picker and
-              # the vision picker are one model and cost no extra key.
-              vision=True,
               # SAME family as V4-Flash, which honours enable_thinking, and on
               # DeepSeek's own platform the v4-flash id ROUTES to V4.1 — so the
               # switch is understood. If this new architecture ever rejects it,
@@ -399,14 +394,10 @@ PROVIDERS_BY_KEY: Dict[str, ProviderSpec] = {p.key: p for p in PROVIDERS}
 # natively (vision=True) — those are listed first so the vision picker and
 # the chat picker can be the same model and save an API key round-trip.
 VISION_MODELS: Dict[str, List[str]] = {
-    # The default vision model is V4.1-Flash — the same id the operator chats
-    # with — so seeing an image costs no second model and no second key.
-    # GLM-5.3-Flash stays listed as the one-click alternative (and is still
-    # the fallback when a stale vision id is saved).  The field stays
-    # free-text, so any current SiliconFlow vision id can still be typed by
-    # hand if the line-up shifts.
+    # Only the kept catalogue's vision-capable model is suggested now; the
+    # field stays free-text, so any current SiliconFlow vision id can still be
+    # typed by hand if the line-up shifts.
     "siliconflow": [
-        "deepseek-ai/DeepSeek-V4.1-Flash",
         "zai-org/GLM-5.3-Flash",
     ],
 }
@@ -502,21 +493,21 @@ DEFAULT_SETTINGS = {
     # sent False on EVERY turn. Flip this True to let them think again (and pay
     # for it). GLM-5.3-Flash is unaffected — its reasoning has no switch.
     "deepseek_thinking": False,
-    # ── NATIVE FUNCTION-CALLING — OFF by default; the TEXT protocol is what
-    #    actually works on this stack. ──
-    # The full structured implementation is here and correct (schema out,
-    # structured `tool_calls` in, and structure_tool_messages makes the whole
-    # conversation structured so there is no mixed signal). But on the live
-    # SiliconFlow · DeepSeek-V4.1-Flash setup the operator runs, turning it on
-    # made the model emit malformed/empty call wrappers and then go silent —
-    # WORSE than the text protocol, which drove tool calls reliably before any
-    # of this. So the reliable path ships as the default: the model writes a
-    # text tool tag (the tool name in a name= attribute, JSON in the body), the
-    # canonicaliser parses every dialect, and results go back as tool_result
-    # text. Flip this ON to use the structured path (it is complete and safe —
-    # text stays as the automatic fallback); it is left available, not removed,
-    # so it can be revisited when the provider's structured calling is verified.
-    "native_tool_calls": False,
+    # ── NATIVE FUNCTION-CALLING — ON by default; this is the OpenCode contract. ──
+    # The primary path, matching how OpenCode / Claude Code drive tools: the
+    # tools schema goes out in the request, the model replies with structured
+    # `tool_calls`, and structure_tool_messages makes the WHOLE conversation
+    # structured (assistant.tool_calls + role:tool) so the model never sees a
+    # mixed signal. This is the reliable, standard contract every serious
+    # OpenAI-compatible harness uses, and it is what the operator asked Basilisk
+    # to run on.
+    # The TEXT `<tool>` protocol is retained as an AUTOMATIC, per-model fallback:
+    # if a provider/model rejects the tools field (400/422), the backend records
+    # it in `_tools_rejected` and every later turn for that model drops to the
+    # text tag protocol coherently (no schema, no structured history) — so a
+    # tools-incapable model still works, without the operator touching anything.
+    # Flip this False to force the text protocol for every model.
+    "native_tool_calls": True,
     # No cross-model heavy escalation by default: the catalogue is now three
     # Flash-class models and V4.1-Flash IS the best of them, so a "heavier
     # sibling" to escalate to no longer exists. A heavy turn just gets the
@@ -612,11 +603,7 @@ DEFAULT_SETTINGS = {
     # catalogue actually carries AND advertises as vision-capable, and
     # _resolve_vision_model() below re-checks that at call time so a stale
     # value saved by an older build repairs itself instead of failing.
-    # The default is the SAME model the operator chats with (V4.1-Flash) --
-    # verified to accept image_url on SiliconFlow -- so the chat and vision
-    # pickers agree and no second model/key is needed. GLM-5.3-Flash remains
-    # the one-click alternative and the stale-id repair target.
-    "vision_model":            "deepseek-ai/DeepSeek-V4.1-Flash",  # vision-capable
+    "vision_model":            "zai-org/GLM-5.3-Flash",  # vision-capable
                                         # model on the active OpenAI-compatible
                                         # provider (SiliconFlow); lets Basilisk SEE
                                         # images.  Change to any VL model the
@@ -648,14 +635,11 @@ DEFAULT_SETTINGS = {
     "voice_autosend":   True,           # auto-send after a voice message transcribes
     "stt_model":        "whisper-large-v3-turbo",
     "stt_language":     "",             # ISO-639-1 hint (blank = auto-detect)
-    # Which engine transcribes voice input.  "auto" = use your active chat
+    # Which cloud transcribes voice input.  "auto" = use your active chat
     # provider if it supports speech (SiliconFlow→SenseVoiceSmall,
-    # Groq→Whisper), else fall back to whichever key you have set.  "local"
-    # runs whisper.cpp on this machine with no key and no network — the option
-    # that works when the configured provider carries no ASR model at all.
-    "stt_provider":     "auto",         # auto | siliconflow | groq | local
+    # Groq→Whisper), else fall back to whichever key you have set.
+    "stt_provider":     "auto",         # auto | siliconflow | groq
     "stt_model_siliconflow": "",         # blank = FunAudioLLM/SenseVoiceSmall
-    "stt_model_local":  "",              # ggml .bin path (blank = auto-find)
 
     # ── Chat history / retention ──
     # Ephemeral by default: start fresh each launch, roll off stale chats,
@@ -2446,7 +2430,7 @@ class BackendRouter:
         # decision would leave behind).
         _send_native = bool(
             tools and not single_model
-            and self.settings.get("native_tool_calls", False)
+            and self.settings.get("native_tool_calls", True)
             and backend is not None
             and model not in getattr(backend, "_tools_rejected", ()))
         if _send_native:

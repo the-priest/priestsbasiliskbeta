@@ -1,3 +1,46 @@
+# v1.2.1.0
+
+**The two real fixes the operator found overnight, pinned so they can't come
+back — plus the restored API-key guard. This is the build that actually lands a
+file when you say "build me a game."**
+
+**1. A synthesized native call now reaches the TOKEN stream, not just the
+on_done payload.** DeepSeek delivers a tool call on the structured
+`delta.tool_calls` channel with EMPTY content. The backend folded it to
+canonical `<tool …>` text but placed it only in `meta["text"]` — while the
+streaming widget buffers TOKENS and the host parses the WIDGET. So a perfect
+write_file/run call read as "" → "response looked degraded" → an endless model
+retry. Fixed by emitting the synthesized call through `on_token` in both
+backends, so the widget, the display and the dispatcher all see the same text.
+Pinned by `test_tokenchannel.py`, which parses the token buffer (the thing that
+was empty) rather than the on_done payload (the thing that always looked fine —
+which is exactly why the old test missed it).
+
+**2. `write_file` accepts the `create` mode the persona advertises.** The
+write_file contract and the big-file recipe both tell the model to open a new
+file with `"mode": "create"`, but the normaliser only knew `replace`/`append`
+and rejected `create` with "unknown mode" — the host refusing its own
+documented instruction. On a build the model emitted a good
+`write_file(mode="create")` call, got an error back, and announced "building it
+now" without ever landing a file: the announce-and-stall loop. `create` (and its
+aliases) now maps to `replace`; a genuinely unknown mode is still refused.
+Pinned by `test_writemode.py`.
+
+**3. The colour re-tint** puts a deep-indigo ground, coral primary and a violet
+secondary back on screen — the calm passes had drained it to a black-and-white
+film. Structure and contrast unchanged; only hue.
+
+**4. The API-key guard is restored.** A re-zip had dropped the `settings.json`
+line from `.gitignore` — the guard that keeps the file holding provider API keys
+out of a commit. Restored; `test_secrets.py` green again. (The key lives in
+`~/.config/basilisk/settings.json`, outside the repo, so this is defence in
+depth, not the primary protection.)
+
+**5,162 assertions across 85 suites**, zero red. New: `test_tokenchannel.py`,
+`test_writemode.py`. GUARDRAIL byte-identical.
+
+---
+
 # v1.2.0.9
 
 **THE root cause of the empty loop, found and fixed: DeepSeek's own tool-call

@@ -59,13 +59,8 @@ if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
     print("bubble fit: SKIPPED (no display)")
     sys.exit(0)
 
-# A throwaway CONFIG dir so the fake settings below never touch the operator's
-# real ~/.config/basilisk.  The old `os.environ.setdefault("HOME", ...)` did
-# nothing (HOME is always set), so every run overwrote the live settings.json
-# -- including wiping the real API key.  HOME stays real so the app still finds
-# its data dir (chat store / persona); only basilisk_core's config paths are
-# redirected, just before the app is imported.
-_cfg = pathlib.Path(tempfile.mkdtemp()) / "basilisk"
+os.environ.setdefault("HOME", tempfile.mkdtemp())
+_cfg = pathlib.Path(os.environ["HOME"]) / ".config" / "basilisk"
 _cfg.mkdir(parents=True, exist_ok=True)
 
 _passed = 0
@@ -127,12 +122,6 @@ def _run_scale(scale: float) -> None:
         "siliconflow_api_key": "sk", "active_provider": "siliconflow",
         "ui_scale": scale}), encoding="utf-8")
 
-    # Redirect basilisk_core's config paths to the throwaway dir BEFORE the app
-    # is imported, so the fake settings are what the app reads and the operator's
-    # real settings.json is never touched.
-    import basilisk_core as _C
-    _C.CONFIG_DIR = _cfg
-    _C.SETTINGS_JSON = _cfg / "settings.json"
     import importlib
     import basilisk as Bk
     importlib.reload(Bk) if "basilisk" in sys.modules else None

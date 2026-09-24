@@ -190,7 +190,7 @@ except Exception as _ve:  # noqa
 
 APP_ID  = "org.thepriest.basilisk"
 APP_NAME = "Basilisk"
-VERSION = "1.2.0.9"
+VERSION = "1.2.2.0"
 
 # ── Tool-chain efficiency knobs ──
 # How many model round-trips a single user turn may chain through.  With
@@ -9371,15 +9371,11 @@ class SettingsDialog(Adw.PreferencesDialog):
         # Input (speak instead of type)
         ig = Adw.PreferencesGroup()
         ig.set_title("Speak instead of type")
-        _local_model = (basilisk_voice.find_whisper_model(
-            parent.settings.get("stt_model_local", ""))
-            if basilisk_voice is not None else None)
         if stt is not None and stt.recorder_available():
             ig.set_description(
                 f"Mic recorder: {stt.recorder_name()}.  Transcribed by "
-                "SiliconFlow, Groq, or locally with whisper.cpp"
-                + (f" ({os.path.basename(_local_model)} found on this machine)"
-                   if _local_model else "") + ".")
+                "SiliconFlow (SenseVoiceSmall) or Groq (Whisper) — whichever "
+                "key you have.")
         elif stt is not None:
             ig.set_description(
                 "No microphone recorder found.  Install pulseaudio-utils "
@@ -9401,14 +9397,10 @@ class SettingsDialog(Adw.PreferencesDialog):
         self.stt_provider_row = Adw.ComboRow()
         self.stt_provider_row.set_title("Transcription provider")
         self.stt_provider_row.set_subtitle(
-            "Auto uses a cloud provider you configured.  Local runs "
-            "whisper.cpp on this machine — no key, no network.")
-        self._stt_provider_keys = ["auto", "local", "siliconflow", "groq"]
+            "Auto uses your active chat provider when it can transcribe.")
+        self._stt_provider_keys = ["auto", "siliconflow", "groq"]
         self.stt_provider_row.set_model(Gtk.StringList.new(
-            ["Auto (cloud, if configured)",
-             "Local — whisper.cpp (offline)",
-             "SiliconFlow (SenseVoiceSmall)",
-             "Groq (Whisper)"]))
+            ["Auto", "SiliconFlow (SenseVoiceSmall)", "Groq (Whisper)"]))
         cur_sp = (parent.settings.get("stt_provider") or "auto").lower()
         if cur_sp in self._stt_provider_keys:
             self.stt_provider_row.set_selected(
@@ -9458,22 +9450,6 @@ class SettingsDialog(Adw.PreferencesDialog):
                                                        r.get_text().strip()
                                                        or "whisper-large-v3-turbo"))
         ig.add(self.stt_model_row)
-
-        # Offline whisper.cpp model path.  Blank = auto-find in the usual
-        # directories; the detected path is shown as the subtitle so the
-        # operator can see WHICH model voice will use.
-        self.stt_local_model_row = Adw.EntryRow()
-        self.stt_local_model_row.set_title("Local whisper model (ggml .bin)")
-        self.stt_local_model_row.set_text(
-            parent.settings.get("stt_model_local", "") or "")
-        if _local_model:
-            self.stt_local_model_row.set_tooltip_text(
-                f"Auto-detected: {_local_model}")
-        self.stt_local_model_row.set_show_apply_button(True)
-        self.stt_local_model_row.connect(
-            "apply",
-            lambda r: self._set("stt_model_local", r.get_text().strip()))
-        ig.add(self.stt_local_model_row)
 
         self.stt_lang_row = Adw.EntryRow()
         self.stt_lang_row.set_title("Language hint (optional)")
@@ -14518,14 +14494,14 @@ class MainWindow(Adw.ApplicationWindow):
         # lists exactly the tools it was told about (leashed vs armed tracks
         # automatically) and never a phantom one. Agent mode only — the model
         # can only act then — and cached by prompt so it is parsed once, not
-        # every turn. OPT-IN: native tool-calling is OFF by default (it
-        # regressed on the live setup); the text `<tool>` protocol is the
-        # driver unless the operator turns this on in Settings. The fallback
-        # here is False on purpose, in lockstep with DEFAULT_SETTINGS and the
-        # router gate, so a settings dict missing the key never flips it on.
+        # every turn. Native tool-calling is ON by default (the OpenCode
+        # contract); the text `<tool>` protocol is retained as an automatic
+        # per-model fallback when a provider rejects the tools field. The
+        # fallback here is True, in lockstep with DEFAULT_SETTINGS and the
+        # router gate, so a settings dict missing the key still drives natively.
         _tools = None
         if self.current_agent_mode and self.settings.get(
-                "native_tool_calls", False):
+                "native_tool_calls", True):
             try:
                 _ph = hash(sysprompt)
                 _c = getattr(self, "_tools_cache", None)
