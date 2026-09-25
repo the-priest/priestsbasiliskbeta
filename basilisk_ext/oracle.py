@@ -385,39 +385,45 @@ def arm(engagement: str = "default", objective: str = "", target: str = "",
     if ctype not in _VALID_CRITERIA:
         return {"ok": False,
                 "error": f"criterion_type must be one of {_VALID_CRITERIA}"}
-    state = _load(engagement, base_dir)
-    state["seq"] = int(state.get("seq", 0)) + 1
-    aid = f"atk-{state['seq']:04d}"
-    token = ""
-    canary = ""
-    if blind or ctype == "oob":
-        # short deterministic-ish token from the id + time
-        token = re.sub(r"[^a-z0-9]", "",
-                       f"{aid}{int(time.time()*1000)%100000:05d}".lower())[:16]
-        started = oob_start(host=oob_host)
-        canary = _canary_url_for(token) if started.get("ok") else ""
-        if ctype != "oob":
-            # blind attempt without an explicit oob criterion → make it oob
-            ctype = "oob"
-            criterion_value = token
-        else:
-            criterion_value = token
-    attempt = {
-        "id": aid,
-        "objective": _clip(objective, 300),
-        "target": _clip(target, 300),
-        "technique": _clip(technique, 80),
-        "criterion": {"type": ctype, "value": criterion_value},
-        "token": token,
-        "canary": canary,
-        "verdict": PENDING,
-        "reason": "",
-        "evidence": "",
-        "armed_ts": _now(),
-        "checked_ts": None,
-    }
-    state["attempts"].append(attempt)
-    _save(state, base_dir)
+    # The whole read-modify-write is held under _LOCK (reentrant, so the inner
+    # _save is fine). Without it two concurrent arm() calls both load seq=N,
+    # both mint atk-000(N+1), and the second _save clobbers the first — one
+    # attempt silently lost, ids duplicated. check() racing arm() is worse: it
+    # would save back a snapshot taken before the arm, deleting the new attempt.
+    with _LOCK:
+        state = _load(engagement, base_dir)
+        state["seq"] = int(state.get("seq", 0)) + 1
+        aid = f"atk-{state['seq']:04d}"
+        token = ""
+        canary = ""
+        if blind or ctype == "oob":
+            # short deterministic-ish token from the id + time
+            token = re.sub(r"[^a-z0-9]", "",
+                           f"{aid}{int(time.time()*1000)%100000:05d}".lower())[:16]
+            started = oob_start(host=oob_host)
+            canary = _canary_url_for(token) if started.get("ok") else ""
+            if ctype != "oob":
+                # blind attempt without an explicit oob criterion → make it oob
+                ctype = "oob"
+                criterion_value = token
+            else:
+                criterion_value = token
+        attempt = {
+            "id": aid,
+            "objective": _clip(objective, 300),
+            "target": _clip(target, 300),
+            "technique": _clip(technique, 80),
+            "criterion": {"type": ctype, "value": criterion_value},
+            "token": token,
+            "canary": canary,
+            "verdict": PENDING,
+            "reason": "",
+            "evidence": "",
+            "armed_ts": _now(),
+            "checked_ts": None,
+        }
+        state["attempts"].append(attempt)
+        _save(state, base_dir)
     out = {
         "ok": True, "id": aid, "verdict": PENDING,
         "criterion": attempt["criterion"],
@@ -438,18 +444,22 @@ def check(engagement: str = "default", attempt_id: str = "", evidence: str = "",
     """Judge an armed attempt against the evidence you got back. Sets and
     persists its verdict (CONFIRMED / FAILED / PENDING / INCONCLUSIVE) and
     returns it with the reasoning — this is the signal the loop acts on."""
-    state = _load(engagement, base_dir)
-    if not state["attempts"]:
-        return {"ok": False, "error": "no armed attempts — call oracle_arm first"}
-    a = _find(state, attempt_id)
-    if a is None:
-        return {"ok": False, "error": f"no attempt with id {attempt_id!r}"}
-    verdict, reason = _judge(a.get("criterion", {}), evidence, status, baseline)
-    a["verdict"] = verdict
-    a["reason"] = reason
-    a["evidence"] = _clip(evidence, 600)
-    a["checked_ts"] = _now()
-    _save(state, base_dir)
+    # Same load-modify-save, same lock: a check() racing an arm() must not save
+    # back a pre-arm snapshot and drop the just-armed attempt.
+    with _LOCK:
+        state = _load(engagement, base_dir)
+        if not state["attempts"]:
+            return {"ok": False,
+                    "error": "no armed attempts — call oracle_arm first"}
+        a = _find(state, attempt_id)
+        if a is None:
+            return {"ok": False, "error": f"no attempt with id {attempt_id!r}"}
+        verdict, reason = _judge(a.get("criterion", {}), evidence, status, baseline)
+        a["verdict"] = verdict
+        a["reason"] = reason
+        a["evidence"] = _clip(evidence, 600)
+        a["checked_ts"] = _now()
+        _save(state, base_dir)
     return {
         "ok": True, "id": a["id"], "verdict": verdict, "reason": reason,
         "objective": a["objective"], "technique": a["technique"],

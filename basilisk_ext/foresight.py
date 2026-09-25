@@ -46,7 +46,15 @@ PROMPT_BLOCK = (
 # (compiled_pattern, reversibility, blast_radius, reason)
 # Order matters: first match wins for the rule floor.
 _CATASTROPHIC: List = [
-    (re.compile(r"\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r)\b.*(/|~|\*|\$HOME)"),
+    # Recursive AND force, in ANY flag arrangement: combined (-rf/-fr), split
+    # (-r … -f), or long-form (--recursive … --force), in either order. The old
+    # rule only caught the single combined token, so `rm -r -f /` and
+    # `rm --recursive --force /` slipped the catastrophic floor entirely.
+    (re.compile(
+        r"\brm\b(?=[^\n]*(?:-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r|"
+        r"(?:-[a-zA-Z]*r\b|--recursive)[^\n]*(?:-[a-zA-Z]*f\b|--force)|"
+        r"(?:-[a-zA-Z]*f\b|--force)[^\n]*(?:-[a-zA-Z]*r\b|--recursive)))"
+        r"[^\n]*(/|~|\*|\$HOME)"),
      "irreversible", "user",
      "recursive force-delete of a broad path — data loss, no undo"),
     (re.compile(r"\b(mkfs|mke2fs|mkfs\.\w+)\b"),
@@ -139,7 +147,7 @@ _RISKY: List = [
     (re.compile(r"\bkill(all)?\s+-9\b"),
      "reversible", "process",
      "hard-kills processes — unsaved state in them is lost", None),
-    (re.compile(r"\b(curl|wget)\b.*\|\s*(sudo\s+)?(bash|sh|python)"),
+    (re.compile(r"\b(curl|wget)\b.*\|\s*(sudo\s+)?(bash|sh|zsh|python)"),
      "hard", "system",
      "pipes a remote script straight into a shell — runs unaudited code", None),
     (re.compile(r"\bchown\s+-R\b.*/(?!home|tmp|opt)"),

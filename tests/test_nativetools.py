@@ -236,21 +236,22 @@ def _run_router(router, tools, single_model=False):
         C.urllib.request.urlopen = real
 
 
-# native tools ship ON — the OpenCode contract is the default. The text
-# `<tool>` protocol stays wired as an automatic per-model fallback (tested
-# below via _tools_rejected), but the default request carries the tools schema.
-ck("native_tool_calls defaults to ON",
-   C.DEFAULT_SETTINGS.get("native_tool_calls") is True,
+# native tools ship OFF — it regressed on the live SiliconFlow·DeepSeek stack
+# (empty calls, model goes silent), so the text `<tool>` protocol is the reliable
+# default. The structured path stays wired and correct as a Settings opt-in
+# (tested below), but the default request carries NO tools.
+ck("native_tool_calls defaults to OFF",
+   C.DEFAULT_SETTINGS.get("native_tool_calls") is False,
    str(C.DEFAULT_SETTINGS.get("native_tool_calls")))
 _run_router(_router(), _TOOLS)
-ck("default (ON) -> tools sent, model uses the structured protocol",
-   _SENT and _SENT[0].get("tools") == _TOOLS,
-   str(_SENT[0].get("tools") if _SENT else None))
-
-_run_router(_router(native_tool_calls=False), _TOOLS)
-ck("native_tool_calls=False -> no tools sent (opt-out still works)",
+ck("default (OFF) -> no tools sent, model uses the text protocol",
    "tools" not in (_SENT[0] if _SENT else {}),
    str(sorted(_SENT[0])) if _SENT else "no request")
+
+_run_router(_router(native_tool_calls=True), _TOOLS)
+ck("native_tool_calls=True -> tools sent (opt-in still works)",
+   _SENT and _SENT[0].get("tools") == _TOOLS,
+   str(_SENT[0].get("tools") if _SENT else None))
 
 _run_router(_router(), _TOOLS, single_model=True)
 ck("a sidecar (single_model) call never sends tools",

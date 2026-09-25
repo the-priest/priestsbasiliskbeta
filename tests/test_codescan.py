@@ -133,5 +133,37 @@ check("normal keeps the live-verifier", _has_tool("normal", "trufflehog"))
 check("unknown intensity normalises to normal",
       cs.scan_plan(".", "auto", "banana")["intensity"] == "normal")
 
+print("== grype has its own parser (was silently routed to trivy → 0 findings) ==")
+_grype = json.dumps({"matches": [{
+    "vulnerability": {"id": "CVE-2021-1234", "severity": "Critical",
+                      "description": "bad thing",
+                      "fix": {"versions": ["1.2.3"], "state": "fixed"},
+                      "urls": ["https://nvd.nist.gov/vuln/detail/CVE-2021-1234"]},
+    "artifact": {"name": "libfoo", "version": "1.0.0",
+                 "locations": [{"path": "/app/libfoo"}]}}]})
+_gr = cs.parse_scan("grype", _grype)
+check("grype parses (does not silently drop)", _gr["ok"] and len(_gr["findings"]) == 1)
+check("grype reads matches[].vulnerability, not Results[]",
+      _gr["findings"][0]["rule"] == "CVE-2021-1234")
+check("grype severity mapped", _gr["findings"][0]["severity"] == "critical")
+check("grype package+fix pulled",
+      _gr["findings"][0]["package"] == "libfoo"
+      and _gr["findings"][0].get("fixed") == "1.2.3")
+
+print("== OSV severity: a CVSS *vector* string is not buried as info ==")
+# severity[].score in OSV is a CVSS vector, which cannot be float()'d. Before the
+# fix this fell through to "info"; now we use groups[].max_severity / db_specific.
+_osv_vec = json.dumps({"results": [{"source": {"path": "reqs.txt"}, "packages": [{
+    "package": {"name": "evil", "version": "1.0"},
+    "groups": [{"ids": ["GHSA-xxxx"], "max_severity": "9.8"}],
+    "vulnerabilities": [{
+        "id": "GHSA-xxxx", "summary": "rce",
+        "severity": [{"type": "CVSS_V3",
+                      "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]}]}]}]})
+_ov = cs.parse_scan("osv", _osv_vec)
+check("osv finding parsed", _ov["ok"] and len(_ov["findings"]) == 1)
+check("osv CVSS-vector CVE is NOT buried as info",
+      _ov["findings"][0]["severity"] == "critical")
+
 print(f"\n{'='*40}\n  {passed} passed, {failed} failed\n{'='*40}")
 sys.exit(1 if failed else 0)

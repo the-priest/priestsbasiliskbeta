@@ -190,7 +190,7 @@ except Exception as _ve:  # noqa
 
 APP_ID  = "org.thepriest.basilisk"
 APP_NAME = "Basilisk"
-VERSION = "1.2.2.0"
+VERSION = "1.2.3.0"
 
 # ── Tool-chain efficiency knobs ──
 # How many model round-trips a single user turn may chain through.  With
@@ -14494,14 +14494,15 @@ class MainWindow(Adw.ApplicationWindow):
         # lists exactly the tools it was told about (leashed vs armed tracks
         # automatically) and never a phantom one. Agent mode only — the model
         # can only act then — and cached by prompt so it is parsed once, not
-        # every turn. Native tool-calling is ON by default (the OpenCode
-        # contract); the text `<tool>` protocol is retained as an automatic
-        # per-model fallback when a provider rejects the tools field. The
-        # fallback here is True, in lockstep with DEFAULT_SETTINGS and the
-        # router gate, so a settings dict missing the key still drives natively.
+        # every turn. OPT-IN: native tool-calling is OFF by default (it
+        # regressed on the live setup — empty calls, model goes silent); the
+        # text `<tool>` protocol is the driver unless the operator turns this on
+        # in Settings. The fallback here is False on purpose, in lockstep with
+        # DEFAULT_SETTINGS and the router gate, so a settings dict missing the
+        # key never flips it on.
         _tools = None
         if self.current_agent_mode and self.settings.get(
-                "native_tool_calls", True):
+                "native_tool_calls", False):
             try:
                 _ph = hash(sysprompt)
                 _c = getattr(self, "_tools_cache", None)

@@ -6,7 +6,7 @@
 
 <br/>
 
-<img src="https://img.shields.io/badge/version-1.2.2.0-d97757?style=for-the-badge&labelColor=08090b" alt="version 1.2.2.0">
+<img src="https://img.shields.io/badge/version-1.2.3.0-d97757?style=for-the-badge&labelColor=08090b" alt="version 1.2.3.0">
 <img src="https://img.shields.io/badge/tests-5162%20assertions-2ea043?style=for-the-badge&labelColor=08090b&logo=pytest&logoColor=2ea043" alt="5162 assertions">
 <img src="https://img.shields.io/badge/licence-MIT-e11d2b?style=for-the-badge&labelColor=08090b" alt="MIT">
 <img src="https://img.shields.io/badge/deps-stdlib%20%2B%20GTK-e11d2b?style=for-the-badge&labelColor=08090b" alt="stdlib + GTK">
@@ -42,11 +42,11 @@ Basilisk runs shell commands and edits files **as you**. Read the installer befo
 **Native packages** — recommended, because they resolve the GTK stack for you:
 
 ```bash
-sudo apt install ./priestsbasilisk_1.2.2.0-1_all.deb
+sudo apt install ./priestsbasilisk_1.2.3.0-1_all.deb
 ```
 
 ```bash
-sudo pacman -U priestsbasilisk-1.2.2.0-1-any.pkg.tar.zst
+sudo pacman -U priestsbasilisk-1.2.3.0-1-any.pkg.tar.zst
 ```
 
 An auditable `PKGBUILD` lives in `packaging/` and runs the whole test suite as its `check()` step. [`packaging/README.md`](packaging/README.md) covers what each package installs and where.

@@ -594,12 +594,31 @@ def _parse_osv(data: Any) -> List[Dict[str, Any]]:
             p = pkg.get("package", {}) or {}
             name, ver = p.get("name"), p.get("version")
             for v in pkg.get("vulnerabilities", []) or []:
+                # OSV severity is fiddly: severity[].score is usually a CVSS
+                # *vector* string ("CVSS:3.1/AV:N/..."), which _norm_sev cannot
+                # bucket → it would fall through to "info" and bury a critical
+                # CVE. So prefer the curated word from database_specific
+                # (GHSA), then osv-scanner's numeric per-group max_severity,
+                # then any bare-number score, and only then "info".
                 sev = "info"
-                for s in v.get("severity", []) or []:
-                    sev = _norm_sev(s.get("score"))
                 ds = (v.get("database_specific", {}) or {}).get("severity")
                 if ds:
                     sev = _norm_sev(ds)
+                if sev == "info":
+                    for g in pkg.get("groups", []) or []:
+                        if v.get("id") in (g.get("ids") or []):
+                            ms = g.get("max_severity")
+                            if ms not in (None, "", "-1"):
+                                cand = _norm_sev(ms)
+                                if cand != "info":
+                                    sev = cand
+                                    break
+                if sev == "info":
+                    for s in v.get("severity", []) or []:
+                        cand = _norm_sev(s.get("score"))
+                        if cand != "info":
+                            sev = cand
+                            break
                 fixed = None
                 for aff in v.get("affected", []) or []:
                     for rng in aff.get("ranges", []) or []:
@@ -620,6 +639,47 @@ def _parse_osv(data: Any) -> List[Dict[str, Any]]:
                     refs=[r.get("url") for r in (v.get("references") or [])
                           if isinstance(r, dict) and r.get("url")][:5],
                 ))
+    return out
+
+
+def _parse_grype(data: Any) -> List[Dict[str, Any]]:
+    """grype's schema is nothing like trivy's: findings live under top-level
+    `matches[]`, each with `vulnerability` + `artifact`. Routing grype JSON
+    through the trivy parser (which reads `Results[]`) silently dropped every
+    finding while still reporting ok:true — a vulnerable image read as clean."""
+    out = []
+    matches = data.get("matches", []) if isinstance(data, dict) else []
+    for m in matches:
+        if not isinstance(m, dict):
+            continue
+        vuln = m.get("vulnerability", {}) or {}
+        art = m.get("artifact", {}) or {}
+        vid = vuln.get("id")
+        name = art.get("name")
+        fvers = (vuln.get("fix", {}) or {}).get("versions") or []
+        fixed = fvers[0] if fvers else None
+        path = None
+        for loc in art.get("locations", []) or []:
+            if isinstance(loc, dict) and loc.get("path"):
+                path = loc["path"]
+                break
+        out.append(_f(
+            "grype",
+            severity=vuln.get("severity", "info"),
+            title=(vuln.get("description") or vid or "")[:200],
+            file=path,
+            rule=vid,
+            package=name,
+            version=art.get("version"),
+            fixed=fixed,
+            cve=_first_cve(vid),
+            description=(vuln.get("description") or "")[:500],
+            fix=(f"Upgrade {name} to {fixed} or later." if fixed and name
+                 else ("Upgrade to a fixed release." if fixed
+                       else "No fixed version published yet.")),
+            refs=[u for u in (vuln.get("urls") or []) if u][:5]
+                 or ([vuln["dataSource"]] if vuln.get("dataSource") else []),
+        ))
     return out
 
 
@@ -756,7 +816,7 @@ _PARSERS = {
     "semgrep": _parse_semgrep, "bandit": _parse_bandit,
     "gitleaks": _parse_gitleaks, "trufflehog": _parse_trufflehog,
     "osv-scanner": _parse_osv, "osv": _parse_osv,
-    "trivy": _parse_trivy, "grype": _parse_trivy,  # grype JSON differs; trivy is the common case
+    "trivy": _parse_trivy, "grype": _parse_grype,  # distinct schemas — see _parse_grype
     "pip-audit": _parse_pip_audit, "pip_audit": _parse_pip_audit,
     "npm": _parse_npm_audit, "npm-audit": _parse_npm_audit,
     "retire": _parse_retire, "retirejs": _parse_retire,

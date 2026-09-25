@@ -114,7 +114,12 @@ def main() -> int:
                     break
                 time.sleep(1)
             continue
-        interval = max(60, int(settings.get("worker_interval_seconds", 300)))
+        try:
+            interval = max(60, int(settings.get("worker_interval_seconds", 300)))
+        except (TypeError, ValueError):
+            # A hand-edited non-numeric value must not crash-loop the daemon
+            # (this read is outside the tick's try/except below).
+            interval = 300
         try:
             # ── downloads watch ──
             if core and settings.get("watcher_check_downloads", True):

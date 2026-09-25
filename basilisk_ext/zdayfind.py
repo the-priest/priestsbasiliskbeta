@@ -107,7 +107,7 @@ _SIGNATURES: List[Dict[str, Any]] = [
          "exec()/compile() on request-derived strings runs arbitrary Python.",
          "avoid exec; use getattr/dispatch tables over an allow-list."),
     _sig("os-shell", "Shell exec with concatenation -> command injection", "CWE-78", "critical", "any",
-         r"(os\.system|os\.popen|subprocess\.(call|run|Popen|check_output)[^)]*shell\s*=\s*True|child_process\.(exec|execSync)|Runtime\.getRuntime\(\)\.exec|shell_exec|passthru|proc_open)",
+         r"(os\.system|os\.popen|subprocess\.(call|run|Popen|check_output|check_call)\b.*shell\s*=\s*True|subprocess\.(getoutput|getstatusoutput)\s*\(|child_process\.(exec|execSync)|Runtime\.getRuntime\(\)\.exec|shell_exec|passthru|proc_open)",
          "building a shell command from input is the OS-command-injection class.",
          "pass an argv array (no shell), or strictly allow-list arguments."),
     _sig("backtick-exec", "Backtick shell execution", "CWE-78", "high", ("ruby", "php"),

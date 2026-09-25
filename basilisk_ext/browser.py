@@ -542,7 +542,18 @@ def fetch(url: str,
                         # Dropping them is most of the speed of this path.
                         return route.abort()
                 except Exception:
-                    pass
+                    # The floor could not decide (host_ok raised on a malformed
+                    # host, an IDNA/IPv6 form, a DNS error during IP-resolution,
+                    # …). FAIL CLOSED: a request we cannot vet never leaves.
+                    # Failing open here would void the whole "floor on every
+                    # request" guarantee on any predicate error — the classic
+                    # SSRF bypass.
+                    try:
+                        if len(blocked) < 20:
+                            blocked.append((request.url or "")[:200])
+                        return route.abort()
+                    except Exception:
+                        return None
                 try:
                     return route.continue_()
                 except Exception:

@@ -2236,6 +2236,30 @@ def compare_to_baseline(raw: str, rc: int = 0) -> Dict[str, Any]:
                 "warning": ("No baseline recorded, so nothing can be "
                             "attributed. Every failure below might predate "
                             "your edits. Revert, baseline, retry.")}
+    if not p["green"] and not p["failed_names"]:
+        # UNATTRIBUTABLE FAILING RUN — the same trap as the no-baseline branch.
+        # broke/fixed are computed from failing-test NAMES alone; a runner whose
+        # failures we cannot name (cargo's "failures:" block, a custom make
+        # target, a crashed/unparseable log with rc!=0) yields no names, so the
+        # verdict would fall to "no-change"/"progress", clear the counter, and
+        # open the export gate on code that is NOT green. The `green` flag is
+        # computed correctly but the gate never consults it — so guard here.
+        # Verify nothing, keep the counter, keep the gate shut. force=True still
+        # lets the operator override.
+        _STATE.last_verdict = "unattributable"
+        _out = {"ok": True, "unattributable": True, "current": p,
+                "edits_still_unverified": _pending, "green": False,
+                "tail": p["tail"], "exceptions": p["exceptions"],
+                "warning": ("Tests are NOT green but no failing test names could "
+                            "be parsed, so nothing can be attributed to your "
+                            "edits. The export gate stays closed — read `tail`, "
+                            "fix the run so failures are named, or override with "
+                            "force=True.")}
+        if not p["parsed"] and rc != 0:
+            _out["parse_warning"] = (
+                "Could not parse the test output, so names are unavailable and "
+                "this verdict rests on the exit code alone. Read `tail`.")
+        return _out
     _STATE.edits_since_verify = 0
     before = set(_BASELINE.get("failed_names") or [])
     now = set(p["failed_names"])

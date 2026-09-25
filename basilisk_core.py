@@ -493,21 +493,22 @@ DEFAULT_SETTINGS = {
     # sent False on EVERY turn. Flip this True to let them think again (and pay
     # for it). GLM-5.3-Flash is unaffected — its reasoning has no switch.
     "deepseek_thinking": False,
-    # ── NATIVE FUNCTION-CALLING — ON by default; this is the OpenCode contract. ──
-    # The primary path, matching how OpenCode / Claude Code drive tools: the
-    # tools schema goes out in the request, the model replies with structured
-    # `tool_calls`, and structure_tool_messages makes the WHOLE conversation
-    # structured (assistant.tool_calls + role:tool) so the model never sees a
-    # mixed signal. This is the reliable, standard contract every serious
-    # OpenAI-compatible harness uses, and it is what the operator asked Basilisk
-    # to run on.
-    # The TEXT `<tool>` protocol is retained as an AUTOMATIC, per-model fallback:
-    # if a provider/model rejects the tools field (400/422), the backend records
-    # it in `_tools_rejected` and every later turn for that model drops to the
-    # text tag protocol coherently (no schema, no structured history) — so a
-    # tools-incapable model still works, without the operator touching anything.
-    # Flip this False to force the text protocol for every model.
-    "native_tool_calls": True,
+    # ── NATIVE FUNCTION-CALLING — OFF by default; the TEXT protocol is what
+    #    actually works on this stack. ──
+    # The full OpenCode-style implementation is here and correct (schema out,
+    # structured `tool_calls` in, structure_tool_messages makes the whole
+    # conversation structured so there is no mixed signal). It was tried ON by
+    # default and it REGRESSED on the live SiliconFlow · DeepSeek-V4.1-Flash
+    # setup the operator runs: the model emitted malformed/empty call wrappers
+    # and then went silent — so a voice message would transcribe fine and then
+    # get no reply, and every task looked dead. WORSE than the text protocol,
+    # which drove tool calls reliably. So the reliable path is the default: the
+    # model writes a text tool tag, the canonicaliser parses every dialect, and
+    # results go back as tool_result text. Flip this ON in Settings to use the
+    # structured path (complete and safe — the text protocol stays as the
+    # automatic fallback); it is left wired, not removed, so it can be turned on
+    # per-account once a provider's structured calling is verified to hold.
+    "native_tool_calls": False,
     # No cross-model heavy escalation by default: the catalogue is now three
     # Flash-class models and V4.1-Flash IS the best of them, so a "heavier
     # sibling" to escalate to no longer exists. A heavy turn just gets the
@@ -2430,7 +2431,7 @@ class BackendRouter:
         # decision would leave behind).
         _send_native = bool(
             tools and not single_model
-            and self.settings.get("native_tool_calls", True)
+            and self.settings.get("native_tool_calls", False)
             and backend is not None
             and model not in getattr(backend, "_tools_rejected", ()))
         if _send_native:

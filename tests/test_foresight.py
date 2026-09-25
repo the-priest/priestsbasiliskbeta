@@ -169,5 +169,15 @@ for c in ("rm -rf /", "mkfs.ext4 /dev/sda", "dd if=/dev/zero of=/dev/sda"):
     ck(f"block: {c}", r["verdict"] == "block", f"got {r['verdict']}")
     ck(f"no undo offered: {c}", r["undo"] is None)
 
+print("\n== rm -rf bypass is closed: split & long-form flags also block ==")
+for c in ("rm -r -f /home/user", "rm -f -r /*", "rm --recursive --force /",
+          "rm --force --recursive ~", "rm -r -f $HOME"):
+    r = _rule_floor(c)
+    ck(f"block (split/long-form): {c}", r["verdict"] == "block", f"got {r['verdict']}")
+# and a plain recursive-only rm of a local build dir is NOT a catastrophe
+ck("rm -r ./build is not force-blocked as catastrophic",
+   _rule_floor("rm -r ./build")["verdict"] != "block"
+   or _rule_floor("rm -r ./build")["undo"] is not None)
+
 print(f"\nforesight: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

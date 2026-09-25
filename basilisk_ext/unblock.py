@@ -310,6 +310,10 @@ def run_supervised(
                 except Exception:
                     pass
         threading.Thread(target=_feed_stdin, daemon=True).start()
+    # NB: when stdin_data is None the write end is deliberately left OPEN, so the
+    # tier-2 unblock can close it as an intervention (and report "was blocked
+    # reading stdin") if the child stalls on a prompt. It is closed on the
+    # normal-exit path below so the fd is not leaked past the run.
 
     def _pump(stream, cap):
         # read1(), NOT read(). BufferedReader.read(n) blocks until it has all n
@@ -431,6 +435,15 @@ def run_supervised(
                 break
             except Exception:
                 continue
+
+    # Release the stdin write end now the run is over (it is left open during the
+    # run so the tier-2 unblock can close it as an intervention). Harmless if a
+    # feeder thread or that intervention already closed it.
+    try:
+        if proc.stdin and not proc.stdin.closed:
+            proc.stdin.close()
+    except Exception:
+        pass
 
     t_out.join(timeout=2)
     t_err.join(timeout=2)

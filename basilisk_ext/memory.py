@@ -305,25 +305,35 @@ class MemoryStore:
     # ── write ─────────────────────────────────────────────────────────
     def remember(self, text: str, kind: str = "fact",
                  salience: float = 0.5, source: str = "manual") -> Optional[int]:
-      with self._lock:
         text = (text or "").strip()
         if len(text) < 4:
             return None
-        if self._is_duplicate(text):
-            return None
+        # Cheap duplicate check first (under the lock, DB read).
+        with self._lock:
+            if self._is_duplicate(text):
+                return None
+        # Embed OUTSIDE the lock: embed_fn is a network/model round-trip, and
+        # holding self._lock across it stalls every UI-thread recall (which
+        # needs the same lock) for the full trip — backfill_embeddings embeds
+        # outside the lock for exactly this reason. Re-check for a duplicate
+        # under the lock before inserting, in case a concurrent writer added the
+        # same text while we were embedding.
         emb = None
         if self.embed_fn:
             try:
-                v = self.embed_fn([text])[0]
-                emb = _pack(v)
+                emb = _pack(self.embed_fn([text])[0])
             except Exception:
                 emb = None
-        cur = self._write(
-            "INSERT INTO memories(ts, kind, text, salience, source, embedding) "
-            "VALUES(?,?,?,?,?,?)",
-            (time.time(), kind, text, max(0.0, min(1.0, salience)), source, emb))
-        self._db.commit()
-        return cur.lastrowid
+        with self._lock:
+            if self._is_duplicate(text):
+                return None
+            cur = self._write(
+                "INSERT INTO memories(ts, kind, text, salience, source, "
+                "embedding) VALUES(?,?,?,?,?,?)",
+                (time.time(), kind, text, max(0.0, min(1.0, salience)),
+                 source, emb))
+            self._db.commit()
+            return cur.lastrowid
 
     def _is_duplicate(self, text: str) -> bool:
       with self._lock:
@@ -453,8 +463,15 @@ class MemoryStore:
         sem_rows: Dict[int, sqlite3.Row] = {}
         if qv is not None:
             emb = []
+            # Bound the semantic scan: the store is append-forever and this runs
+            # every turn, doing pure-Python cosine over each embedded row. On the
+            # phone target that is seconds/turn once the store is large. Cap it to
+            # the most recent N embedded rows (recency is the best cheap prior);
+            # a true fix is an ANN index.
+            _cap = max(2000, k * 200)
             for r in self._db.execute(
-                    "SELECT * FROM memories WHERE embedding IS NOT NULL"):
+                    "SELECT * FROM memories WHERE embedding IS NOT NULL "
+                    "ORDER BY id DESC LIMIT ?", (_cap,)):
                 emb.append((_cosine(qv, _unpack(r["embedding"])), r))
             if emb:
                 sims = sorted(s for s, _ in emb)

@@ -112,7 +112,15 @@ class MCPServer:
         except Exception as e:
             raise MCPError(f"server '{self.name}': failed to launch: {e}")
         self._start_readers()
-        self._handshake(timeout)
+        try:
+            self._handshake(timeout)
+        except Exception:
+            # Handshake failed/timed out: the process and both reader threads are
+            # live but no caller cleans them up (discover()/call() only record
+            # the error; extman drops the reference). Tear them down here so a
+            # misconfigured or slow server does not orphan a subprocess.
+            self.stop()
+            raise
 
     # ── stream ownership ──────────────────────────────────────────────
     #
@@ -186,8 +194,20 @@ class MCPServer:
             self._readers.append(t)
 
     def stop(self) -> None:
+        # Terminate FIRST, before taking the lock. _request holds self._lock for
+        # the whole duration of an in-flight call (up to _DEFAULT_TIMEOUT, waiting
+        # on the inbox), so grabbing the lock first would make stop() — and thus
+        # the Settings MCP toggle and app exit — hang behind a wedged server.
+        # terminate() closes the child's pipes, the reader hits EOF and pushes the
+        # None sentinel, and the hung _request returns at once; then the lock is
+        # free to reset state.
+        p = self._proc
+        if p is not None:
+            try:
+                p.terminate()
+            except Exception:
+                pass
         with self._lock:
-            p = self._proc
             self._proc = None
             self._initialized = False
             # Retire this generation so the pumps exit instead of feeding a
@@ -201,7 +221,6 @@ class MCPServer:
         except Exception:
             pass
         try:
-            p.terminate()
             p.wait(timeout=5)
         except Exception:
             try:
