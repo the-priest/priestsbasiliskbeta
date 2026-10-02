@@ -60,6 +60,42 @@ def _safe_name(name: Optional[str]) -> str:
     return name[:64]
 
 
+# ── secret scrubbing at the ledger boundary ─────────────────────────────
+# Evidence must be faithful, but "faithful" never means "store the operator's
+# live API key on disk".  A `run` call like `cat settings.json` writes the key
+# to stdout, and an MCP tool can return a token; both used to land here
+# verbatim (the ledger only hashed/redacted nothing).  The primary defence is
+# upstream — tool_run_command redacts its stdout/stderr — but the ledger is the
+# LAST thing to touch captured output before disk, so it scrubs again.  That
+# also covers callers that never scrub at all (mcp.py records raw tool output
+# straight into record()).
+_SCRUB_PATTERNS = (
+    (re.compile(r"sk-[A-Za-z0-9._\-]{12,}"), "sk-****REDACTED****"),
+    (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._\-]{12,}"), r"\1 ****REDACTED****"),
+    (re.compile(r'(?i)("?(?:api[_-]?key|token|secret|password|passwd)"?\s*[:=]\s*"?)'
+                r'([A-Za-z0-9._\-]{12,})'), r"\1****REDACTED****"),
+)
+
+
+def _scrub(text: Any) -> Any:
+    """Redact known key values and key-shaped tokens from ``text``.
+
+    Prefers ``basilisk_core.redact_secrets`` because it also knows the live
+    registry of configured keys, but falls back to the patterns above so the
+    ledger still scrubs when used standalone.  Both paths are idempotent.
+    """
+    if not isinstance(text, str) or not text:
+        return text  # None / "" pass through untouched
+    try:
+        from basilisk_core import redact_secrets
+        return redact_secrets(text)
+    except Exception:
+        out = text
+        for rx, repl in _SCRUB_PATTERNS:
+            out = rx.sub(repl, out)
+        return out
+
+
 class EvidenceLedger:
     """Append-only evidence store for a tree of engagements.
 
@@ -75,6 +111,11 @@ class EvidenceLedger:
         self._engagement = _safe_name(engagement)
         try:
             self.base_dir.mkdir(parents=True, exist_ok=True)
+            # Captured output can contain secrets (see _scrub); keep the whole
+            # evidence tree owner-only.  The parent config dir is already 0700,
+            # but the artifact files were written 0644 — one chmod of the parent
+            # away from being world-readable.
+            os.chmod(self.base_dir, 0o700)
         except Exception:
             pass  # fail-safe: recording will no-op if the dir can't be made
 
@@ -200,8 +241,9 @@ class EvidenceLedger:
                 step = self._next_step(engagement)
                 ts = time.time()
 
-                stdout = result.get("stdout") or ""
-                stderr = result.get("stderr") or ""
+                command_safe = _scrub(command)
+                stdout = _scrub(result.get("stdout") or "")
+                stderr = _scrub(result.get("stderr") or "")
                 so_b = stdout.encode("utf-8", "replace")
                 se_b = stderr.encode("utf-8", "replace")
 
@@ -209,7 +251,7 @@ class EvidenceLedger:
                 artifact_sha = None
                 if so_b or se_b:
                     artifact_rel = self._write_artifact(
-                        engagement, step, command, so_b, se_b)
+                        engagement, step, command_safe, so_b, se_b)
                     # ── HASH THE FILE THAT WAS ACTUALLY WRITTEN ──
                     # The per-section hashes below stay, but they cannot BE the
                     # integrity check.  verify() had to RE-DERIVE stdout and
@@ -241,13 +283,13 @@ class EvidenceLedger:
                     "engagement": engagement,
                     "step": step,
                     "kind": kind,
-                    "command": command,
-                    "reason": reason or "",
+                    "command": command_safe,
+                    "reason": _scrub(reason or ""),
                     "cwd": _safe_cwd(),
                     "user": _safe_user(),
                     "ok": bool(result.get("ok", False)),
                     "rc": result.get("rc"),
-                    "error": result.get("error"),
+                    "error": _scrub(result.get("error")),
                     "duration_ms": result.get("duration_ms"),
                     "stdout_bytes": len(so_b),
                     "stderr_bytes": len(se_b),
@@ -259,9 +301,13 @@ class EvidenceLedger:
                 }
                 event["entry_sha256"] = self._entry_digest(event)
                 line = json.dumps(event, ensure_ascii=False)
-                with open(self._ledger_path(engagement), "a",
-                          encoding="utf-8") as f:
+                _lpath = self._ledger_path(engagement)
+                with open(_lpath, "a", encoding="utf-8") as f:
                     f.write(line + "\n")
+                try:
+                    os.chmod(_lpath, 0o600)
+                except Exception:
+                    pass
                 return event
         except Exception:
             return None  # fail-safe — never break the run loop
@@ -271,11 +317,20 @@ class EvidenceLedger:
         try:
             adir = self._artifact_dir(engagement)
             adir.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(adir, 0o700)
+            except Exception:
+                pass
             fname = f"step-{step:04d}.txt"
             blob = (b"# command: " + command.encode("utf-8", "replace") + b"\n"
                     b"# --- stdout ---\n" + so_b +
                     b"\n# --- stderr ---\n" + se_b + b"\n")
-            (adir / fname).write_bytes(blob)
+            target = adir / fname
+            target.write_bytes(blob)
+            try:
+                os.chmod(target, 0o600)
+            except Exception:
+                pass
             return f"{adir.name}/{fname}"
         except Exception:
             return None

@@ -19011,7 +19011,16 @@ class MainWindow(Adw.ApplicationWindow):
                         _led.record(command, reason, r)
                 except Exception:
                     pass
-                if r.get("ok"):
+                # RAN, WITH OR WITHOUT A ZERO EXIT.  `ok` is rc == 0, so a
+                # command that exited non-zero used to skip every branch that
+                # shows output and land in the `else` below as a bare
+                # `error: None` — the rc, stdout and stderr all thrown away.
+                # A finished process with an exit status is a RESULT, not an
+                # empty failure, whatever the status says.  (`partial` is
+                # excluded: a stall has its own branch and is not a result.)
+                if r.get("ok") or (not r.get("partial")
+                                   and (r.get("rc") is not None
+                                        or r.get("stdout") or r.get("stderr"))):
                     # `.get` throughout, not `r['rc']`.  This runs on a worker
                     # thread whose only job is to produce a tool result; a
                     # KeyError here used to kill the thread, and with it the
@@ -19061,8 +19070,14 @@ class MainWindow(Adw.ApplicationWindow):
                         f"{len(r.get('stdout') or '')} chars of output", "error")
                     out = "\n".join(parts)
                 else:
-                    out = f"$ {command}\nerror: {r.get('error')}"
-                    self.terminal_log(f"✗ {r.get('error')}", "error")
+                    # Genuinely nothing ran: a gate refusal, a startup failure,
+                    # or an executor that returned no status and no bytes. Never
+                    # emit the literal `error: None` — name what happened.
+                    _err = (r.get("error") or r.get("diagnosis")
+                            or "the command produced no output and no exit "
+                               "status — the executor returned nothing")
+                    out = f"$ {command}\nerror: {_err}"
+                    self.terminal_log(f"✗ {_err}", "error")
                 feed(out)
             self._tool_thread(_bg, f"run {command.strip().split()[0]}"
                               if command.strip() else "run")

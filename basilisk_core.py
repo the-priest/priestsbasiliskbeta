@@ -4209,6 +4209,16 @@ def tool_run_command(command: str, timeout: int = 30,
             # actually runs, so leaving it out would have fixed nothing.
             _so, _so_n = _clean_capture(r.get("stdout") or "")
             _se, _se_n = _clean_capture(r.get("stderr") or "")
+            # Redact secret-shaped tokens HERE, before anything downstream
+            # reads this dict — the model, the chat history and the evidence
+            # ledger all consume it.  The fallback path (_format_run_result)
+            # has always redacted; the supervised path is the one that ACTUALLY
+            # runs, and it only did the binary scrub.  So `cat settings.json`
+            # or `env` copied the live API key verbatim into the evidence
+            # artifacts (and to the model).  This is the hole that leaked the
+            # operator's SiliconFlow key.
+            _so = redact_secrets(_so)
+            _se = redact_secrets(_se)
             out = {
                 "ok": bool(r.get("ok")),
                 "command": command,
@@ -4224,6 +4234,12 @@ def tool_run_command(command: str, timeout: int = 30,
                     f"{_so_n + _se_n} control/binary byte(s) in this command's "
                     f"output were replaced with U+FFFD — it wrote raw binary to "
                     f"the terminal. Redirect it to a file if you need the bytes.")
+            # Carry the executor's OWN reason through when it gave one ("the
+            # command could not be started: …"). The old code never copied it,
+            # so the specific cause was dropped and the guard below replaced it
+            # with a generic line.
+            if r.get("error"):
+                out["error"] = redact_secrets(r["error"])
             # A result with NO output, NO rc and NO error is the shape the
             # operator kept seeing reported as "error: None" — a turn that
             # tells him nothing at all. If the executor came back that empty,
@@ -4232,12 +4248,13 @@ def tool_run_command(command: str, timeout: int = 30,
             if (out["rc"] is None and not out["stdout"] and not out["stderr"]
                     and not r.get("partial")):
                 out["ok"] = False
-                out["error"] = (
-                    "the command produced no output and no exit status — the "
-                    "executor returned nothing. It may have been killed, or it "
-                    "wrote only to a terminal device. Re-run it redirecting "
-                    "both streams to files (`cmd >/tmp/o 2>/tmp/e; echo rc=$?`) "
-                    "and read those.")
+                if not out.get("error"):
+                    out["error"] = (
+                        "the command produced no output and no exit status — the "
+                        "executor returned nothing. It may have been killed, or it "
+                        "wrote only to a terminal device. Re-run it redirecting "
+                        "both streams to files (`cmd >/tmp/o 2>/tmp/e; echo rc=$?`) "
+                        "and read those.")
             if r.get("partial"):
                 # NOT ok, but the output is still here — that is the whole
                 # point. Never report a stall as an empty failure.
@@ -4247,6 +4264,16 @@ def tool_run_command(command: str, timeout: int = 30,
                 out["unblocked"] = r.get("unblocked")
                 out["diagnosis"] = r.get("diagnosis")
                 out["elapsed_s"] = r.get("elapsed_s")
+            # `ok` is rc == 0, so ANY non-zero exit lands here with no `error`
+            # key at all. Consumers that report "why did it fail" read `error`,
+            # and a missing key stringifies to "None" — "error: None" with the
+            # rc and stderr discarded. Name the exit; the rc and full stderr
+            # still travel alongside.
+            if not out["ok"] and not out.get("error") and not out.get("partial"):
+                out["error"] = (
+                    f"command exited {out.get('rc')}"
+                    if out.get("rc") is not None
+                    else "the command did not complete")
             low = (out["stderr"] or "").lower()
             if needs_sudo and out["rc"] not in (0, None) and (
                     "a terminal is required" in low
