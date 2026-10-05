@@ -13817,6 +13817,10 @@ class MainWindow(Adw.ApplicationWindow):
         "email_header_injection": "building an email-header injection",
         "websocket_probe":    "probing WebSockets",
         "oauth_probe":        "probing the OAuth flow",
+        "jndi_injection":     "building a JNDI/Log4Shell lookup",
+        "expression_language_injection": "building an EL-injection payload",
+        "http_parameter_pollution": "building a parameter-pollution probe",
+        "web_cache_deception": "probing cache deception",
         "attack_surface":     "mapping the attack surface",
         "verify_solve":       "confirming the solve against ground truth",
         "webapp_recon":       "sweeping the app",
@@ -16841,6 +16845,32 @@ class MainWindow(Adw.ApplicationWindow):
                 return _ext_unavailable("xslt_injection", "exploits")
             return lambda: _exploits.xslt_injection(
                 a.get("mode", "detect"), a.get("cmd", a.get("command", "id")))
+        if n == "jndi_injection":
+            if _exploits is None:
+                return _ext_unavailable("jndi_injection", "exploits")
+            return lambda: _exploits.jndi_injection(
+                a.get("mode", "detect"),
+                a.get("host", a.get("callback", a.get("listener", "OOB_HOST"))),
+                a.get("surface", "all"))
+        if n == "expression_language_injection":
+            if _exploits is None:
+                return _ext_unavailable("expression_language_injection",
+                                        "exploits")
+            return lambda: _exploits.expression_language_injection(
+                a.get("engine", a.get("mode", "detect")),
+                a.get("cmd", a.get("command", "id")))
+        if n == "http_parameter_pollution":
+            if _exploits is None:
+                return _ext_unavailable("http_parameter_pollution", "exploits")
+            return lambda: _exploits.http_parameter_pollution(
+                a.get("mode", "duplicate"),
+                a.get("param", a.get("key", a.get("name", "id"))))
+        if n == "web_cache_deception":
+            if _exploits is None:
+                return _ext_unavailable("web_cache_deception", "exploits")
+            return lambda: _exploits.web_cache_deception(
+                a.get("mode", "probe"),
+                a.get("path", a.get("url", a.get("target", "/account"))))
         if n == "parse_scan":
             return lambda: tool_parse_scan(
                 a.get("tool", a.get("scanner", a.get("name", ""))),
@@ -17886,6 +17916,30 @@ class MainWindow(Adw.ApplicationWindow):
                 _ext_unavailable("xslt_injection", "exploits") if _exploits is None
                 else lambda: _exploits.xslt_injection(
                     a.get("mode", "detect"), a.get("cmd", a.get("command", "id")))),
+            "jndi_injection":     lambda a: self._tool_simple(
+                _ext_unavailable("jndi_injection", "exploits") if _exploits is None
+                else lambda: _exploits.jndi_injection(
+                    a.get("mode", "detect"),
+                    a.get("host", a.get("callback", a.get("listener", "OOB_HOST"))),
+                    a.get("surface", "all"))),
+            "expression_language_injection": lambda a: self._tool_simple(
+                _ext_unavailable("expression_language_injection", "exploits")
+                if _exploits is None
+                else lambda: _exploits.expression_language_injection(
+                    a.get("engine", a.get("mode", "detect")),
+                    a.get("cmd", a.get("command", "id")))),
+            "http_parameter_pollution": lambda a: self._tool_simple(
+                _ext_unavailable("http_parameter_pollution", "exploits")
+                if _exploits is None
+                else lambda: _exploits.http_parameter_pollution(
+                    a.get("mode", "duplicate"),
+                    a.get("param", a.get("key", a.get("name", "id"))))),
+            "web_cache_deception": lambda a: self._tool_simple(
+                _ext_unavailable("web_cache_deception", "exploits")
+                if _exploits is None
+                else lambda: _exploits.web_cache_deception(
+                    a.get("mode", "probe"),
+                    a.get("path", a.get("url", a.get("target", "/account"))))),
             "parse_scan":         lambda a: self._tool_simple(
                 lambda: tool_parse_scan(
                     a.get("tool", a.get("scanner", a.get("name", ""))),
