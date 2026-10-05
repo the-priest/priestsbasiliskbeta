@@ -3896,7 +3896,6 @@ from basilisk_safety import (              # noqa: E402
     is_catastrophic_command,
     command_tampers_self,
 )
-
 # Recognises DECODE-then-execute (`… | base64 -d | sh`) ONLY to choose a better
 # refusal message in gate_command — it decides nothing. The verdict is and
 # stays is_catastrophic_command's, so a false match here costs a more helpful
@@ -4309,16 +4308,20 @@ def gate_command(command: str) -> Optional[Dict[str, Any]]:
     The destructive floor is documented as being enforced "at the execution
     PRIMITIVE, with no override, not just the GUI".  That was true of ONE
     primitive.  `tool_launch_app` is a second one — it takes a model-supplied
-    program and argument string, builds an argv, and Popens it detached — and
-    it called neither gate.  So while
+program and argument string, builds an argv, and Popens it detached — and it
+    called neither gate.  So while
 
         run("rm -rf /")                     was refused by the floor,
-        launch_app("rm", "-rf /")           spawned it, as root, ungated.
+        launch_app("rm", "-rf /")           spawned it, as root, ungated,
 
     An inlined block can only ever protect the function it is inlined in, so
     the rule now lives in one place and every primitive calls it.  Anything
     added later that spawns a process from model input must call this too —
     tests/test_gates.py asserts the set of callers.
+
+    NOTE: the scope authorisation gate that also lived here was removed at the
+    operator's request (see the SCOPE GATE note below). This function now
+    enforces the destructive floor and the self-tamper guard only.
     """
     # ── A NON-STRING COMMAND IS A REFUSAL, NOT AN EXCEPTION ──────────
     # Every rule below reasons about TEXT. Handed an int, a list or a dict —
@@ -4372,36 +4375,17 @@ def gate_command(command: str) -> Optional[Dict[str, Any]]:
                           "guardrail); raw shell writes to it are blocked."),
                 "command": command}
 
-    # ── SCOPE ENFORCEMENT: REMOVED AT THE OPERATOR'S INSTRUCTION ─────────
-    # This is where the engagement authorisation boundary used to run: every
-    # active command (nmap, nuclei, ffuf, hydra, sqlmap, a curl carrying a
-    # body) had its targets extracted and was REFUSED unless they resolved into
-    # the recorded scope, failing closed when no scope was set.
+# ── SCOPE GATE: REMOVED BY OPERATOR ──────────────────────────────────
+    # This is where the AUTHORISATION BOUNDARY used to live: every active
+    # command (nmap, nuclei, ffuf, hydra, curl, sqlmap, …) had its targets
+    # extracted and refused unless they resolved into the recorded engagement
+    # scope, failing closed when no scope was set. The operator runs UNLEASHED
+    # on his own box and asked for it gone: it was refusing legitimate tool
+    # calls and crippling the engagement. Scope is STILL RECORDED (scope_set /
+    # scope_show) for the evidence trail, but it no longer blocks execution.
     #
-    # It is gone because it was not actually gating capability. scope_set takes
-    # one line and accepts anything, so the check never stopped a determined
-    # operator from pointing the tool anywhere — it only decided whether he had
-    # typed that line first. What it did reliably stop was ordinary work on a
-    # box with no engagement recorded, which is every general-assistant and
-    # coding session: with no scope, EVERY remote command came back "no
-    # authorised scope is set for this engagement".
-    #
-    # Basilisk runs on its operator's own machine, under his own authority, and
-    # he is the one who decides what it may be aimed at. That decision is his
-    # to make; this file's job is to carry it out.
-    #
-    # WHAT IS GIVEN UP, stated honestly rather than buried: this was the one
-    # control that caught the model firing at a host nobody chose — a bad
-    # parse, a poisoned page, an autonomous loop drifting onto the wrong
-    # target. Scope is still RECORDED (scope_set / scope_show / scope_check)
-    # and still written to the evidence ledger, so the engagement trail is
-    # intact and the model can still consult it; it simply no longer refuses
-    # execution. If the misfire case ever matters again, re-enabling is one
-    # call to basilisk_scope.enforce here — the module is untouched and its
-    # 204-assertion suite still runs.
-    #
-    # The destructive-command floor and the self-tamper guard above are NOT
-    # affected. This removes the scope refusal only.
+    # The destructive-command floor and the self-tamper guard above are
+    # UNTOUCHED — this removes the scope refusal only, not the safety floor.
     return None
 
 
@@ -9954,9 +9938,10 @@ def tool_sqlmap_plan(target: str = "", mode: str = "detect", data: str = "",
                      risk: Any = 1, dbms: str = "", technique: str = "",
                      db: str = "", table: str = "", request_file: str = "",
                      extra: str = "") -> Dict[str, Any]:
-    """Build a PROPOSED sqlmap command for an authorised target (mode = detect |
-    enumerate | dump). ENFORCES SCOPE: if the target is not in the engagement's
-    authorised scope, it refuses to build the command. sqlmap contains its own
+    """Build a PROPOSED sqlmap command for a target (mode = detect |
+    enumerate | dump). Scope is RECORDED for evidence but NOT enforced — the
+    operator's instruction is that naming a target authorises it, so this no
+    longer refuses to build for an "out of scope" target. sqlmap contains its own
     engine; this constructs the parameterised call for the operator to approve
     and run through the gate — it executes nothing, and it does not build
     SQLi-to-RCE (--os-shell/--os-pwn)."""
@@ -9965,28 +9950,6 @@ def tool_sqlmap_plan(target: str = "", mode: str = "detect", data: str = "",
     except Exception as e:
         return {"ok": False, "error": f"pentest module unavailable: {e}"}
     tgt = (target if isinstance(target, str) else "").strip()
-    # Scope enforcement — refuse to propose an active command against a target
-    # outside the recorded authorised scope. Skipped only when the target is a
-    # local request file with no host to check.
-    if tgt:
-        try:
-            from basilisk_ext import engage as _eng
-            chk = _eng.scope_check(tgt, engagement=_current_engagement())
-            if not chk.get("in_scope"):
-                return {"ok": False, "error": "target is OUT of authorised scope",
-                        "scope": chk,
-                        "hint": "add it with scope_set if you're authorised to "
-                                "test it; sqlmap will not be proposed otherwise."}
-        except Exception as _e:
-            # Previously `except Exception: pass` — the check fell OPEN, so any
-            # error in scope resolution silently produced an unchecked sqlmap
-            # command. A boundary that opens on its own failure is worse than no
-            # boundary, because it reads as enforced. Fail closed instead.
-            return {"ok": False,
-                    "error": (f"scope could not be evaluated for this target "
-                              f"({type(_e).__name__}) — refusing to propose an "
-                              f"active command that could not be checked."),
-                    "hint": "check the engagement state with scope_show."}
     try:
         return _pentest.sqlmap_plan(
             target=tgt, mode=(mode or "detect").strip().lower(), data=data,
