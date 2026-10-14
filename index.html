@@ -526,7 +526,7 @@
       <a href="#verify">Verification</a>
       <a href="#limits">Limits</a>
       <a href="#faq">FAQ</a>
-      <a class="nav-cta" href="https://github.com/the-priest/PriestsBasilisk">
+      <a class="nav-cta" href="https://github.com/the-priest/priestsbasiliskbeta">
         <svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
         GitHub
       </a>
@@ -547,7 +547,7 @@
         <p class="sub minor">And when you need the other thing: one tap of <strong>Unleash</strong> turns the same loop into an autonomous penetration-testing agent — <strong>87 of 113</strong> on OWASP Juice Shop, black-box, on one of the cheapest models on the market. Nothing offensive is loaded until you arm it.</p>
         <p class="sub minor">Your machine. Your key. Your data. MIT-licensed, no account, nothing phoning home. <em>It doesn't guess. It confirms.</em></p>
         <div class="cta-row">
-          <a class="btn btn-primary" href="https://github.com/the-priest/PriestsBasilisk">
+          <a class="btn btn-primary" href="https://github.com/the-priest/priestsbasiliskbeta">
             <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
             View on GitHub
           </a>
@@ -888,8 +888,8 @@ docker run -d -p 3000:3000 -e NODE_ENV=unsafe \
         </div>
         <div class="card">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg>
-          <h3>Scope is a boundary, not a suggestion</h3>
-          <p>Before any active command runs, its targets are extracted and checked against the list you authorised. It <b>fails closed</b>: no scope set, an unparseable command, or no match all mean refused. It reads through <span class="inline-code">sh -c</span>, wrapper prefixes and command substitution — the same shapes the destructive floor handles.</p>
+          <h3>Scope is recorded for the report</h3>
+          <p><span class="inline-code">scope_set</span> records the targets a job was authorised against, and every active command is filed against that scope in the tamper-evident ledger, so the write-up can state what was in scope and prove it afterwards. Scope is <b>bookkeeping, not a gate</b> — it does not refuse commands. The enforced floor is the destructive-command gate and the self-tamper guard, below.</p>
         </div>
         <div class="card">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
@@ -1003,12 +1003,12 @@ docker run -d -p 3000:3000 -e NODE_ENV=unsafe \
         <p>Basilisk runs shell commands as you. So it also ships as plain Python and one shell script you can read start to finish before you run it — which you should, and which is the point of it being one file. The installer detects your distro, parse-checks every file before it touches disk, and backs up your chat history. The same command updates in place.</p>
       </div>
       <div class="code reveal">
-        <div class="code-bar"><span>one line</span><button class="copy" data-copy="curl -fsSL https://raw.githubusercontent.com/the-priest/PriestsBasilisk/main/install.sh | bash">Copy</button></div>
-        <pre>curl -fsSL https://raw.githubusercontent.com/the-priest/PriestsBasilisk/main/install.sh | bash</pre>
+        <div class="code-bar"><span>one line</span><button class="copy" data-copy="curl -fsSL https://raw.githubusercontent.com/the-priest/priestsbasiliskbeta/main/install.sh | bash">Copy</button></div>
+        <pre>curl -fsSL https://raw.githubusercontent.com/the-priest/priestsbasiliskbeta/main/install.sh | bash</pre>
       </div>
       <div class="code reveal">
-        <div class="code-bar"><span>or clone, read, run</span><button class="copy" data-copy="git clone https://github.com/the-priest/PriestsBasilisk.git basilisk&#10;cd basilisk&#10;less install.sh&#10;./install.sh">Copy</button></div>
-        <pre>git clone https://github.com/the-priest/PriestsBasilisk.git basilisk
+        <div class="code-bar"><span>or clone, read, run</span><button class="copy" data-copy="git clone https://github.com/the-priest/priestsbasiliskbeta.git basilisk&#10;cd basilisk&#10;less install.sh&#10;./install.sh">Copy</button></div>
+        <pre>git clone https://github.com/the-priest/priestsbasiliskbeta.git basilisk
 cd basilisk
 less install.sh          <span class="c"># read it first</span>
 ./install.sh</pre>

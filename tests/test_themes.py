@@ -123,6 +123,60 @@ for k in ORDER:
     ck(f"{k}: bg < sidebar < surface < card < line", mono,
        " ".join(f"{x:.4f}" for x in lums))
 
+print("\n== every theme is VISIBLY different, not just technically ==")
+# THE BUG THIS PINS: the first generator re-hued each ember neutral while
+# keeping its exact lightness. The ladder was preserved, the contrast was fine,
+# every assertion above passed — and the themes were invisible. Ember's base is
+# L=0.035, and at three per cent lightness there is no room for chroma, so every
+# hue lands on the same near-black. Measured surfaces moved 1-13 of 255 per
+# channel. The accent changed and the other 90% of the window did not.
+#
+# "The ladder is monotonic and the contrast is legal" is therefore NOT enough to
+# say a theme works. It also has to differ from the one it is replacing, by
+# enough to see. 12/255 on the darkest surface is about the floor of
+# perceptible on a dark panel; the deeper surfaces have more room, so they are
+# held to more.
+#
+# Rung 0 is held to less than the rest, and that is a physical limit rather
+# than a concession: the base surface sits at L=0.062, and a theme whose whole
+# point is to be near-neutral (slate) cannot move far from ember's near-neutral
+# base without ceasing to be near-neutral. The rungs that carry most of the
+# visible area — surfaces, cards, lines — are held to progressively more, and
+# the pairwise check below is what actually guarantees eight distinct looks.
+_MIN_DELTA = (8, 14, 18, 22, 30)    # per ladder rung, darkest first
+
+
+def _chan_delta(a, b):
+    a, b = a.lstrip("#"), b.lstrip("#")
+    return max(abs(int(a[i:i + 2], 16) - int(b[i:i + 2], 16))
+               for i in (0, 2, 4))
+
+
+for k in ORDER:
+    if k == "ember":
+        continue
+    table = THEMES[k][1]
+    worst = []
+    for i, c in enumerate(NEUT):
+        d = _chan_delta(c, table.get(c, c))
+        if d < _MIN_DELTA[i]:
+            worst.append(f"rung{i} moved {d} (need {_MIN_DELTA[i]})")
+    ck(f"{k}: surfaces are visibly different from ember", not worst,
+       "; ".join(worst))
+
+# ...and from EACH OTHER, or the picker offers eight names and one look.
+_seen = {}
+for k in ORDER:
+    table = THEMES[k][1]
+    _seen[k] = tuple(table.get(c, c) for c in NEUT)
+_dupes = [f"{a}=={b}" for i, a in enumerate(ORDER) for b in ORDER[i + 1:]
+          if _seen[a] == _seen[b]]
+ck("no two themes share a surface palette", not _dupes, str(_dupes))
+for i, a in enumerate(ORDER):
+    for b in ORDER[i + 1:]:
+        d = max(_chan_delta(x, y) for x, y in zip(_seen[a], _seen[b]))
+        ck(f"{a} vs {b}: tellable apart", d >= 20, f"max delta {d}")
+
 print("\n== every theme stays legible ==")
 for k in ORDER:
     table = THEMES[k][1]

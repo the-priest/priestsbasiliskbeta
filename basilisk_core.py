@@ -3636,13 +3636,18 @@ from basilisk_safety import (              # noqa: E402
     command_tampers_self,
 )
 
-# Recognises the fetch-piped-into-a-shell shape ONLY to choose a better refusal
-# message in gate_command — it decides nothing. The verdict is and stays
-# is_catastrophic_command's. Deliberately loose: a false match here costs a
-# more helpful error string and nothing else.
-_PIPE_TO_SHELL_RE = re.compile(
-    r"\b(?:curl|wget|wget2|aria2c|fetch|httpie|http)\b[^\n|]*\|[^\n|]*"
-    r"\b(?:ba|z|k|a|da)?sh\b|\bpython3?\b\s*-\s*$",
+# Recognises DECODE-then-execute (`… | base64 -d | sh`) ONLY to choose a better
+# refusal message in gate_command — it decides nothing. The verdict is and
+# stays is_catastrophic_command's, so a false match here costs a more helpful
+# error string and nothing else.
+#
+# This replaced a _PIPE_TO_SHELL_RE that had become unreachable: it matched a
+# bare `curl … | sh`, which the floor stopped refusing, so the branch it
+# guarded could never run. The decoders listed match _DECODERS in
+# basilisk_safety, which is what actually produces the refusal.
+_DECODE_EXEC_RE = re.compile(
+    r"\b(?:base64|base32|xxd|uudecode|openssl)\b[^\n|]*\|[^\n|]*"
+    r"\b(?:ba|z|k|a|da)?sh\b",
     re.IGNORECASE)
 # basilisk_scope is intentionally NOT imported for enforcement any more — the
 # scope refusal was removed from gate_command (see the note there). The module
@@ -4030,19 +4035,24 @@ def _timeout_note(command: str, timeout: int) -> str:
 def gate_command(command: str) -> Optional[Dict[str, Any]]:
     """THE floor. Returns a refusal dict, or None when the command may run.
 
+    What it enforces, and ONLY this:
+      1. the destructive floor   (is_catastrophic_command)
+      2. the self-tamper guard   (command_tampers_self)
+
+    The engagement scope gate used to run here as well and no longer does — it
+    was removed at the operator's instruction; see the note at the end of this
+    function. Scope is still recorded for the evidence trail, but nothing here
+    refuses a command for being out of scope.
+
     ── WHY THIS IS A FUNCTION AND NOT A BLOCK INSIDE tool_run_command ──
-    The destructive floor and the scope gate are documented as being enforced
-    "at the execution PRIMITIVE, with no override, not just the GUI".  That was
-    true of ONE primitive.  `tool_launch_app` is a second one — it takes a
-    model-supplied program and argument string, builds an argv, and Popens it
-    detached — and it called neither gate.  So while
+    The destructive floor is documented as being enforced "at the execution
+    PRIMITIVE, with no override, not just the GUI".  That was true of ONE
+    primitive.  `tool_launch_app` is a second one — it takes a model-supplied
+    program and argument string, builds an argv, and Popens it detached — and
+    it called neither gate.  So while
 
         run("rm -rf /")                     was refused by the floor,
-        launch_app("rm", "-rf /")           spawned it, as root, ungated,
-
-    and `launch_app("nmap", "<out-of-scope-host>")` walked straight past the
-    authorisation boundary that exists precisely to stop that.  Both gates were
-    correct; only one of the two doors had them fitted.
+        launch_app("rm", "-rf /")           spawned it, as root, ungated.
 
     An inlined block can only ever protect the function it is inlined in, so
     the rule now lives in one place and every primitive calls it.  Anything
@@ -4066,43 +4076,31 @@ def gate_command(command: str) -> Optional[Dict[str, Any]]:
                 "command": ""}
     if is_catastrophic_command(command):
         # ── A REFUSAL THAT NAMES THE WAY THROUGH ─────────────────────────
-        # The floor also catches `… | sh` as OPAQUE execution (see
-        # _pipe_chain_is_catastrophic): the gate cannot see what a piped
-        # script will do, and this process ingests untrusted web pages, so
-        # `curl <url> | sh` is a remote-code path that stays shut.
+        # This used to carry a second, special message for `… | sh`, back when
+        # the floor refused it. It no longer does (see
+        # _pipe_chain_is_catastrophic), which made that branch UNREACHABLE: a
+        # command can no longer be both catastrophic and a bare pipe-into-a-
+        # shell, so the regex guarding it matched only commands that were
+        # never refused. Dead code in a safety path is worse than useless —
+        # it reads as a protection that is in force.
         #
-        # But the refusal read "no override; Basilisk will not run this" and
-        # stopped there — and that is the single most common install line in
-        # software (uv, rustup, nvm, bun, deno, ollama, Homebrew all ship it).
-        # So the model hit a dead end on an ordinary request and either gave
-        # up or retried the same string.
-        #
-        # The capability is not denied, only the opaque SHAPE of it: fetch to a
-        # FILE, read it, then run the file. `bash install.sh` is not refused by
-        # this floor, because by then the script is on disk and inspectable.
-        # That is one extra step, and the step is reading the script before it
-        # runs as root, which is the whole point. Say so, so the refusal is a
-        # redirection instead of a wall.
-        #
-        # The fetch itself still answers to the authorisation boundary below
-        # (scope_set), so this names the step without promising it will pass —
-        # a message that over-promises just moves the dead end one command
-        # along. The verdict is unchanged; only the message is.
+        # What DOES still reach here with a pipe in it is decode-then-execute
+        # (`… | base64 -d | sh`), so that is the case worth naming. Its advice
+        # is different from the old three-step one: the problem is not that the
+        # script is unread, it is that the payload is ENCODED, and the fix is
+        # to decode it to a file and look at it.
         _msg = ("REFUSED - catastrophic command (would irreversibly "
                 "destroy the system or its data). Hard safety floor, "
                 "no override; Basilisk will not run this.")
-        if _PIPE_TO_SHELL_RE.search(command or ""):
+        if _DECODE_EXEC_RE.search(command or ""):
             _msg = (
-                "REFUSED - this pipes a downloaded script straight into a "
-                "shell, so what would execute cannot be inspected first. Hard "
-                "safety floor, no override. DO IT IN THREE STEPS INSTEAD: "
-                "(1) fetch it to a file, `curl -fsSL <url> -o /tmp/install.sh` "
-                "(if that comes back out-of-scope, scope_set the host first); "
-                "(2) read it with read_file and check what it does; "
-                "(3) run it, `bash /tmp/install.sh` — which this floor does "
-                "not refuse, because by then the script is on disk and was "
-                "inspectable. Only executing un-inspected remote code is "
-                "blocked, not downloading or installing.")
+                "REFUSED - this decodes a payload and pipes it straight into a "
+                "shell, so what would execute cannot be read first. Hard safety "
+                "floor, no override. Decode it to a FILE instead and look at "
+                "it: `… | base64 -d > /tmp/x.sh`, read_file it, then run it if "
+                "it is what you expected. Note that a plain `curl <url> | sh` "
+                "is NOT refused - only the encoded form is, because encoding "
+                "the payload has no purpose except to hide it.")
         return {"ok": False, "refused": True, "catastrophic": True,
                 "error": _msg, "command": command}
     if command_tampers_self(command):

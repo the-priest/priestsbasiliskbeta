@@ -54,13 +54,13 @@ An auditable `PKGBUILD` lives in `packaging/` and runs the whole test suite as i
 **Or the script**, which detects your distro *and* your privilege-escalation tool (root → nothing, else `sudo`, else `doas`), parse-checks every file before it touches disk, backs up your chat history, and updates in place on the same command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/the-priest/PriestsBasilisk/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/the-priest/priestsbasiliskbeta/main/install.sh | bash
 ```
 
 Or clone, read, then run — the honest path:
 
 ```bash
-git clone https://github.com/the-priest/PriestsBasilisk.git basilisk
+git clone https://github.com/the-priest/priestsbasiliskbeta.git basilisk
 ```
 ```bash
 cd basilisk && less install.sh
@@ -262,7 +262,7 @@ Capability and safety are decoupled on purpose.
 - **Leashed (default)** — the general and coding assistant: the workspace, unrestricted reading, the full shell and desktop. The offensive suite is **refused at the loader**, not merely hidden. Ask it what it can do and it tells you accurately, then reminds you nothing offensive is loaded until you arm it.
 - **🐉 Unleash** — one tap arms the offensive suite and the mission loop, then **waits**. Send an objective and it runs with no per-command approval until that objective is verifiably done, or you stand it down.
 
-**The floor never moves.** The destructive-command gate and the fail-closed scope gate fire in both modes. The catastrophic-command check is not a naive string match — it sees through obfuscation like `rm${IFS}-rf${IFS}/` (**`$IFS`** substitution) and `sh -c '…'` wrappers, and there is **no "run anyway"** override on a catastrophic hit. It is tuned against false positives too: `rm -rf ~/loot` is *your* loot directory and runs fine; it is `/` and raw device nodes that are blocked. The safety guardrail is a byte-identical, test-pinned block, and the engine will not ship if it drifts.
+**The floor never moves.** The destructive-command gate and the self-tamper guard fire in both modes, at the execution primitive, with no override. (Engagement *scope* is recorded for the report — `scope_set` / `scope_show` — but it is not a gate and does not refuse commands.) The catastrophic-command check is not a naive string match — it sees through obfuscation like `rm${IFS}-rf${IFS}/` (**`$IFS`** substitution) and `sh -c '…'` wrappers, and there is **no "run anyway"** override on a catastrophic hit. It is tuned against false positives too: `rm -rf ~/loot` is *your* loot directory and runs fine; it is `/` and raw device nodes that are blocked. The safety guardrail is a byte-identical, test-pinned block, and the engine will not ship if it drifts.
 
 **Reading the web is tiered, not one closed list.** Trusted sources (NVD, OWASP, PortSwigger) are read freely. Community sources like **exploit-db** and GitHub sit on the **approval side, outside the autonomous loop** — any public host is reachable after a one-tap approval, never auto-fetched mid-run. Cloud-metadata endpoints (`169.254.169.254`) and loopback are refused outright.
 
@@ -329,7 +329,7 @@ If it earns its place in your kit, star the repo and tell someone who would use 
 
 <br/><br/>
 
-<a href="https://github.com/the-priest/PriestsBasilisk"><img src="https://img.shields.io/badge/★%20Star%20the%20repo-e11d2b?style=for-the-badge&labelColor=08090b" alt="Star the repo"></a>
+<a href="https://github.com/the-priest/priestsbasiliskbeta"><img src="https://img.shields.io/badge/★%20Star%20the%20repo-e11d2b?style=for-the-badge&labelColor=08090b" alt="Star the repo"></a>
 <a href="#-install"><img src="https://img.shields.io/badge/Install%20in%20one%20line-7d121b?style=for-the-badge&labelColor=08090b" alt="Install"></a>
 
 <img src="https://capsule-render.vercel.app/api?type=waving&color=0:08090b,50:4a0a11,100:e11d2b&height=130&section=footer&text=prove%20everything&fontColor=ffffff&fontSize=28&fontAlignY=72&animation=twinkling" width="100%" alt="prove everything"/>

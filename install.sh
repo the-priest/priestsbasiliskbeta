@@ -30,10 +30,12 @@
 #
 # Env overrides:
 #   BASILISK_REPO=the-priest/PriestsBasilisk  BASILISK_BRANCH=main  ./install.sh
+#   (that example installs the STABLE repo over this beta; see the note at
+#    GITHUB_REPO below, and expect the downgrade guard to stop you)
 #   GROQ_API_KEY=gsk_...        ./install.sh    # preset key, no prompt
 #
 # One-liner install from GitHub:
-#   curl -fsSL https://raw.githubusercontent.com/the-priest/PriestsBasilisk/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/the-priest/priestsbasiliskbeta/main/install.sh | bash
 #
 
 set -eo pipefail   # NOTE: no -u — curl|bash leaves BASH_SOURCE empty

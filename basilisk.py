@@ -20616,20 +20616,50 @@ def _rgb_to_hex(r, g, b):
 
 
 def _tint(hexcolor, hue_deg, sat):
-    """Re-hue a colour while KEEPING ITS LIGHTNESS.
+    """Re-hue a colour while keeping its lightness.
 
-    This is the whole trick, and the reason themes are generated rather than
-    typed. The stylesheet encodes its depth hierarchy in lightness steps —
-    bg #0a090a < sidebar #0d0d0c < surface #11100f < card #171716 < line
-    #232120 — and those five steps are what make a card edge and a focus ring
-    visible at all. Hand-picking replacements flattens them sooner or later;
-    HLS with L pinned cannot, so every theme inherits the same hierarchy and
-    only its hue changes.
+    Used for the LIGHT values only — body text and the off-whites. Those sit
+    around L=0.55-0.90, where there is plenty of room for chroma, so pinning
+    lightness and moving hue gives exactly the intended result: the same
+    legibility, a cooler or warmer cast.
+
+    It is NOT used for the dark surfaces. See _shade.
     """
     import colorsys
     r, g, b = _hex_to_rgb(hexcolor)
     _h, l, _s = colorsys.rgb_to_hls(r, g, b)
     return _rgb_to_hex(*colorsys.hls_to_rgb((hue_deg % 360) / 360.0, l, sat))
+
+
+# The surface ladder, as LIGHTNESS values: bg, sidebar, surface, card, line.
+#
+# WHY THIS EXISTS, AND WHY PINNING EMBER'S OWN LIGHTNESS WAS WRONG.
+# The first version of this generator re-hued each ember neutral while keeping
+# its exact lightness, on the reasoning that the depth hierarchy lives in those
+# lightness steps. The hierarchy survived — and the themes were invisible.
+# Ember's base is #0a090a, i.e. L=0.035, and at three per cent lightness there
+# is almost no room for chroma: every hue at that L is the same near-black.
+# Measured against ember, the surfaces moved by 1-13 of 255 per channel, which
+# on a real screen is nothing. The accent changed and the other 90% of the
+# window did not, so every theme looked like ember with a different highlight.
+#
+# So the ladder is declared here instead of inherited: slightly lifted, so the
+# saturation below has somewhere to live, and still strictly increasing, which
+# is what keeps card edges and focus rings visible. Same ladder for every
+# theme, so they all share one depth hierarchy and differ only in hue — which
+# was the point of generating them in the first place.
+#
+# These values put the surfaces 15-63 per channel away from ember while body
+# text still clears 14:1 on the base. Both are asserted in tests/test_themes.py
+# so neither can quietly regress.
+_NEUTRAL_LADDER = (0.062, 0.082, 0.108, 0.155, 0.235)
+
+
+def _shade(hue_deg, light, sat):
+    """One rung of the surface ladder, in a theme's hue."""
+    import colorsys
+    return _rgb_to_hex(
+        *colorsys.hls_to_rgb((hue_deg % 360) / 360.0, light, sat))
 
 
 # (key, label, neutral hue, neutral saturation, ink saturation, accent triad)
@@ -20655,19 +20685,24 @@ _THEME_SPECS = (
     ("ember",    "Ember — warm charcoal + clay (original)",
      None, 0, 0, None),
     ("violet",   "Violet — black + dark purple",
-     265, 0.30, 0.12, ("#6b34b8", "#a87af0", "#7c3aed")),
+     265, 0.58, 0.14, ("#6b34b8", "#a87af0", "#7c3aed")),
     ("midnight", "Midnight — black + deep blue",
-     219, 0.32, 0.12, ("#2a5cad", "#6aa5f5", "#3568c4")),
+     219, 0.55, 0.14, ("#2a5cad", "#6aa5f5", "#3568c4")),
     ("abyss",    "Abyss — black + teal",
-     189, 0.34, 0.12, ("#10767f", "#45c7d1", "#15868f")),
+     189, 0.55, 0.14, ("#10767f", "#45c7d1", "#15868f")),
     ("rose",     "Rose — black + magenta",
-     330, 0.30, 0.12, ("#a0276b", "#ee6fab", "#bd3180")),
+     330, 0.50, 0.14, ("#a0276b", "#ee6fab", "#bd3180")),
     ("venom",    "Venom — black + toxic lime",
-     92,  0.30, 0.12, ("#4d6b12", "#a9d94e", "#5e7d1b")),
+     92,  0.45, 0.14, ("#4d6b12", "#a9d94e", "#5e7d1b")),
     ("brass",    "Brass — black + bronze",
-     42,  0.32, 0.12, ("#6b5014", "#d9b55e", "#8a6a1f")),
+     42,  0.45, 0.14, ("#6b5014", "#d9b55e", "#8a6a1f")),
     ("slate",    "Slate — black + cool grey (no accent hue)",
-     215, 0.10, 0.08, ("#474d57", "#9aa2b0", "#585f6c")),
+     # slate is the monochrome option, so its saturation is the lowest
+     # here by design — but it still has to be TELLABLE from ember, which
+     # is itself near-neutral. 0.13 left the two within 8/255 on the base
+     # surface. 0.22 reads as a cool grey against ember's warm charcoal,
+     # which is the distinction that makes it worth offering at all.
+     215, 0.22, 0.09, ("#474d57", "#9aa2b0", "#585f6c")),
 )
 
 
@@ -20676,8 +20711,10 @@ def _build_theme(hue, nsat, isat, accent):
     if hue is None or not accent:
         return {}
     table = {}
-    for c in _EMBER_NEUTRALS:
-        table[c] = _tint(c, hue, nsat)
+    # Dark surfaces: the declared ladder, in this theme's hue.
+    for _i, c in enumerate(_EMBER_NEUTRALS):
+        table[c] = _shade(hue, _NEUTRAL_LADDER[_i], nsat)
+    # Light values: lightness-preserving, so text legibility is untouched.
     for c in _EMBER_INK:
         table[c] = _tint(c, hue, isat)
     for old, new in zip(_EMBER_ACCENT, accent):
