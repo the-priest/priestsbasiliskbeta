@@ -3630,6 +3630,15 @@ from basilisk_safety import (              # noqa: E402
     is_catastrophic_command,
     command_tampers_self,
 )
+
+# Recognises the fetch-piped-into-a-shell shape ONLY to choose a better refusal
+# message in gate_command — it decides nothing. The verdict is and stays
+# is_catastrophic_command's. Deliberately loose: a false match here costs a
+# more helpful error string and nothing else.
+_PIPE_TO_SHELL_RE = re.compile(
+    r"\b(?:curl|wget|wget2|aria2c|fetch|httpie|http)\b[^\n|]*\|[^\n|]*"
+    r"\b(?:ba|z|k|a|da)?sh\b|\bpython3?\b\s*-\s*$",
+    re.IGNORECASE)
 from basilisk_scope import enforce as _scope_enforce   # noqa: E402
 
 
@@ -4048,11 +4057,46 @@ def gate_command(command: str) -> Optional[Dict[str, Any]]:
                           f"the command line as text."),
                 "command": ""}
     if is_catastrophic_command(command):
+        # ── A REFUSAL THAT NAMES THE WAY THROUGH ─────────────────────────
+        # The floor also catches `… | sh` as OPAQUE execution (see
+        # _pipe_chain_is_catastrophic): the gate cannot see what a piped
+        # script will do, and this process ingests untrusted web pages, so
+        # `curl <url> | sh` is a remote-code path that stays shut.
+        #
+        # But the refusal read "no override; Basilisk will not run this" and
+        # stopped there — and that is the single most common install line in
+        # software (uv, rustup, nvm, bun, deno, ollama, Homebrew all ship it).
+        # So the model hit a dead end on an ordinary request and either gave
+        # up or retried the same string.
+        #
+        # The capability is not denied, only the opaque SHAPE of it: fetch to a
+        # FILE, read it, then run the file. `bash install.sh` is not refused by
+        # this floor, because by then the script is on disk and inspectable.
+        # That is one extra step, and the step is reading the script before it
+        # runs as root, which is the whole point. Say so, so the refusal is a
+        # redirection instead of a wall.
+        #
+        # The fetch itself still answers to the authorisation boundary below
+        # (scope_set), so this names the step without promising it will pass —
+        # a message that over-promises just moves the dead end one command
+        # along. The verdict is unchanged; only the message is.
+        _msg = ("REFUSED - catastrophic command (would irreversibly "
+                "destroy the system or its data). Hard safety floor, "
+                "no override; Basilisk will not run this.")
+        if _PIPE_TO_SHELL_RE.search(command or ""):
+            _msg = (
+                "REFUSED - this pipes a downloaded script straight into a "
+                "shell, so what would execute cannot be inspected first. Hard "
+                "safety floor, no override. DO IT IN THREE STEPS INSTEAD: "
+                "(1) fetch it to a file, `curl -fsSL <url> -o /tmp/install.sh` "
+                "(if that comes back out-of-scope, scope_set the host first); "
+                "(2) read it with read_file and check what it does; "
+                "(3) run it, `bash /tmp/install.sh` — which this floor does "
+                "not refuse, because by then the script is on disk and was "
+                "inspectable. Only executing un-inspected remote code is "
+                "blocked, not downloading or installing.")
         return {"ok": False, "refused": True, "catastrophic": True,
-                "error": ("REFUSED - catastrophic command (would irreversibly "
-                          "destroy the system or its data). Hard safety floor, "
-                          "no override; Basilisk will not run this."),
-                "command": command}
+                "error": _msg, "command": command}
     if command_tampers_self(command):
         return {"ok": False, "refused": True, "self_tamper": True,
                 "error": ("REFUSED - this would write to Basilisk's own safety "
@@ -7091,7 +7135,7 @@ def tool_browser_status() -> Dict[str, Any]:
     return out
 
 
-def tool_web_read(url: str, max_chars: int = 6000) -> Dict[str, Any]:
+def tool_web_read(url: str, max_chars: int = 24000) -> Dict[str, Any]:
     """Fetch and read a web page as shielded, readable text (with the final URL
     so you can cite it).
 
@@ -7200,8 +7244,22 @@ def tool_web_read(url: str, max_chars: int = 6000) -> Dict[str, Any]:
                           "private address — refusing to return its content "
                           "(SSRF floor).")}
     text = _wr_html_to_text(body) if ("<" in body and ">" in body) else body
-    if len(text) > max_chars:
-        text = text[:max_chars] + f"\n… [truncated at {max_chars} chars]"
+    # ── A CUT MUST SAY HOW TO GET THE REST ───────────────────────────
+    # The old note was "[truncated at 6000 chars]" and nothing else, which
+    # tells the model that content is missing but not that more is reachable.
+    # The observed result (same failure headroom.py documents for its own
+    # compressor) is a re-fetch loop: the model asks for the same URL again,
+    # gets the same first 6000 chars, and concludes the page does not contain
+    # what it is looking for. Name the total, the parameter and the companion
+    # tool, so the next call can actually be a different one.
+    _total = len(text)
+    if _total > max_chars:
+        text = text[:max_chars] + (
+            f"\n… [truncated: showing {max_chars} of {_total} chars. "
+            f"Re-call web_read with a larger max_chars (e.g. "
+            f"{min(_total, max_chars * 4)}), or web_read_full for the whole "
+            f"page. The rest of this page was NOT read — do not conclude it "
+            f"is absent from the page.]")
     head = f"[{final_url}]  (HTTP {status})"
     out = {"ok": True, "url": url, "final_url": final_url, "host": fhost,
            "status": status, "engine": _engine,
@@ -7235,7 +7293,9 @@ def _read_for_research(url: str) -> Dict[str, Any]:
     do to a direct one. Passing anything else would be a second web path
     with its own (drifting) idea of what is allowed, which is how a safety
     rule ends up enforced on one of two doors."""
-    return tool_web_read(url, max_chars=14000)
+    # 60000 matches webshield's own _MAX processing cap, so this asks for
+    # everything the shield will hand back rather than stopping short of it.
+    return tool_web_read(url, max_chars=60000)
 
 
 def tool_web_search(query: str = "", limit: int = 8,
@@ -8094,7 +8154,7 @@ def tool_workspace_glob(pattern: str = "*", limit: int = 300) -> Dict[str, Any]:
         return {"ok": False, "error": f"workspace unavailable: {e}"}
 
 
-def tool_workspace_read_many(paths: Any, max_chars: int = 6000) -> Dict[str, Any]:
+def tool_workspace_read_many(paths: Any, max_chars: int = 24000) -> Dict[str, Any]:
     """Read SEVERAL files in one round-trip. Orienting in a repo is a handful
     of independent reads; doing them one per turn spends three model calls
     to learn one thing."""
