@@ -3,6 +3,22 @@
 #
 # Build:   cd packaging && makepkg -si
 #
+# WHAT THIS BUILDS, AND WHY IT IS NOT THE TREE AROUND IT
+# ------------------------------------------------------
+# pkgver is NOT the version of the checkout you are standing in. This file
+# packages a TAGGED STABLE RELEASE: source= fetches
+# the-priest/PriestsBasilisk at refs/tags/v$pkgver, so `makepkg` here produces
+# that release, not this working tree. Standing in the beta repo at VERSION
+# 1.2.3.0 and running makepkg gets you 1.1.4.0, which is confusing enough to
+# be worth saying out loud rather than leaving to be discovered.
+#
+# To package a BETA build instead, two things must happen together, or the
+# source= line 404s:
+#   1. tag the beta repo (git tag v<version> && git push origin v<version>)
+#   2. bump pkgver to match, and point url=/source= at priestsbasiliskbeta
+# The beta repo currently has no tags at all, which is why this still points
+# at the stable channel.
+#
 # WHY /usr/share/priestsbasilisk AND NOT site-packages
 # ----------------------------------------------------
 # Arch is rolling. A path pinned to python3.13/site-packages stops being

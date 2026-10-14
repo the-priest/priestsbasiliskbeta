@@ -20713,7 +20713,9 @@ _THEME_SPECS = (
     ("midnight", "Midnight — black + deep blue",
      219, 0.55, 0.14, ("#2a5cad", "#6aa5f5", "#3568c4")),
     ("abyss",    "Abyss — black + teal",
-     189, 0.55, 0.14, ("#10767f", "#45c7d1", "#15868f")),
+     # teal is light for its hue: white on #15868f sat at 4.3:1, the one
+     # token below the 4.5 UI-text floor. #11737b clears it at 5.6.
+     189, 0.55, 0.14, ("#10767f", "#45c7d1", "#11737b")),
     ("rose",     "Rose — black + magenta",
      330, 0.50, 0.14, ("#a0276b", "#ee6fab", "#bd3180")),
     ("venom",    "Venom — black + toxic lime",
@@ -20759,6 +20761,9 @@ def _build_theme(hue, nsat, isat, accent):
 THEMES = {k: (label, _build_theme(hue, nsat, isat, acc))
           for k, label, hue, nsat, isat, acc in _THEME_SPECS}
 THEME_ORDER = tuple(k for k, *_ in _THEME_SPECS)
+# The full spec by key, so _retint_css can reach hue/saturation directly
+# instead of trying to infer them back out of the substitution table.
+_THEME_BY_KEY = {spec[0]: spec for spec in _THEME_SPECS}
 DEFAULT_THEME = "violet"
 
 # rgba() keys omit the alpha so one entry covers every opacity in the
@@ -20780,21 +20785,98 @@ def _read_theme_setting() -> str:
     return name if name in THEMES else DEFAULT_THEME
 
 
+# ── COLOURS THAT ARE NEVER THEMED ────────────────────────────────────
+# Semantic: danger red, warning amber, success green. A destructive-action
+# button that matches the theme is a button nobody reads.
+_SEMANTIC_KEEP = {"#e5484d", "#f0a500", "#2ecc71", "#0a090a"}
+# Structural: pure black and pure white are shadows, scrims and overlays, not
+# surfaces. Re-hueing a drop shadow tints every edge in the window and looks
+# like a rendering fault, so they are left exactly as written.
+_STRUCTURAL_RGB = {(0, 0, 0), (255, 255, 255)}
+
+
+def _recolour(r, g, b, hue, nsat, isat, asat):
+    """Move one arbitrary colour into the theme's hue family.
+
+    THE TABLE-DRIVEN VERSION COVERED 31% OF THE STYLESHEET, AND THAT IS WHY
+    THE THEMES LOOKED HALF-APPLIED. A hand-written map can only recolour the
+    values somebody remembered to list — it listed 14 — while the stylesheet
+    actually carries 250 distinct hex colours and 928 rgba() uses across the
+    frame, the sidebar, the composer, the chips, every button state, the
+    scrollbars and the terminal. Everything unlisted stayed ember, so each
+    theme was a recoloured accent sitting in an ember window.
+
+    So nothing is listed any more: every colour in the sheet is transformed.
+    Coverage is total by construction, and a widget added tomorrow is themed
+    the day it is written.
+
+    The transform is lightness-aware, because one rule cannot serve all three
+    jobs a colour does here:
+      · DARK (L < 0.30) — surfaces, frame, borders. Lifted slightly and given
+        real saturation, because at ember's 3-9% lightness there is no room
+        for chroma and a pure hue rotation is invisible (measured: 1-13 of 255
+        per channel, i.e. nothing).
+      · LIGHT (L > 0.70) — body text and off-whites. Lightness preserved
+        exactly, barely any saturation: legibility must not move.
+      · MID — accents, icons, chips, hovers. Lightness preserved, saturation
+        raised to carry the theme's identity.
+    Alpha is never touched, so every shadow, scrim and glow keeps its weight.
+    """
+    import colorsys
+    h, l, s = colorsys.rgb_to_hls(r / 255.0, g / 255.0, b / 255.0)
+    if l < 0.30:
+        # Lift so chroma is visible, but keep the ordering of the depth steps:
+        # a monotonic function of l cannot reorder them.
+        nl, ns = min(0.46, l * 1.22 + 0.020), nsat
+    elif l > 0.70:
+        nl, ns = l, isat
+    else:
+        nl, ns = l, max(s, asat)
+    nr, ng, nb = colorsys.hls_to_rgb((hue % 360) / 360.0, nl, ns)
+    return (max(0, min(255, round(nr * 255))),
+            max(0, min(255, round(ng * 255))),
+            max(0, min(255, round(nb * 255))))
+
+
 def _retint_css(css_bytes: bytes, theme: str) -> bytes:
-    """Recolour the stylesheet for `theme`. Unknown theme or ember => unchanged."""
-    table = THEMES.get((theme or "").strip().lower(), (None, None))[1]
-    if not table:
-        return css_bytes
+    """Recolour the whole stylesheet for `theme`. ember => unchanged."""
+    key = (theme or "").strip().lower()
+    spec = _THEME_BY_KEY.get(key)
+    if spec is None or not THEMES.get(key, ("", {}))[1]:
+        return css_bytes                      # ember, or an unknown name
+    _k, _label, hue, nsat, isat, accent = spec
+    table = THEMES[key][1]
+    # Accent saturation drives the MID band, so chips and icons read as the
+    # theme rather than as washed-out grey.
+    import colorsys
+    _ar, _ag, _ab = (int(accent[1].lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+    asat = colorsys.rgb_to_hls(_ar / 255.0, _ag / 255.0, _ab / 255.0)[2]
     text = css_bytes.decode("utf-8")
-    for old, new in table.items():
-        if _RGBA_KEY_RE.match(old):
-            # Rebuilt as a tolerant pattern so `rgba(217,119,87,.15)` and
-            # `rgba(217, 119, 87, 0.063)` are both caught, alpha untouched.
-            nums = re.findall(r"\d+", old)
-            pat = r"rgba\(\s*%s\s*,\s*%s\s*,\s*%s\s*," % tuple(nums)
-            text = re.sub(pat, new + ",", text, flags=re.I)
-        else:
-            text = re.sub(re.escape(old), new, text, flags=re.I)
+
+    def _hex_sub(m):
+        hx = m.group(0).lower()
+        if hx in _SEMANTIC_KEEP:
+            return m.group(0)
+        if hx in table:                        # exact ladder / accent value
+            return table[hx]
+        r, g, b = (int(hx[i:i + 2], 16) for i in (1, 3, 5))
+        if (r, g, b) in _STRUCTURAL_RGB:
+            return m.group(0)
+        return "#%02x%02x%02x" % _recolour(r, g, b, hue, nsat, isat, asat)
+
+    text = re.sub(r"#[0-9a-fA-F]{6}\b", _hex_sub, text)
+
+    def _rgba_sub(m):
+        r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if (r, g, b) in _STRUCTURAL_RGB:
+            return m.group(0)
+        if "#%02x%02x%02x" % (r, g, b) in _SEMANTIC_KEEP:
+            return m.group(0)
+        nr, ng, nb = _recolour(r, g, b, hue, nsat, isat, asat)
+        return "rgba(%d, %d, %d," % (nr, ng, nb)
+
+    text = re.sub(r"rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,",
+                  _rgba_sub, text)
     return text.encode("utf-8")
 
 

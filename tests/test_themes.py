@@ -231,6 +231,74 @@ if _retint and _CSS:
         ck(f"{k}: still ASCII-only (GTK loads the stylesheet as bytes)",
            all(ord(ch) < 128 for ch in out.decode("utf-8")))
 
+print("\n== the WHOLE stylesheet is recoloured, not just a listed palette ==")
+# THE BUG THIS PINS: the first engine substituted a hand-written table of 14
+# colours. The stylesheet carries 250 distinct hex colours and 928 rgba() uses
+# — the frame, sidebar, composer, chips, every button state, scrollbars,
+# terminal — so 69% of it stayed ember and each theme was a recoloured accent
+# in an ember window. Coverage is now algorithmic: every colour is transformed
+# except the deliberate exclusions below, so a widget added tomorrow is themed
+# the day it is written.
+_SEM = ("#e5484d", "#f0a500", "#2ecc71")       # danger / warning / success
+_STRUCT = ("#ffffff", "#000000")               # shadows, scrims, overlays
+if _retint and _CSS:
+    _basetxt = _CSS.decode("utf-8")
+    _bh = re.findall(r"#[0-9a-fA-F]{6}\b", _basetxt)
+    _br = re.findall(r"rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+", _basetxt)
+    for k in ORDER:
+        if k == "ember":
+            continue
+        out = _retint(_CSS, k).decode("utf-8")
+        oh = re.findall(r"#[0-9a-fA-F]{6}\b", out)
+        orr = re.findall(r"rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+", out)
+        hchg = sum(1 for a, b in zip(_bh, oh) if a.lower() != b.lower())
+        rchg = sum(1 for a, b in zip(_br, orr)
+                   if a.replace(" ", "") != b.replace(" ", ""))
+        ck(f"{k}: most hex colours recoloured ({hchg}/{len(_bh)})",
+           hchg >= len(_bh) * 0.80, f"{hchg}/{len(_bh)}")
+        ck(f"{k}: most rgba colours recoloured ({rchg}/{len(_br)})",
+           rchg >= len(_br) * 0.65, f"{rchg}/{len(_br)}")
+        for sem in _SEM:
+            ck(f"{k}: semantic {sem} count unchanged",
+               out.lower().count(sem) == _basetxt.lower().count(sem))
+        for st in _STRUCT:
+            ck(f"{k}: structural {st} count unchanged (shadows keep their weight)",
+               out.lower().count(st) == _basetxt.lower().count(st))
+        a_in = re.findall(r"rgba\([^)]*?,\s*([0-9.]+)\s*\)", _basetxt)
+        a_out = re.findall(r"rgba\([^)]*?,\s*([0-9.]+)\s*\)", out)
+        ck(f"{k}: every alpha preserved ({len(a_in)})", a_in == a_out)
+
+print("\n== the GTK tokens the window resolves stay legible after recolouring ==")
+# The checks further up reason about the palette. These read the ACTUAL
+# @define-color tokens out of the recoloured sheet — the values libadwaita
+# resolves for the window, view, card, headerbar, popover and sidebar — because
+# that is what the operator looks at. A transform that recoloured the surfaces
+# but sank the text into them would pass every palette check above.
+_PAIRS = [("window_fg_color", "window_bg_color"),
+          ("view_fg_color", "view_bg_color"),
+          ("card_fg_color", "card_bg_color"),
+          ("headerbar_fg_color", "headerbar_bg_color"),
+          ("popover_fg_color", "popover_bg_color"),
+          ("sidebar_fg_color", "sidebar_bg_color")]
+if _retint and _CSS:
+    for k in ORDER:
+        out = _retint(_CSS, k).decode("utf-8")
+        tok = dict(re.findall(r"@define-color\s+([a-z_]+)\s+(#[0-9a-fA-F]{6});",
+                              out))
+        for fg, bg in _PAIRS:
+            if fg in tok and bg in tok:
+                r = _ratio(tok[fg], tok[bg])
+                ck(f"{k}: {fg.split('_')[0]} text on its surface >= 7:1",
+                   r >= 7.0, f"{r:.2f}")
+        # The accent fill carries white button text. ember ships at 4.2 and is
+        # pinned by test_theme.py, so it is held to its own shipped value; the
+        # generated themes must clear the 4.5 UI-text floor.
+        if "accent_bg_color" in tok:
+            r = _ratio("#ffffff", tok["accent_bg_color"])
+            floor = 4.2 if k == "ember" else 4.5
+            ck(f"{k}: white on the accent fill >= {floor}:1", r >= floor,
+               f"{r:.2f}")
+
 print("\n== the theme setting is wired end to end ==")
 _core = open(os.path.join(_ROOT, "basilisk_core.py"), encoding="utf-8").read()
 ck("basilisk_core ships a `theme` default",
