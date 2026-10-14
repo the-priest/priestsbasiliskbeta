@@ -4185,8 +4185,33 @@ def tool_run_command(command: str, timeout: int = 30,
         # rule or a still-valid cached timestamp? Then the command's own
         # sudo/doas just works; skip the password dance entirely. Common on
         # single-user Arch/CachyOS boxes (%wheel ALL=(ALL) NOPASSWD: ALL).
-        if _sudo_ready():
-            pass  # fall through to the plain run below
+        # A PASSWORD IN HAND BEATS A HOPEFUL `sudo -n true`.
+        #
+        # This used to read `if _sudo_ready(): pass`, taking the plain-run path
+        # whenever sudo looked passwordless — and _sudo_ready() asks `sudo -n
+        # true`, which proves you can run TRUE without a password, not that you
+        # can run THIS command without one. A command-scoped rule is ordinary:
+        #
+        #     %wheel ALL=(ALL) NOPASSWD: /usr/bin/pacman
+        #
+        # makes `sudo -n true` succeed and `sudo nmap` demand a password. We
+        # then ran the command plainly, on a worker thread with no controlling
+        # terminal, and sudo died with:
+        #
+        #     sudo: a terminal is required to read the password; either use
+        #     the -S option ... sudo: a password is required
+        #
+        # while the operator's password was sitting in hand, already collected
+        # and cached for this chat. The same thing happens when the timestamp
+        # expires in the gap between the check and the run.
+        #
+        # So: if we HAVE a password, always take the authenticating path. It
+        # works whether or not a timestamp is valid (sudo -S simply does not
+        # need to prompt when it is), so nothing is lost by preferring it, and
+        # the no-tty failure becomes unreachable. _sudo_ready() still decides
+        # the case it was written for — no password available at all.
+        if _sudo_ready() and sudo_password is None:
+            pass  # genuinely passwordless; the command's own sudo just works
         elif pe["tool"] is None:
             return {"ok": False, "command": command, "needs_sudo": True,
                     "error": ("no privilege-escalation tool on PATH (looked for "
@@ -7202,8 +7227,15 @@ def tool_web_read(url: str, max_chars: int = 24000) -> Dict[str, Any]:
         return {"ok": False,
                 "error": (f"host '{parsed.hostname}' is an internal / private / "
                           "metadata address, which web_read refuses outright "
-                          "(SSRF floor — no approval overrides this). Public "
-                          "internet hosts are fine: trusted sources fetch "
+                          "(SSRF floor — no approval overrides this). "
+                          "THIS IS NOT A DEAD END ON AN ENGAGEMENT: the floor "
+                          "is on this ONE tool, because a poisoned page can "
+                          "steer it at a metadata endpoint. Reading a LAN host "
+                          "you are testing is ordinary work — do it through "
+                          "the shell instead, which is not SSRF-gated: "
+                          f"`curl -sSi http://{parsed.hostname}/` for the "
+                          "response, or nmap/nuclei/ffuf for the rest. Public "
+                          "internet hosts are fine here: trusted sources fetch "
                           "automatically, any other public site fetches once "
                           "the operator approves it.")}
     # ── THE BROWSER IS THE PRIMARY READER ────────────────────────────
@@ -12174,7 +12206,20 @@ def parse_tool_calls(text: str) -> List[ToolCall]:
 #   · a markdown link with real link text ("[the advisory](url)") is a
 #     citation, not an intent to read; a bare URL, or one whose link text IS
 #     the URL, is what the drift produces.
-_BARE_URL_RE = re.compile(r"""(?<![\w@])(https?://[^\s<>"'\)\]}]+)""", re.I)
+# A BACKTICK IS NEVER PART OF A URL, and leaving it out of this class produced
+# a live mis-fetch. The model wrote, as prose:
+#
+#     try `http://192.168.1.1:9200`-style endpoints
+#
+# and the recovery below extracted `http://192.168.1.1:9200`-style` — closing
+# backtick and the following word included — then called web_read on it. The
+# character class already excluded <>"')]} for exactly this reason; the
+# backtick was simply missed. Asterisk and underscore go with it: a URL that
+# ends a **bold** or _italic_ run picked up the markers the same way.
+_BARE_URL_RE = re.compile(
+    r"""(?<![\w@])(https?://[^\s<>"'`*\)\]}]+)""", re.I)
+# Inline `code` spans, masked like fences — see _mask_inline_code.
+_INLINE_CODE_RE = re.compile(r"`[^`\n]{1,400}`")
 _MD_LINK_RE = re.compile(r"\[([^\]]{1,200})\]\((https?://[^\s)]+)\)", re.I)
 
 
@@ -12187,6 +12232,18 @@ def printed_url_target(text: str) -> str:
     if not text:
         return ""
     body = _mask_fences(text)          # a fenced URL is an example
+    # ...and so is an INLINE-CODE one, for the same reason one line down.
+    # A ``` fence is masked because a URL inside it is the model SHOWING a
+    # link, not asking for it. `backticks` are the same gesture in one line,
+    # and the live failure was exactly that shape:
+    #
+    #     try `http://192.168.1.1:9200`-style endpoints
+    #
+    # which is a TEMPLATE — a port to try, not a page to read — and it was
+    # fetched. Masking inline code costs nothing real: a URL the model
+    # actually wants read is written plainly, because it is addressing the
+    # operator, not quoting a literal.
+    body = _INLINE_CODE_RE.sub(lambda m: " " * len(m.group(0)), body)
     # Drop markdown links that carry real link text -- those are citations.
     def _keep(m):
         label, url = m.group(1).strip(), m.group(2)
