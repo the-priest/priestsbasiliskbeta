@@ -63,6 +63,8 @@ _ns = {"re": re, "load_settings": lambda: {}}
 if _start > 0 and _end > _start:
     exec(compile(_src[_start:_end], "basilisk.py:themes", "exec"), _ns)
 
+_ns_specs = _ns.get("_THEME_SPECS", ())
+_ns_ladder = _ns.get("_NEUTRAL_LADDER", ())
 THEMES = _ns.get("THEMES", {})
 ORDER = _ns.get("THEME_ORDER", ())
 DEFAULT_THEME = _ns.get("DEFAULT_THEME", "")
@@ -93,8 +95,8 @@ def _ratio(a, b):
     return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
 
 
-print("\n== the picker offers eight themes ==")
-ck("eight themes are defined", len(THEMES) == 8, str(sorted(THEMES)))
+print("\n== the picker offers nine themes ==")
+ck("nine themes are defined", len(THEMES) == 9, str(sorted(THEMES)))
 ck("THEME_ORDER lists them all, for a stable dropdown",
    set(ORDER) == set(THEMES) and len(ORDER) == len(THEMES), str(ORDER))
 ck("every theme has a human label",
@@ -152,17 +154,61 @@ def _chan_delta(a, b):
                for i in (0, 2, 4))
 
 
+_SPECS = {sp[0]: sp for sp in _ns_specs}
+_LADDER = _ns_ladder
 for k in ORDER:
     if k == "ember":
         continue
     table = THEMES[k][1]
+    floor = _SPECS[k][6]
     worst = []
     for i, c in enumerate(NEUT):
+        # A rung BELOW the theme's black floor is meant to be black, so it is
+        # not expected to move away from ember's black. That is the two-tone
+        # design, not a theme that failed to apply.
+        if floor and _LADDER[i] < floor:
+            continue
         d = _chan_delta(c, table.get(c, c))
         if d < _MIN_DELTA[i]:
             worst.append(f"rung{i} moved {d} (need {_MIN_DELTA[i]})")
-    ck(f"{k}: surfaces are visibly different from ember", not worst,
+    ck(f"{k}: coloured surfaces are visibly different from ember", not worst,
        "; ".join(worst))
+
+print("\n== a theme that CLAIMS two tones has two tones ==")
+# THE COMPLAINT THIS PINS, in the operator's words: "half of things is black
+# half is dark green, not like rest of ur themes where is basically one color
+# even tho u say its two". That was accurate. Every theme mapped the whole
+# stylesheet into one hue, so the canvas, the panels and the borders were three
+# lightnesses of the same colour — truthful to the code, and not what anyone
+# means by a two-colour theme.
+#
+# A theme with a black_floor must now show BOTH tones in its ladder: at least
+# two rungs essentially unsaturated (black) and at least two carrying real
+# chroma. A single-hue regression makes the first number zero and fails here.
+import colorsys as _cs
+
+
+def _sat(hx):
+    hx = hx.lstrip("#")
+    r, g, b = (int(hx[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    return _cs.rgb_to_hls(r, g, b)[2]
+
+
+for k in ORDER:
+    sp = _SPECS[k]
+    floor = sp[6]
+    table = THEMES[k][1]
+    sats = [_sat(table.get(c, c)) for c in NEUT]
+    blacks = sum(1 for x in sats if x < 0.10)
+    cols = sum(1 for x in sats if x >= 0.30)
+    if floor:
+        ck(f"{k}: declares a black floor, so it must show BOTH tones "
+           f"({blacks} black / {cols} coloured rungs)",
+           blacks >= 2 and cols >= 2,
+           " ".join(f"{x:.2f}" for x in sats))
+    elif k == "slate":
+        ck("slate stays monochrome on purpose (black + grey is not a split)",
+           cols == 0, " ".join(f"{x:.2f}" for x in sats))
 
 # ...and from EACH OTHER, or the picker offers eight names and one look.
 _seen = {}

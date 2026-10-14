@@ -20726,41 +20726,83 @@ def _shade(hue_deg, light, sat):
 # fill carries white button text: at the obvious values (#6f9420, #a37f26)
 # white sat at 3.5:1 and 3.7:1, i.e. the one place in the theme where the
 # label would be hard to read. Darkened until white clears ~4.8:1 and 5.0:1.
+# The 7th field is BLACK_FLOOR, and it is what makes a theme genuinely two
+# TONE rather than one hue applied to everything.
+#
+# Every theme above this note maps the whole stylesheet into a single hue, so
+# "black + dark purple" names the intent, not the result: at these lightnesses
+# a single-hue sheet reads as one colour with a lighter version of itself for
+# the panels. Honest description, and it is why `forest` exists.
+#
+# EVERY COLOURED THEME SETS ONE. The first eight did not, and the result was
+# a window where the canvas, the panels and the borders were three
+# lightnesses of the same hue — accurate to the code and not what anyone
+# means by a two-colour theme. slate is the exception on purpose: it is the
+# monochrome option, and "black plus grey" is not a split.
+#
+# A non-zero black_floor says: any colour DARKER than this lightness stays
+# NEUTRAL BLACK (saturation ~0.02) instead of taking the theme hue. The hue
+# then appears only on what sits above that line — the raised surfaces, the
+# cards, the borders, the chips, the accent — so the window is black canvas
+# with coloured panels on it, two tones you can point at, not one.
 _THEME_SPECS = (
     ("ember",    "Ember — warm charcoal + clay (original)",
-     None, 0, 0, None),
+     None, 0, 0, None, 0.0),
     ("violet",   "Violet — black + dark purple",
-     265, 0.58, 0.14, ("#6b34b8", "#a87af0", "#7c3aed")),
+     265, 0.58, 0.14, ("#6b34b8", "#a87af0", "#7c3aed"), 0.100),
     ("midnight", "Midnight — black + deep blue",
-     219, 0.55, 0.14, ("#2a5cad", "#6aa5f5", "#3568c4")),
+     219, 0.55, 0.14, ("#2a5cad", "#6aa5f5", "#3568c4"), 0.100),
     ("abyss",    "Abyss — black + teal",
      # teal is light for its hue: white on #15868f sat at 4.3:1, the one
      # token below the 4.5 UI-text floor. #11737b clears it at 5.6.
-     189, 0.55, 0.14, ("#10767f", "#45c7d1", "#11737b")),
+     189, 0.55, 0.14, ("#10767f", "#45c7d1", "#11737b"), 0.100),
     ("rose",     "Rose — black + magenta",
-     330, 0.50, 0.14, ("#a0276b", "#ee6fab", "#bd3180")),
+     330, 0.50, 0.14, ("#a0276b", "#ee6fab", "#bd3180"), 0.100),
     ("venom",    "Venom — black + toxic lime",
-     92,  0.45, 0.14, ("#4d6b12", "#a9d94e", "#5e7d1b")),
+     92,  0.45, 0.14, ("#4d6b12", "#a9d94e", "#5e7d1b"), 0.100),
     ("brass",    "Brass — black + bronze",
-     42,  0.45, 0.14, ("#6b5014", "#d9b55e", "#8a6a1f")),
+     42,  0.45, 0.14, ("#6b5014", "#d9b55e", "#8a6a1f"), 0.100),
     ("slate",    "Slate — black + cool grey (no accent hue)",
      # slate is the monochrome option, so its saturation is the lowest
      # here by design — but it still has to be TELLABLE from ember, which
      # is itself near-neutral. 0.13 left the two within 8/255 on the base
      # surface. 0.22 reads as a cool grey against ember's warm charcoal,
      # which is the distinction that makes it worth offering at all.
-     215, 0.22, 0.09, ("#474d57", "#9aa2b0", "#585f6c")),
+     215, 0.22, 0.09, ("#474d57", "#9aa2b0", "#585f6c"), 0.0),
+    # TWO-TONE. black_floor=0.100 puts the ladder's two deepest rungs (the base
+    # background and the sidebar, at L 0.062 and 0.082) below the line, so they
+    # stay true neutral black; the surface, card and border rungs (0.108, 0.155,
+    # 0.235) sit above it and take the green. The result is a black window with
+    # dark-green panels, borders and chips — the two tones are on screen at the
+    # same time, which is the thing the single-hue themes do not do.
+    ("forest",   "Forest \u2014 black + dark green (two-tone)",
+     140, 0.52, 0.10, ("#1d6b36", "#4fcc7a", "#1b7a3c"), 0.100),
 )
 
 
-def _build_theme(hue, nsat, isat, accent):
+def _build_theme(hue, nsat, isat, accent, black_floor=0.0):
     """The substitution map for one theme. Empty for ember (the identity)."""
     if hue is None or not accent:
         return {}
     table = {}
     # Dark surfaces: the declared ladder, in this theme's hue.
     for _i, c in enumerate(_EMBER_NEUTRALS):
-        table[c] = _shade(hue, _NEUTRAL_LADDER[_i], nsat)
+        _l = _NEUTRAL_LADDER[_i]
+        # Below the floor the rung stays black; above it, it takes the hue.
+        #
+        # THE BLACK RUNGS ARE ALSO PUSHED DOWN, and that is not cosmetic.
+        # Relative luminance is not HSL lightness: blue contributes 7% of
+        # perceived brightness against green's 72%, so a saturated violet at
+        # L=0.108 is DIMMER than a neutral grey at L=0.082. Leaving the black
+        # rungs at their ladder height therefore inverted the depth hierarchy
+        # for the cooler themes — the sidebar read as brighter than the
+        # surface sitting on top of it, which is precisely the defect the
+        # ladder exists to prevent. Dropping them to 55% restores a true black
+        # canvas that every hue can sit above, and makes the two tones read
+        # further apart, which is the point of the floor in the first place.
+        table[c] = (_shade(hue, _l * 0.55, 0.02)
+                    if black_floor and _l < black_floor
+                    else _shade(hue, _l, nsat))
     # Light values: lightness-preserving, so text legibility is untouched.
     for c in _EMBER_INK:
         table[c] = _tint(c, hue, isat)
@@ -20779,8 +20821,8 @@ def _build_theme(hue, nsat, isat, accent):
 
 
 # name -> (label for the settings dropdown, substitution map)
-THEMES = {k: (label, _build_theme(hue, nsat, isat, acc))
-          for k, label, hue, nsat, isat, acc in _THEME_SPECS}
+THEMES = {k: (label, _build_theme(hue, nsat, isat, acc, bf))
+          for k, label, hue, nsat, isat, acc, bf in _THEME_SPECS}
 THEME_ORDER = tuple(k for k, *_ in _THEME_SPECS)
 # The full spec by key, so _retint_css can reach hue/saturation directly
 # instead of trying to infer them back out of the substitution table.
@@ -20816,7 +20858,7 @@ _SEMANTIC_KEEP = {"#e5484d", "#f0a500", "#2ecc71", "#0a090a"}
 _STRUCTURAL_RGB = {(0, 0, 0), (255, 255, 255)}
 
 
-def _recolour(r, g, b, hue, nsat, isat, asat):
+def _recolour(r, g, b, hue, nsat, isat, asat, black_floor=0.0):
     """Move one arbitrary colour into the theme's hue family.
 
     THE TABLE-DRIVEN VERSION COVERED 31% OF THE STYLESHEET, AND THAT IS WHY
@@ -20845,6 +20887,18 @@ def _recolour(r, g, b, hue, nsat, isat, asat):
     """
     import colorsys
     h, l, s = colorsys.rgb_to_hls(r / 255.0, g / 255.0, b / 255.0)
+    # ── TWO-TONE: everything under the floor stays BLACK ──────────────
+    # Applied here as well as in the ladder, or the effect would be five
+    # recoloured tokens inside an otherwise fully green sheet. The floor is
+    # compared against the LIFTED lightness, the same value the dark band
+    # below produces, so the line falls in the same place for an arbitrary
+    # colour as it does for a ladder rung.
+    if black_floor and (l * 1.22 + 0.020) < black_floor:
+        nr, ng, nb = colorsys.hls_to_rgb((hue % 360) / 360.0,
+                                         (l * 1.22 + 0.020) * 0.55, 0.02)
+        return (max(0, min(255, round(nr * 255))),
+                max(0, min(255, round(ng * 255))),
+                max(0, min(255, round(nb * 255))))
     if l < 0.30:
         # Lift so chroma is visible, but keep the ordering of the depth steps:
         # a monotonic function of l cannot reorder them.
@@ -20865,7 +20919,7 @@ def _retint_css(css_bytes: bytes, theme: str) -> bytes:
     spec = _THEME_BY_KEY.get(key)
     if spec is None or not THEMES.get(key, ("", {}))[1]:
         return css_bytes                      # ember, or an unknown name
-    _k, _label, hue, nsat, isat, accent = spec
+    _k, _label, hue, nsat, isat, accent, black_floor = spec
     table = THEMES[key][1]
     # Accent saturation drives the MID band, so chips and icons read as the
     # theme rather than as washed-out grey.
@@ -20883,7 +20937,8 @@ def _retint_css(css_bytes: bytes, theme: str) -> bytes:
         r, g, b = (int(hx[i:i + 2], 16) for i in (1, 3, 5))
         if (r, g, b) in _STRUCTURAL_RGB:
             return m.group(0)
-        return "#%02x%02x%02x" % _recolour(r, g, b, hue, nsat, isat, asat)
+        return "#%02x%02x%02x" % _recolour(r, g, b, hue, nsat, isat,
+                                            asat, black_floor)
 
     text = re.sub(r"#[0-9a-fA-F]{6}\b", _hex_sub, text)
 
@@ -20893,7 +20948,8 @@ def _retint_css(css_bytes: bytes, theme: str) -> bytes:
             return m.group(0)
         if "#%02x%02x%02x" % (r, g, b) in _SEMANTIC_KEEP:
             return m.group(0)
-        nr, ng, nb = _recolour(r, g, b, hue, nsat, isat, asat)
+        nr, ng, nb = _recolour(r, g, b, hue, nsat, isat, asat,
+                               black_floor)
         return "rgba(%d, %d, %d," % (nr, ng, nb)
 
     text = re.sub(r"rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,",
