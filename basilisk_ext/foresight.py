@@ -33,6 +33,35 @@ import json
 import re
 from typing import Any, Callable, Dict, List, Optional
 
+# ── ONE AUTHORITY FOR "IS THIS CATASTROPHIC" ─────────────────────────
+# basilisk_safety.is_catastrophic_command is the structural destructive floor:
+# it shlex-tokenises, normalises $IFS, recurses into `sh -c` payloads and
+# classifies by RESOLVED ARGV against the real system-directory sets.  This
+# module used to re-answer the same question with a one-line regex, and a
+# duplicate detector drifts from the original in both directions at once:
+#
+#   rm -rf node_modules/     safety: ok            foresight: BLOCK   (!)
+#   rm -rf ./build           safety: ok            foresight: BLOCK   (!)
+#   rm -rf dist/*            safety: ok            foresight: BLOCK   (!)
+#   rm -rf ~/.cache/pip      safety: ok            foresight: BLOCK   (!)
+#   find / -delete           safety: CATASTROPHIC  foresight: allow   (!)
+#
+# The regex asked "does an -rf appear, and is there a `/`, `~` or `*` ANYWHERE
+# after it" — which every relative path in a project tree satisfies.  So the
+# most routine cleanup command in software development was hard-BLOCKED, with
+# no override, while `find / -delete` (no `rm` token at all) sailed past.
+# Delegating fixes both columns and leaves one place to fix the next bypass.
+#
+# Imported defensively: foresight's contract is that it imports nothing from
+# basilisk.py / basilisk_core.py / basilisk_persona.py.  basilisk_safety is
+# none of those — it is the GTK-free, stdlib-only floor that basilisk_scope
+# already builds on — but if it ever moves, the legacy regex below still runs
+# as a fallback rather than leaving the floor open.
+try:
+    from basilisk_safety import is_catastrophic_command as _safety_catastrophic
+except Exception:  # pragma: no cover - defensive
+    _safety_catastrophic = None
+
 
 PROMPT_BLOCK = (
     "FORESIGHT: before any state-changing command runs, its consequences are "
@@ -45,7 +74,12 @@ PROMPT_BLOCK = (
 
 # (compiled_pattern, reversibility, blast_radius, reason)
 # Order matters: first match wins for the rule floor.
-_CATASTROPHIC: List = [
+# The recursive-delete rule. Used ONLY when basilisk_safety could not be
+# imported — see the note at the top of this file. It cannot tell
+# `rm -rf node_modules/` from `rm -rf /`, which is why it is no longer the
+# primary: it is a floor of last resort, better than nothing and worse than
+# the structural check.
+_CATASTROPHIC_RM_FALLBACK: List = [
     # Recursive AND force, in ANY flag arrangement: combined (-rf/-fr), split
     # (-r … -f), or long-form (--recursive … --force), in either order. The old
     # rule only caught the single combined token, so `rm -r -f /` and
@@ -57,6 +91,35 @@ _CATASTROPHIC: List = [
         r"[^\n]*(/|~|\*|\$HOME)"),
      "irreversible", "user",
      "recursive force-delete of a broad path — data loss, no undo"),
+]
+
+# Recursive force-delete of a HOME DIRECTORY ROOT.
+#
+# This one is NOT redundant with the structural floor, and it is the reason
+# delegating everything would have been wrong. basilisk_safety deliberately
+# keeps `home` out of _CRITICAL_TOP so that `rm -rf /home/me/loot` — ordinary
+# work — stays quiet, and it catches a bare `~` / `$HOME` separately. But
+# `/home/user` spelled out in full is the same directory as `~`, and it fell
+# between the two:
+#
+#   rm -rf ~              safety: CATASTROPHIC
+#   rm -rf /home/user     safety: ok          <- every file the user owns
+#
+# So the home root is matched here, by the path SHAPE: /home/<name> or
+# /Users/<name> (macOS) or /root, with nothing deeper after it. One more
+# segment and it is a subdirectory again, which is work, not a wipe:
+#
+#   rm -rf /home/me/project   -> allow
+#   rm -rf /home/me/.cache    -> allow
+_CATASTROPHIC: List = [
+    (re.compile(
+        r"\brm\b(?=[^\n]*(?:-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r|"
+        r"(?:-[a-zA-Z]*r\b|--recursive)[^\n]*(?:-[a-zA-Z]*f\b|--force)|"
+        r"(?:-[a-zA-Z]*f\b|--force)[^\n]*(?:-[a-zA-Z]*r\b|--recursive)))"
+        r"[^\n]*\s(?:/(?:home|Users)/[^/\s'\"]+|/root)/?(?=[\s'\"]|$)"),
+     "irreversible", "user",
+     "recursive force-delete of a home directory ROOT — every file that user "
+     "owns, no undo"),
     (re.compile(r"\b(mkfs|mke2fs|mkfs\.\w+)\b"),
      "irreversible", "system", "formats a filesystem — destroys all data on it"),
     (re.compile(r"\bdd\b.*\bof=/dev/(sd|nvme|mmcblk|loop)"),
@@ -120,7 +183,16 @@ _RISKY: List = [
     (re.compile(r"\bip\s+link\s+set\s+\w+\s+down\b"),
      "reversible", "network",
      "brings an interface down — you may lose the link you're on", "ip_link"),
-    (re.compile(r"(?<![\w/])(passwd|usermod|chsh)\b"),
+    # COMMAND POSITION, NOT A BARE WORD ANYWHERE ON THE LINE.
+    # `(?<![\w/])(passwd|…)` matched the WORD, so every command that merely
+    # MENTIONED it was cautioned as an account change:
+    #     grep -rn passwd ./src          -> caution "changes an account
+    #     cat req.txt | grep passwd         credential/shell"
+    # `/etc/passwd` was already excluded by the `/` lookbehind; the gap was the
+    # bare token. Anchor to the start of the line or a shell operator, so it is
+    # the command being RUN rather than a string being searched for.
+    (re.compile(r"(?:^|[\n;&|]|&&|\|\||\bsudo\s+|\bdoas\s+)\s*"
+                r"(passwd|usermod|chsh)\b"),
      "hard", "user", "changes an account credential/shell", None),
     (re.compile(r"\bapt(-get)?\s+(remove|purge|autoremove)\b"),
      "hard", "system", "removes packages — may pull dependencies with them",
@@ -141,16 +213,51 @@ _RISKY: List = [
     (re.compile(r"\brpm\s+(?:--erase\b|-[a-zA-Z]*e[a-zA-Z]*\b)"),
      "hard", "system",
      "removes a package with no transaction history to undo it", "rpm"),
-    (re.compile(r"\bgit\s+(reset\s+--hard|clean\s+-[a-z]*f|push\s+.*--force)"),
-     "hard", "user", "discards/overwrites git history or working tree",
+    # ── GIT: ONLY THE FORM THAT CAN LOSE SOMEONE ELSE'S WORK ─────────
+    # `git reset --hard`, `git clean -fd` and `git push --force-with-lease` are
+    # a coding assistant's ordinary vocabulary — "drop my changes", "clear the
+    # untracked junk", "update the branch I just rebased" — and cautioning all
+    # three put a consequence card in front of the operator several times an
+    # hour for work he had just asked for. Local history is recoverable from
+    # the reflog for ~30 days, and --force-with-lease REFUSES to overwrite a
+    # remote that moved, which is precisely the accident worth warning about.
+    #
+    # A bare `--force` / `-f` push is the one that is genuinely unrecoverable
+    # and not only to the operator: it discards whatever the remote had, which
+    # may be a colleague's commits, with no reflog on their side. That one
+    # still cautions. (--force-if-includes is likewise lease-checked.)
+    (re.compile(r"\bgit\s+push\b(?=[^\n]*(?:--force\b|(?<![\w-])-f\b))"
+                r"(?![^\n]*--force-(?:with-lease|if-includes))"),
+     "irreversible", "user",
+     "force-pushes over the remote branch — discards whatever was there, "
+     "including commits you did not fetch; no reflog on the remote side",
      "git_reset"),
-    (re.compile(r"\bkill(all)?\s+-9\b"),
-     "reversible", "process",
-     "hard-kills processes — unsaved state in them is lost", None),
+    # `git clean -fd` removes untracked build junk and is routine. The `-x`
+    # variant also removes IGNORED files — .env, local config, a dev database,
+    # credentials — which are untracked, so there is no reflog and no commit to
+    # recover them from. That is the one git clean worth a card.
+    (re.compile(r"\bgit\s+clean\b[^\n]*(?:-[a-zA-Z]*x|--force[^\n]*-x\b)"),
+     "irreversible", "user",
+     "git clean -x also deletes IGNORED files (.env, local config, dev "
+     "databases) — untracked, so no reflog and no commit to recover them from",
+     None),
+    # kill -9 on a dev server / hung test runner is routine, and "unsaved state
+    # in them is lost" is not a consequence worth a card: the operator chose to
+    # kill it. Dropped to allow.
     (re.compile(r"\b(curl|wget)\b.*\|\s*(sudo\s+)?(bash|sh|zsh|python)"),
      "hard", "system",
      "pipes a remote script straight into a shell — runs unaudited code", None),
-    (re.compile(r"\bchown\s+-R\b.*/(?!home|tmp|opt)"),
+    # THE `/(?!home|tmp|opt)` WAS NOT A PATH TEST, IT WAS A SLASH TEST.
+    # `.*/` matches any slash on the line and the lookahead only checked what
+    # followed THAT slash, so a greedy match landed on the last one:
+    #     chown -R me:me ./build            -> caution ("/build")
+    #     chown -R me:me /home/me/project   -> caution ("/project")
+    # i.e. the two cases the rule was explicitly written to exempt. Anchor on a
+    # real absolute target instead: a system top-level directory, named as the
+    # argument. Recursive chown inside your own tree is not a system change.
+    (re.compile(r"\bchown\b[^\n]*\s-R\b[^\n]*\s"
+                r"/(?:etc|usr|bin|sbin|lib|lib64|boot|var|srv|proc|sys|dev|run|"
+                r"root)(?:/|\s|$)"),
      "hard", "system", "recursive ownership change on a system path", None),
 ]
 
@@ -212,6 +319,26 @@ def _is_offensive(command: str) -> bool:
 
 def _rule_floor(command: str) -> Dict[str, Any]:
     cmd = command.strip()
+    # The structural floor answers first and is authoritative — it sees through
+    # quoting, $IFS, `sh -c` and chained sub-commands, none of which the regexes
+    # below can do. See the note at the top of this file.
+    if _safety_catastrophic is not None:
+        try:
+            if _safety_catastrophic(cmd):
+                return {"verdict": "block", "reversibility": "irreversible",
+                        "blast_radius": "system",
+                        "reasons": ["would irreversibly destroy the system or "
+                                    "its storage (structural destructive "
+                                    "floor)"],
+                        "undo": None, "rule": "catastrophic"}
+        except Exception:
+            pass          # fall through to the regex floor rather than opening
+    else:
+        for rx, rev, blast, reason in _CATASTROPHIC_RM_FALLBACK:
+            if rx.search(cmd):
+                return {"verdict": "block", "reversibility": rev,
+                        "blast_radius": blast, "reasons": [reason],
+                        "undo": None, "rule": "catastrophic"}
     for rx, rev, blast, reason in _CATASTROPHIC:
         if rx.search(cmd):
             return {"verdict": "block", "reversibility": rev,
