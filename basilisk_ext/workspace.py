@@ -1548,12 +1548,25 @@ def glob_files(pattern: str = "*", limit: int = 300) -> Dict[str, Any]:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
-def read_many(paths: Any, max_chars: int = 6000) -> Dict[str, Any]:
+def read_many(paths: Any, max_chars: int = 24000) -> Dict[str, Any]:
     """Read SEVERAL files in one round-trip.
 
     Orientation in an unfamiliar repo is a handful of reads that do not
     depend on each other — the module, its test, and the caller. Doing them
     one per turn spends three model round-trips to learn one thing.
+
+    THE PER-FILE BUDGET WAS 6000 CHARS, AND THAT UNDID THE POINT OF THE TOOL.
+    6000 chars is roughly 150 lines of Python. Every source file in this very
+    repo is longer than that — basilisk_core.py is 12k lines — so the common
+    case was a batch of files each cut at its first ~8%, handed over with
+    `truncated: true` and nothing else to act on. A model reading the first
+    150 lines of a 1500-line module has seen the imports and the first
+    function, which is the part least likely to contain the answer; the
+    expensive part is that it cannot tell the difference between "this file
+    does not define X" and "the definition was past the cut".
+    `read()` underneath will serve 200_000 bytes, so the budget was the
+    binding limit, not the file system. Default raised to 24000 (~600 lines)
+    and the ceiling to the 200_000 `read()` itself allows.
     """
     try:
         _require()
@@ -1576,9 +1589,9 @@ def read_many(paths: Any, max_chars: int = 6000) -> Dict[str, Any]:
         # which number actually applied. Report it when it differs.
         _asked = max_chars
         try:
-            cap = max(200, min(40000, int(max_chars or 6000)))
+            cap = max(200, min(200000, int(max_chars or 24000)))
         except Exception:
-            cap = 6000
+            cap = 24000
         out = []
         for p in paths:
             rec = read(str(p).strip(), 1, 0)
@@ -1588,11 +1601,22 @@ def read_many(paths: Any, max_chars: int = 6000) -> Dict[str, Any]:
                 # guesses its own callee's key shape returns empty strings
                 # that look exactly like empty files.
                 txt = str(rec.get("content") or "")
+                _cut = len(txt) > cap
+                _body = txt[:cap]
+                # Same contract as read(): a truncated read says so INSIDE the
+                # content, not only in a sibling field. A `truncated: true` the
+                # model has to notice separately is one it reads past, and then
+                # it treats 8% of a file as the whole file.
+                if _cut:
+                    _body += (
+                        f"\n\n… [CUT: {cap} of {len(txt)} chars shown. The rest "
+                        f"of this file was NOT read. Re-read this path with a "
+                        f"larger max_chars, or workspace_read with a line "
+                        f"range, before concluding anything is absent from it.]")
                 out.append({"path": rec.get("path", p), "ok": True,
                             "total_lines": rec.get("total_lines"),
-                            "truncated": bool(rec.get("truncated")
-                                              or len(txt) > cap),
-                            "content": txt[:cap]})
+                            "truncated": bool(rec.get("truncated") or _cut),
+                            "content": _body})
             else:
                 out.append({"path": p, "ok": False,
                             "error": rec.get("error", "unreadable")})
@@ -1603,7 +1627,7 @@ def read_many(paths: Any, max_chars: int = 6000) -> Dict[str, Any]:
             if _asked and int(_asked) != cap:
                 res["max_chars_note"] = (
                     f"max_chars={_asked} was clamped to {cap} (the useful "
-                    f"range is 200-40000); that is the limit actually applied.")
+                    f"range is 200-200000); that is the limit actually applied.")
         except Exception:
             pass
         if good < len(paths):
