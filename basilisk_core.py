@@ -641,11 +641,16 @@ DEFAULT_SETTINGS = {
     "voice_autosend":   True,           # auto-send after a voice message transcribes
     "stt_model":        "whisper-large-v3-turbo",
     "stt_language":     "",             # ISO-639-1 hint (blank = auto-detect)
-    # Which cloud transcribes voice input.  "auto" = use your active chat
+    # Which engine transcribes voice input.  "auto" = use your active chat
     # provider if it supports speech (SiliconFlow→SenseVoiceSmall,
-    # Groq→Whisper), else fall back to whichever key you have set.
-    "stt_provider":     "auto",         # auto | siliconflow | groq
+    # Groq→Whisper), else fall back to whichever key you have set.  "local"
+    # runs whisper.cpp on this machine with no key and no network — the option
+    # that works when the configured provider carries no ASR model at all
+    # (SiliconFlow's international API answers the transcription endpoint with
+    # "Model disabled" and lists no speech-to-text model).
+    "stt_provider":     "auto",         # auto | siliconflow | groq | local
     "stt_model_siliconflow": "",         # blank = FunAudioLLM/SenseVoiceSmall
+    "stt_model_local":  "",              # ggml .bin path (blank = auto-find)
 
     # ── Chat history / retention ──
     # Ephemeral by default: start fresh each launch, roll off stale chats,
@@ -955,6 +960,18 @@ def _coerce_settings_types(merged: Dict[str, Any]) -> None:
               "hard_engagement_model", "vision_model"):
         if k in DEFAULT_SETTINGS and not isinstance(merged.get(k), str):
             merged[k] = DEFAULT_SETTINGS[k]
+    # The browser must stay on Camoufox unless the operator deliberately
+    # picked another engine.  A blank / garbled / non-string value (a hand
+    # edit, a partial write, a bad round-trip) resolves back to the shipped
+    # default instead of silently demoting web_read to plain Firefox, Chromium,
+    # or a bare HTTP fetch.  An explicit valid choice — including "http"/"off"
+    # to disable the browser — is still honoured.
+    _beng = merged.get("browser_engine")
+    if (not isinstance(_beng, str)
+            or _beng.strip().lower() not in (
+                "camoufox", "camoufox-bin", "firefox", "chromium",
+                "http", "urllib", "off", "none")):
+        merged["browser_engine"] = "camoufox"
     # Every provider's key and model slot: a non-string here is sent as the
     # model id or pasted into an Authorization header.
     for _p in PROVIDERS:
