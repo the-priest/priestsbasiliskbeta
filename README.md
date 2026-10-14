@@ -293,7 +293,7 @@ Capability and safety are decoupled on purpose.
 
 ## 🔬 Engineering
 
-**Stdlib only** for the engine. No pytest, no network, no fixtures, no account — **5,162 assertions across 85 suites**, run in under a minute. Four of those suites are adversarial probes that report *findings* rather than a pass count, so their checks are not in that total.
+**Stdlib only** for the engine. No pytest, no network, no fixtures, no account — **5,162 assertions across 86 suites**, run in under a minute. Four of those suites are adversarial probes that report *findings* rather than a pass count, so their checks are not in that total.
 
 Every fix ships with a regression that *fails* on the old code and *passes* on the new. Real GTK is spun up under Xvfb for the UI suites; the chat-bubble layout alone is pinned by 140 fitting checks. Repo work is covered end-to-end rather than layer by layer — a deliberately broken repo is opened as a folder, baselined red, edited through four different tool-call dialects, verified green, diffed and exported, with a 6,000-line file paged and rewritten on the way past.
 

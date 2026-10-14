@@ -290,8 +290,17 @@ for _c in ["curl -f https://acme.com/health", "nmap -f acme.com"]:
     ck(f"ordinary in-scope work runs: {_c}",
        S.check_command(_c, _S1).get("allowed") is True,
        str(S.check_command(_c, _S1))[:110])
+# `-f` must not swallow the host that follows it — that is what this asserts.
+# Read through an ACTIVE request (`-d`): a single-target GET is now classified
+# as retrieval and is deliberately not gated (see the note above _FETCH_TOOLS
+# in basilisk_scope), so a plain `curl -f` would come back allowed for a reason
+# that has nothing to do with `-f`, and the check would no longer be testing
+# flag parsing at all.
 ck("…and -f does not launder an out-of-scope host",
-   S.check_command("curl -f https://evil.com/x", _S1).get("allowed") is False)
+   S.check_command("curl -f -d x=1 https://evil.com/x",
+                   _S1).get("allowed") is False)
+ck("…nor does it eat the host on a retrieval (target still extracted)",
+   "evil.com" in S.extract_targets("curl -f https://evil.com/x").targets)
 ck("real target-file flags still read as uncertain",
    S.check_command("nmap -iL targets.txt", _S1).get("allowed") is False)
 

@@ -72,7 +72,9 @@ for cmd in ["nmap -sV 10.0.0.5",
 print("\n== out-of-scope refused ==")
 for cmd in ["nmap -sV 8.8.8.8",
             "nuclei -u https://google.com",
-            "curl https://evil.example.org/",
+            # A GET to this host is now retrieval (a download) and not gated;
+            # a request that SENDS something still is. See block 5.
+            "curl -X POST -d x=1 https://evil.example.org/",
             "ffuf -u https://notacme.com/FUZZ -w w.txt",
             "nmap 10.0.1.5",
             "hydra -l admin -P rock.txt ssh://198.51.100.9"]:
@@ -92,8 +94,13 @@ for cmd in ["nmap -sV vpn.acme.com", "curl https://vpn.acme.com/",
 
 
 # ── 5. fail closed with no scope at all ──────────────────────────────
+# `curl https://acme.com` used to be in this list. A single-target GET is now
+# classified as RETRIEVAL (a download) and the boundary is not engaged for it —
+# see the note above _FETCH_TOOLS in basilisk_scope. The fail-closed property
+# this block exists for is unchanged for ACTIVE commands, which is what it now
+# uses: a curl that actually sends something is still refused here.
 print("\n== no scope set ⇒ everything remote refused ==")
-for cmd in ["nmap -sV 10.0.0.5", "curl https://acme.com"]:
+for cmd in ["nmap -sV 10.0.0.5", "curl -X POST -d x=1 https://acme.com"]:
     v = S.check_command(cmd, {})
     check(f"noscope: {cmd[:38]}",
           (not v["allowed"]) and v.get("failure") == "out_of_scope",
@@ -110,11 +117,17 @@ check("loopback deniable when operator turns it off",
 # ── 6. bypass resistance ─────────────────────────────────────────────
 print("\n== bypass attempts ==")
 bypasses = [
+    # The curl entries send a body (-d) so they are ACTIVE commands. A
+    # single-target GET is retrieval and deliberately not gated (see the
+    # note above _FETCH_TOOLS); what these cases exist to prove is that the
+    # EXTRACTOR still sees the target through a wrapper, a pipe or userinfo,
+    # and that is unchanged — the verdict is just read through an active
+    # command now instead of a download.
     ("sh -c wrapper",         "sh -c 'nmap -sV 8.8.8.8'"),
-    ("bash -c wrapper",       "bash -c \"curl https://evil.com\""),
+    ("bash -c wrapper",       "bash -c \"curl -d x=1 https://evil.com\""),
     ("chained after ok cmd",  "nmap 10.0.0.5 && nmap 8.8.8.8"),
     ("chained with ;",        "ls; nuclei -u https://evil.com"),
-    ("piped",                 "echo x | curl https://evil.com"),
+    ("piped",                 "echo x | curl -d x=1 https://evil.com"),
     ("$IFS obfuscation",      "nmap${IFS}-sV${IFS}8.8.8.8"),
     ("sudo prefix",           "sudo nmap -sV 8.8.8.8"),
     ("proxychains prefix",    "proxychains nmap -sV 8.8.8.8"),
@@ -123,7 +136,7 @@ bypasses = [
     ("absolute path",         "/usr/bin/nmap -sV 8.8.8.8"),
     ("inline --url=",         "nuclei --url=https://evil.com"),
     ("env prefix",            "FOO=bar nmap -sV 8.8.8.8"),
-    ("url with userinfo",     "curl https://user:pw@evil.com/x"),
+    ("url with userinfo",     "curl -d x=1 https://user:pw@evil.com/x"),
     ("host:port form",        "nmap evil.com:8080"),
     ("nested sh -c",          "sh -c 'sh -c \"nmap 8.8.8.8\"'"),
 ]
@@ -153,16 +166,33 @@ os.chdir(_cwd)
 
 # Boolean flags must never swallow the target. `-s`/`-k` are no-value on curl;
 # treating them as value-taking ate the URL entirely.
-for label, cmd in [("curl -s", "curl -s https://evil.com"),
-                   ("curl -k", "curl -k https://evil.com"),
-                   ("curl -sk bundled", "curl -sk https://evil.com"),
-                   ("wget -q", "wget -q https://evil.com"),
-                   ("nmap -Pn", "nmap -Pn 8.8.8.8"),
-                   ("nmap -sV -T4", "nmap -sV -T4 8.8.8.8"),
-                   ("nuclei -silent", "nuclei -silent -u https://evil.com"),
-                   ("unknown flag", "nmap --some-future-flag 8.8.8.8")]:
+#
+# THIS ASSERTS ON THE EXTRACTION, NOT THE VERDICT, and that is the point of the
+# block: "did the parser still see evil.com behind the flag". It used to read
+# the answer off `allowed`, which only worked while every curl was gated. A
+# single-target GET is now retrieval and deliberately allowed (see the note
+# above _FETCH_TOOLS), so reading the verdict would have turned a parser test
+# into a policy test and hidden the thing being checked. The target list is the
+# direct observation and is unchanged by the carve-out.
+for label, cmd, want in [
+        ("curl -s", "curl -s https://evil.com", "evil.com"),
+        ("curl -k", "curl -k https://evil.com", "evil.com"),
+        ("curl -sk bundled", "curl -sk https://evil.com", "evil.com"),
+        ("wget -q", "wget -q https://evil.com", "evil.com"),
+        ("nmap -Pn", "nmap -Pn 8.8.8.8", "8.8.8.8"),
+        ("nmap -sV -T4", "nmap -sV -T4 8.8.8.8", "8.8.8.8"),
+        ("nuclei -silent", "nuclei -silent -u https://evil.com", "evil.com"),
+        ("unknown flag", "nmap --some-future-flag 8.8.8.8", "8.8.8.8")]:
+    _ex = S.extract_targets(cmd)
+    check(f"boolflag: {label}", want in _ex.targets, str(_ex.as_dict()))
+# ...and an ACTIVE command against those targets is still refused, which is the
+# verdict half the block used to cover.
+for label, cmd in [("curl -s", "curl -s -d x=1 https://evil.com"),
+                   ("wget -q", "wget -q --post-data=x=1 https://evil.com"),
+                   ("nmap -Pn", "nmap -Pn 8.8.8.8")]:
     v = S.check_command(cmd, SCOPE)
-    check(f"boolflag: {label}", not v["allowed"], str(v["extraction"]))
+    check(f"boolflag refused when active: {label}", not v["allowed"],
+          str(v["extraction"]))
 
 
 
@@ -186,7 +216,10 @@ for label, cmd in [
     ("command builtin",         "command nmap 8.8.8.8"),
     ("exec",                    "exec nmap 8.8.8.8"),
     ("su -c command string",    "su -c 'nmap 8.8.8.8' root"),
-    ("runuser -c",              "runuser -u x -c 'curl https://evil.com'"),
+    # `-d x=1` makes it an ACTIVE request: a single-target GET is retrieval
+    # and not gated, so the wrapper-peel it proves is read through a command
+    # the boundary still judges.
+    ("runuser -c",              "runuser -u x -c 'curl -d x=1 https://evil.com'"),
     ("script -qc",              "script -qc 'nmap 8.8.8.8' /dev/null"),
     ("watch positional cmd",    "watch -n1 'nmap 8.8.8.8'"),
     ("xargs sh -c",             "xargs -I{} sh -c 'nmap 8.8.8.8'"),
@@ -272,16 +305,22 @@ check("window irrelevant to passive cmds",
 
 # ── 10. scope matching semantics match engage._match_one ─────────────
 print("\n== scope rule semantics ==")
+# These probe _match_rule, which the retrieval carve-out does not touch — but
+# they have to probe it through a command the boundary still JUDGES. As plain
+# GETs, "subdomain covered" and "wildcard works" would have come back allowed
+# even with the matcher completely broken, and "sibling NOT covered" would
+# have failed although the matcher was right. `-d x=1` keeps them honest.
 check("subdomain covered by domain rule",
-      S.check_command("curl https://deep.sub.acme.com", SCOPE)["allowed"])
+      S.check_command("curl -d x=1 https://deep.sub.acme.com", SCOPE)["allowed"])
 check("sibling domain NOT covered",
-      not S.check_command("curl https://acme.com.evil.net", SCOPE)["allowed"])
+      not S.check_command("curl -d x=1 https://acme.com.evil.net", SCOPE)["allowed"])
 check("CIDR covers member",
       S.check_command("nmap 10.0.0.200", SCOPE)["allowed"])
 check("CIDR does not cover neighbour",
       not S.check_command("nmap 10.0.1.200", SCOPE)["allowed"])
 check("wildcard rule works",
-      S.check_command("curl https://x.corp.io", {"scope": ["*.corp.io"]})["allowed"])
+      S.check_command("curl -d x=1 https://x.corp.io",
+                      {"scope": ["*.corp.io"]})["allowed"])
 
 # cross-check against the real engage matcher on a grid
 try:

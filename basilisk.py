@@ -8901,6 +8901,28 @@ class SettingsDialog(Adw.PreferencesDialog):
         d_page.set_title("Display")
         d_page.set_icon_name("video-display-symbolic")
 
+        # ── THEME ──────────────────────────────────────────
+        tg = Adw.PreferencesGroup()
+        tg.set_title("Theme")
+        tg.set_description(
+            "Applies live — no restart.  Every theme is the same stylesheet "
+            "recoloured, so they all stay in step as the app grows.  Danger "
+            "red, warning amber and success green are deliberately the same "
+            "in all of them.")
+        theme_row = Adw.ComboRow()
+        theme_row.set_title("Colour theme")
+        theme_row.set_subtitle("Black-first palettes with a single accent hue.")
+        self._theme_keys = list(THEME_ORDER)
+        theme_row.set_model(Gtk.StringList.new(
+            [THEMES[k][0] for k in self._theme_keys]))
+        _cur = str(parent.settings.get("theme", DEFAULT_THEME)).strip().lower()
+        if _cur not in THEMES:
+            _cur = DEFAULT_THEME
+        theme_row.set_selected(self._theme_keys.index(_cur))
+        theme_row.connect("notify::selected", self._on_theme_changed)
+        tg.add(theme_row)
+        d_page.add(tg)
+
         dg = Adw.PreferencesGroup()
         dg.set_title("UI scale")
         dg.set_description(
@@ -9833,6 +9855,23 @@ class SettingsDialog(Adw.PreferencesDialog):
 
     def _on_max(self, row, *args):
         self._set("max_tokens", int(row.get_value()))
+
+    def _on_theme_changed(self, row, *_a):
+        """Persist and apply the chosen theme immediately.
+
+        No debounce, unlike the UI-scale spinner: a dropdown fires once per
+        pick, and the point of a theme picker is that you see the result while
+        the dialog is still open.
+        """
+        try:
+            key = self._theme_keys[row.get_selected()]
+        except Exception:
+            return
+        self._set("theme", key)
+        try:
+            self.win.app.apply_theme(key)
+        except Exception as e:
+            log(f"theme apply failed: {e}")
 
     def _on_ui_scale(self, row, *args):
         # Persist as float.  Then trigger a LIVE CSS reload so the
@@ -11738,7 +11777,62 @@ class MainWindow(Adw.ApplicationWindow):
         if keyval == Gdk.KEY_F2:
             self._rename_current_chat()
             return True
+        # ── Tab: agent mode.  Shift+Tab: leashed <-> unleashed. ──────────
+        # Both drive the EXISTING toggle buttons via set_active rather than
+        # writing the state fields, because every side effect of a mode change
+        # — per-chat persistence, the subtitle, the unleash repaint, forcing
+        # agent mode on when arming — hangs off those buttons' handlers. Set
+        # the field directly and the keyboard produces a different, quieter
+        # mode change than the mouse does, which is the kind of split that
+        # ends with the UI disagreeing about which mode is live.
+        #
+        # Guarded by the same _restoring_session check the handlers use, so a
+        # keypress during a chat switch cannot latch a mode onto a repaint.
+        #
+        # THE COST, stated plainly: Tab no longer moves focus inside the main
+        # window. That is the trade for a one-key mode switch while typing,
+        # which is where it is actually wanted. Dialogs and the preferences
+        # window are separate toplevels and never reach this handler, so Tab
+        # still cycles fields in every form in the app.
+        if keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab) and not ctrl and not alt:
+            return self._mode_hotkey(keyval, state)
         return False
+
+    def _mode_hotkey(self, keyval, state) -> bool:
+        """Tab / Shift+Tab mode switching.  True when the key was consumed.
+
+        Lives in one place because it is reached from TWO controllers. The
+        window-level handler is BUBBLE phase, so the focused widget gets first
+        refusal — and the composer is a TextView, which consumes Tab itself
+        (inserting a tab, or moving focus). That meant the window handler never
+        saw Tab in the one situation the shortcut is for: while typing. So
+        _on_input_key calls this too, and whichever fires first wins; the other
+        never sees the event.
+        """
+        if getattr(self, "_restoring_session", False):
+            return True
+        shift = (bool(state & Gdk.ModifierType.SHIFT_MASK)
+                 or keyval == Gdk.KEY_ISO_Left_Tab)
+        if shift:
+            btn = getattr(self, "unleash_toggle", None)
+            if btn is None:
+                return False
+            # set_active drives _on_unleash_toggled, which owns the repaint,
+            # the terminal line, forcing agent mode on, and the arm/disarm
+            # messaging. Nothing here duplicates any of it.
+            btn.set_active(not btn.get_active())
+            return True
+        btn = getattr(self, "agent_toggle", None)
+        if btn is None:
+            return False
+        want = not btn.get_active()
+        btn.set_active(want)
+        try:
+            self._show_toast("Agent mode on" if want else "Agent mode off",
+                             timeout=2)
+        except Exception:
+            pass
+        return True
 
     def _stop_if_busy(self):
         """Escape, from anywhere in the window.
@@ -12589,6 +12683,13 @@ class MainWindow(Adw.ApplicationWindow):
     # ── sending ─────────────────────────────────────────────────
 
     def _on_input_key(self, controller, keyval, keycode, state):
+        # Tab / Shift+Tab switch mode even with the composer focused — see
+        # _mode_hotkey. Handled before anything else so the TextView does not
+        # get to insert a tab character first.
+        if (keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab)
+                and not (state & Gdk.ModifierType.CONTROL_MASK)
+                and not (state & Gdk.ModifierType.ALT_MASK)):
+            return self._mode_hotkey(keyval, state)
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
             if not shift:
@@ -20194,8 +20295,9 @@ class BasiliskApp(Adw.Application):
         _UI_SCALE = _detect_ui_scale()
         # AFTER scale is set, derive viewport-dependent metrics.
         _compute_viewport_metrics()
-        self.css_provider.load_from_data(_scale_css(CSS, _UI_SCALE))
-        log(f"ui_scale = {_UI_SCALE:.2f}")
+        self._theme = _read_theme_setting()
+        self.css_provider.load_from_data(_themed_css(self._theme, _UI_SCALE))
+        log(f"ui_scale = {_UI_SCALE:.2f}  theme = {self._theme}")
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), self.css_provider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -20214,10 +20316,29 @@ class BasiliskApp(Adw.Application):
             # 0 (or out-of-range) means "use auto-detect"
             _UI_SCALE = _detect_ui_scale()
         try:
-            self.css_provider.load_from_data(_scale_css(CSS, _UI_SCALE))
+            self.css_provider.load_from_data(
+                _themed_css(getattr(self, "_theme", DEFAULT_THEME), _UI_SCALE))
             log(f"ui_scale reloaded → {_UI_SCALE:.2f}")
         except Exception as e:
             log(f"reload_css failed: {e}")
+
+    def apply_theme(self, name: str):
+        """Switch theme live, no restart. Called from the Settings dropdown.
+
+        Reloads the SAME provider that do_startup installed, so the swap is one
+        re-resolve rather than a second provider stacked on the first — two
+        providers at the same priority would leave whichever loaded last
+        winning per-property, which is how a half-recoloured window happens.
+        """
+        name = (name or "").strip().lower()
+        if name not in THEMES:
+            name = DEFAULT_THEME
+        self._theme = name
+        try:
+            self.css_provider.load_from_data(_themed_css(name, _UI_SCALE))
+            log(f"theme → {name}")
+        except Exception as e:
+            log(f"apply_theme({name}) failed: {e}")
 
     def do_activate(self):
         # Already running (second activation) → just present the window.
@@ -20437,6 +20558,189 @@ def _scaled(n: int, floor: int = 1) -> int:
 
 
 _PX_RE = re.compile(r'(\d+)px')
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THEMES — recolour the one stylesheet instead of forking it
+# ═════════════════════════════════════════════════════════════════════
+# GTK CSS has no variables across rules, which is why the palette above is
+# inlined by hand — and it is inlined ~250 times. The obvious way to add a
+# second theme is to copy the whole 2,000-line stylesheet and recolour the
+# copy, and that is the wrong way: the two diverge on the first widget anyone
+# adds, and from then on one theme silently misses every new rule.
+#
+# So there is still exactly ONE stylesheet, authored in the original ember
+# palette, and a theme is a SUBSTITUTION applied to it at load time. Adding a
+# theme is a dict of colour pairs; it cannot miss a rule, because it does not
+# know what rules exist. `ember` is the identity (the stylesheet as written),
+# which is what keeps the original theme bit-for-bit what it always was.
+#
+# Picking the replacements is not free-form. Each one keeps the LIGHTNESS of
+# the colour it replaces and moves only hue/saturation, because the stylesheet
+# encodes its depth hierarchy (bg < surface < card < line) in lightness steps,
+# and a substitution that flattens those steps loses the card edges and the
+# focus rings. The accent keeps its two-tone relationship (deep / bright /
+# fill) for the same reason.
+#
+# Semantic colours are NOT themed: danger red #e5484d, warning amber #f0a500,
+# success green #2ecc71 stay put in every theme. They have to stop reading as
+# decoration — a destructive-action button that matches the theme is a button
+# nobody reads.
+# ── the ember palette, as authored in CSS above ──────────────────────
+# Every theme is expressed as a substitution over THESE values, so a theme
+# cannot miss a rule: it does not know what rules exist.
+_EMBER_NEUTRALS = (                     # darkest -> lightest; the depth ladder
+    "#0a090a",      # base bg
+    "#0d0d0c",      # sidebar
+    "#11100f",      # surfaces / view / headerbar / popover / dialog
+    "#171716",      # card
+    "#232120",      # lines / borders
+)
+_EMBER_INK = (
+    "#dfdedb",      # text
+    "#8e8c88",      # dim text
+    "#e8e7e6", "#e8e6e5", "#b8b8b3", "#b8b6b2",   # off-whites / mid greys
+)
+_EMBER_ACCENT = ("#a94f34", "#d97757", "#c15f3c")   # deep, bright, fill
+_EMBER_SCRIMS = ("rgba(17, 16, 15", "rgba(23, 23, 22", "rgba(13, 13, 12")
+
+
+def _hex_to_rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+
+
+def _rgb_to_hex(r, g, b):
+    return "#%02x%02x%02x" % tuple(
+        max(0, min(255, int(round(c * 255)))) for c in (r, g, b))
+
+
+def _tint(hexcolor, hue_deg, sat):
+    """Re-hue a colour while KEEPING ITS LIGHTNESS.
+
+    This is the whole trick, and the reason themes are generated rather than
+    typed. The stylesheet encodes its depth hierarchy in lightness steps —
+    bg #0a090a < sidebar #0d0d0c < surface #11100f < card #171716 < line
+    #232120 — and those five steps are what make a card edge and a focus ring
+    visible at all. Hand-picking replacements flattens them sooner or later;
+    HLS with L pinned cannot, so every theme inherits the same hierarchy and
+    only its hue changes.
+    """
+    import colorsys
+    r, g, b = _hex_to_rgb(hexcolor)
+    _h, l, _s = colorsys.rgb_to_hls(r, g, b)
+    return _rgb_to_hex(*colorsys.hls_to_rgb((hue_deg % 360) / 360.0, l, sat))
+
+
+# (key, label, neutral hue, neutral saturation, ink saturation, accent triad)
+#
+# Accents are hand-picked rather than generated: they carry text and have to
+# clear contrast on their own (white on the FILL colour sits near 5:1 in each
+# theme), and their deep/bright/fill relationship is a design choice, not a
+# rotation. Neutrals and inks are derived.
+#
+# No accent is allowed to land on a semantic colour. danger #e5484d, warning
+# amber #f0a500 and success green #2ecc71 are NOT themed — they must stop
+# reading as decoration, because a destructive-action button that matches the
+# theme is a button nobody reads. That is why there is no blood-red or pure
+# amber theme here: `rose` goes magenta and `brass` goes desaturated bronze
+# specifically so neither can be mistaken for danger or warning, and `venom`
+# is a lime well off emerald #2ecc71.
+# venom's and brass's FILL colours are a step darker than their deep
+# colour would suggest. Lime and bronze are intrinsically light, and the
+# fill carries white button text: at the obvious values (#6f9420, #a37f26)
+# white sat at 3.5:1 and 3.7:1, i.e. the one place in the theme where the
+# label would be hard to read. Darkened until white clears ~4.8:1 and 5.0:1.
+_THEME_SPECS = (
+    ("ember",    "Ember — warm charcoal + clay (original)",
+     None, 0, 0, None),
+    ("violet",   "Violet — black + dark purple",
+     265, 0.30, 0.12, ("#6b34b8", "#a87af0", "#7c3aed")),
+    ("midnight", "Midnight — black + deep blue",
+     219, 0.32, 0.12, ("#2a5cad", "#6aa5f5", "#3568c4")),
+    ("abyss",    "Abyss — black + teal",
+     189, 0.34, 0.12, ("#10767f", "#45c7d1", "#15868f")),
+    ("rose",     "Rose — black + magenta",
+     330, 0.30, 0.12, ("#a0276b", "#ee6fab", "#bd3180")),
+    ("venom",    "Venom — black + toxic lime",
+     92,  0.30, 0.12, ("#4d6b12", "#a9d94e", "#5e7d1b")),
+    ("brass",    "Brass — black + bronze",
+     42,  0.32, 0.12, ("#6b5014", "#d9b55e", "#8a6a1f")),
+    ("slate",    "Slate — black + cool grey (no accent hue)",
+     215, 0.10, 0.08, ("#474d57", "#9aa2b0", "#585f6c")),
+)
+
+
+def _build_theme(hue, nsat, isat, accent):
+    """The substitution map for one theme. Empty for ember (the identity)."""
+    if hue is None or not accent:
+        return {}
+    table = {}
+    for c in _EMBER_NEUTRALS:
+        table[c] = _tint(c, hue, nsat)
+    for c in _EMBER_INK:
+        table[c] = _tint(c, hue, isat)
+    for old, new in zip(_EMBER_ACCENT, accent):
+        table[old] = new
+    # The coral glow: one entry covers all ~45 opacities the stylesheet uses,
+    # because the alpha is left alone by the rgba rewrite in _retint_css.
+    _ar, _ag, _ab = (int(accent[1].lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+    table["rgba(217, 119, 87"] = "rgba(%d, %d, %d" % (_ar, _ag, _ab)
+    # Neutral scrims follow their solid counterparts.
+    for key, solid in zip(_EMBER_SCRIMS, ("#11100f", "#171716", "#0d0d0c")):
+        t = table[solid].lstrip("#")
+        table[key] = "rgba(%d, %d, %d" % tuple(
+            int(t[i:i + 2], 16) for i in (0, 2, 4))
+    return table
+
+
+# name -> (label for the settings dropdown, substitution map)
+THEMES = {k: (label, _build_theme(hue, nsat, isat, acc))
+          for k, label, hue, nsat, isat, acc in _THEME_SPECS}
+THEME_ORDER = tuple(k for k, *_ in _THEME_SPECS)
+DEFAULT_THEME = "violet"
+
+# rgba() keys omit the alpha so one entry covers every opacity in the
+# stylesheet. Matched case-insensitively, tolerant of spacing.
+_RGBA_KEY_RE = re.compile(r"^rgba\(\s*\d+,\s*\d+,\s*\d+$")
+
+
+def _read_theme_setting() -> str:
+    """The operator's chosen theme, read before the window exists.
+
+    do_startup installs the stylesheet before MainWindow loads settings, so
+    this reads the file directly rather than waiting for self.settings — a
+    first paint in the wrong theme then a correction is a visible flash.
+    """
+    try:
+        name = str((load_settings() or {}).get("theme", "")).strip().lower()
+    except Exception:
+        name = ""
+    return name if name in THEMES else DEFAULT_THEME
+
+
+def _retint_css(css_bytes: bytes, theme: str) -> bytes:
+    """Recolour the stylesheet for `theme`. Unknown theme or ember => unchanged."""
+    table = THEMES.get((theme or "").strip().lower(), (None, None))[1]
+    if not table:
+        return css_bytes
+    text = css_bytes.decode("utf-8")
+    for old, new in table.items():
+        if _RGBA_KEY_RE.match(old):
+            # Rebuilt as a tolerant pattern so `rgba(217,119,87,.15)` and
+            # `rgba(217, 119, 87, 0.063)` are both caught, alpha untouched.
+            nums = re.findall(r"\d+", old)
+            pat = r"rgba\(\s*%s\s*,\s*%s\s*,\s*%s\s*," % tuple(nums)
+            text = re.sub(pat, new + ",", text, flags=re.I)
+        else:
+            text = re.sub(re.escape(old), new, text, flags=re.I)
+    return text.encode("utf-8")
+
+
+
+def _themed_css(theme: str, scale: float) -> bytes:
+    """The stylesheet as it should be loaded: recoloured, then scaled."""
+    return _scale_css(_retint_css(CSS, theme), scale)
 
 
 def _scale_css(css_bytes: bytes, scale: float) -> bytes:

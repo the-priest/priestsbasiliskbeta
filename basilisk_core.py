@@ -535,6 +535,11 @@ DEFAULT_SETTINGS = {
     "watcher_interval_minutes": 60,
 
     # UI
+    # Colour theme. The stylesheet is authored once in the ember palette and
+    # recoloured at load time (see THEMES in basilisk.py), so a theme can never
+    # miss a rule. One of: ember, violet, midnight, abyss, rose, venom, brass,
+    # slate. An unknown value falls back to the default rather than failing.
+    "theme": "violet",
     "ui_scale": 0,  # 0 = auto-detect; manual values 0.3 to 3.0
     "backdrop_brightness": 50,  # 0 = darkest, 100 = brightest, 50 = default
     "show_token_count": False,
