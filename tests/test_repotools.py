@@ -278,7 +278,17 @@ _long = W.read_many(["src/long.py"], max_chars=300)["files"][0]
 ck("the fixture really is longer than the cap",
    len(body("src/long.py")) > 300)
 ck("per-file truncation is reported", _long["truncated"] is True)
-ck("…and the content really is cut to the cap", len(_long["content"]) == 300)
+# The BODY is cut to the cap, and a [CUT: …] marker is appended after it — the
+# same contract read() states for its own [INCOMPLETE: …] marker ("the fact has
+# to travel WITH the payload, because a flag beside it is a flag the model can
+# skip"). So this asserts the cut AND the marker, rather than a raw length that
+# would forbid the marker read() is required to add.
+ck("…and the content really is cut to the cap",
+   _long["content"][:300] == body("src/long.py")[:300])
+ck("…and the cut announces itself inside the content",
+   "[CUT:" in _long["content"] and "NOT read" in _long["content"])
+ck("…and the marker is the only thing past the cap",
+   _long["content"][300:].lstrip(" \n…").startswith("[CUT:"))
 # A FLOOR THAT ANNOUNCES ITSELF. max_chars=10 is not a useful read, so it is
 # raised — but silently raising it means the caller's number was ignored and
 # nothing said which one applied.
