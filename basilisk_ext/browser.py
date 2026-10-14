@@ -605,7 +605,7 @@ def fetch(url: str,
                 # is dropped here; the next call then relaunches cleanly.
                 _teardown()
             return {"ok": False, "engine": _STATE.get("engine", ""),
-                    "error": f"browser fetch failed: {msg[:300]}"}
+                    "error": f"browser fetch failed: {msg[:299]}\u2026" if len(msg) > 300 else f"browser fetch failed: {msg}"}
         finally:
             if ctx is not None:
                 try:

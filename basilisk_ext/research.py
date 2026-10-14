@@ -257,7 +257,7 @@ def search(question: str,
                 continue
             if not r.get("ok"):
                 pages.append({"engine": name, "query": q, "ok": False,
-                              "error": str(r.get("error") or "")[:200]})
+                              "error": (lambda _e: _e if len(_e) <= 200 else _e[:199] + "\u2026")(str(r.get("error") or ""))})
                 continue
             res = extract_results(r.get("text") or "", engine=name,
                                   limit=limit)
@@ -420,7 +420,7 @@ def research(question: str,
         if not page.get("ok"):
             sources.append({"url": r["url"], "host": r.get("host"),
                             "ok": False,
-                            "error": str(page.get("error") or "")[:200]})
+                            "error": (lambda _e: _e if len(_e) <= 200 else _e[:199] + "\u2026")(str(page.get("error") or ""))})
             continue
         txt = str(page.get("text") or "")
         sources.append({

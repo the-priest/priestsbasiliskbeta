@@ -2882,6 +2882,19 @@ def _as_int(v: Any, default: int) -> int:
         return default
 
 
+def _clip(s, n: int) -> str:
+    """Cut a string for display, and SAY that it was cut.
+
+    Error strings handed back to the model were sliced with a bare `[:n]`, so a
+    truncated message was indistinguishable from a message that simply ended.
+    The model then reasons about half a sentence — and an error is exactly the
+    text it most needs whole. See the matching helper in basilisk.py, written
+    after a live session showed `(SSRF floor - no approva` in the terminal.
+    """
+    s = "" if s is None else str(s)
+    return s if len(s) <= n else s[:max(0, n - 1)] + "\u2026"
+
+
 def _read(path: str, max_bytes: int = 100_000) -> Optional[str]:
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -5971,7 +5984,7 @@ def tool_list_windows() -> Dict[str, Any]:
             return {"ok": True, "session": sess, "helper": "kdotool",
                     "windows": wins}
         return {"ok": False, "session": sess,
-                "error": f"kdotool returned nothing ({(err or '').strip()[:160]})"}
+                "error": f"kdotool returned nothing ({_clip((err or '').strip(), 160)})"}
     if helper == "wlrctl":
         rc, out, _ = _ro(["wlrctl", "window", "list"], timeout=5)
         wins = [{"title": ln.strip()} for ln in out.splitlines() if ln.strip()]
@@ -7276,7 +7289,7 @@ def tool_web_read(url: str, max_chars: int = 24000) -> Dict[str, Any]:
                 _engine = str(_r.get("engine") or "browser")
                 _blocked = list(_r.get("blocked") or ())
             else:
-                _degraded = str(_r.get("error") or "browser unavailable")[:200]
+                _degraded = _clip(_r.get("error") or "browser unavailable", 200)
         else:
             _degraded = ("no browser engine installed (pip install camoufox "
                          "&& python3 -m camoufox fetch)")
@@ -9270,7 +9283,7 @@ def tool_juiceshop_source(action: str = "tree", path: str = "", pattern: str = "
              "-not", "-path", "*/.git/*",
              "-not", "-path", "*/frontend/dist/*"], timeout=20)
         if rc != 0 and not out:
-            return {"ok": False, "error": f"find failed: {err[:200]}"}
+            return {"ok": False, "error": f"find failed: {_clip(err, 200)}"}
         files = [l for l in out.splitlines() if l.strip()][:500]
         return {"ok": True, "source": "docker:" + container if use_docker else base,
                 "file_count": len(files), "files": files,
@@ -9286,7 +9299,7 @@ def tool_juiceshop_source(action: str = "tree", path: str = "", pattern: str = "
         target = path if path.startswith("/") else f"{base}/{path}"
         rc, out, err = _wrap(["cat", target], timeout=15)
         if rc != 0:
-            return {"ok": False, "error": f"cat {target} failed: {err[:200]}"}
+            return {"ok": False, "error": f"cat {target} failed: {_clip(err, 200)}"}
         return {"ok": True, "path": target, "bytes": len(out),
                 "content": out[:20000],
                 "truncated": len(out) > 20000}
@@ -9311,7 +9324,7 @@ def tool_juiceshop_source(action: str = "tree", path: str = "", pattern: str = "
         target = f"{base}/data/static/challenges.yml"
         rc, out, err = _wrap(["cat", target], timeout=15)
         if rc != 0:
-            return {"ok": False, "error": f"cat {target} failed: {err[:200]}. "
+            return {"ok": False, "error": f"cat {target} failed: {_clip(err, 200)}. "
                     "Path may differ by version — try action=grep pattern="
                     "'challenges.yml' or action=tree to locate it."}
         return {"ok": True, "path": target, "bytes": len(out),

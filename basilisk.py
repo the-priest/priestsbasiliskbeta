@@ -192,6 +192,26 @@ APP_ID  = "org.thepriest.basilisk"
 APP_NAME = "Basilisk"
 VERSION = "1.2.3.0"
 
+
+def _clip(s, n: int) -> str:
+    """Cut a string for display, and SAY that it was cut.
+
+    Every terminal line that showed a truncated value used a bare `[:n]` slice,
+    so the operator could not tell a cut from corruption. From a real session:
+
+        → tool: run({"command":"sudo nmap -Pn ... 192.168.1.1","r)
+        ✗ web_read: host '192.168.1.1' ... (SSRF floor — no approva
+
+    The first is a JSON preview sliced at 80 characters with a `)` appended
+    after it, so it reads as malformed JSON the model emitted rather than a
+    display limit. The second stops mid-word. Both are the same missing
+    character. An ellipsis costs one glyph and removes a whole class of
+    "is the tool broken?" — which matters most in the autonomous loop, where
+    the terminal line is the only thing the operator sees.
+    """
+    s = "" if s is None else str(s)
+    return s if len(s) <= n else s[:max(0, n - 1)] + "…"
+
 # ── Tool-chain efficiency knobs ──
 # How many model round-trips a single user turn may chain through.  With
 # read-only tools now batched (many lookups per round-trip), this budget
@@ -16064,7 +16084,7 @@ class MainWindow(Adw.ApplicationWindow):
                 f"[{self._error_retries}]", "dim")
             self._activity_note(
                 "stream error - retrying in %ds (attempt %d): %s"
-                % (delay // 1000, self._error_retries, str(err)[:80]), "gate")
+                % (delay // 1000, self._error_retries, _clip(err, 80)), "gate")
             self._set_working(True, "retrying after error…")
             self._schedule_kick(delay)
             return False
@@ -16854,7 +16874,7 @@ class MainWindow(Adw.ApplicationWindow):
             self._activity_note(
                 "repeat guard dropped %d already-run tool(s): %s"
                 % (len(_dropped),
-                   ", ".join(c.name for c in _dropped)[:120]), "gate")
+                   _clip(", ".join(c.name for c in _dropped), 120)), "gate")
         # Per-tool recall entries so a later SOLO call of the same tool is
         # recognised as a repeat.  The combined label still names the action
         # for the log, but the per-tool keys are what the guard counts.
@@ -16979,7 +16999,7 @@ class MainWindow(Adw.ApplicationWindow):
         if _blocked is not None:
             self._activity_note(
                 "repeat guard: %s already ran - not repeating"
-                % self._action_label(call)[:110], "gate")
+                % _clip(self._action_label(call), 110), "gate")
             self._pending_action = None
             self._feed_tool_result(_blocked)
             return
@@ -17817,7 +17837,8 @@ class MainWindow(Adw.ApplicationWindow):
                 self._feed_tool_result(f"NOT RUN — {_argerr}")
                 return
             call.args = _args
-            self.terminal_log(f"→ tool: {call.name}({json.dumps(call.args, separators=(',',':'))[:80]})", "info")
+            self.terminal_log(f"→ tool: {call.name}("
+                              f"{_clip(json.dumps(call.args, separators=(',', ':')), 80)})", "info")
             # Open the feed row HERE — after normalisation, so the row shows
             # the arguments that actually ran, not the ones the model emitted.
             # Closed in _feed_tool_result, the single point every result
@@ -17857,7 +17878,7 @@ class MainWindow(Adw.ApplicationWindow):
                 log(f"tool {call.name} raised: {traceback.format_exc()}")
                 self.terminal_log(
                     f"✗ {call.name} raised {type(_te).__name__}: "
-                    f"{str(_te)[:160]}", "error")
+                    f"{_clip(_te, 160)}", "error")
                 try:
                     self._activity_end(getattr(self, "_activity_sid", 0),
                                        ok=False,
@@ -18063,7 +18084,7 @@ class MainWindow(Adw.ApplicationWindow):
                   "pattern", "name", "host"):
             v = a.get(k)
             if v:
-                return f"{n}: {str(v).strip()[:180]}{_fp}"
+                return f"{n}: {_clip(str(v).strip(), 180)}{_fp}"
         if a:
             try:
                 return (f"{n}: "
@@ -18605,7 +18626,7 @@ class MainWindow(Adw.ApplicationWindow):
                     _bad = str(result.get("error")
                                or result.get("reason") or "failed")
             GLib.idle_add(lambda: self.terminal_log(
-                (f"✗ {name}: {_bad[:120]}" if _bad else "✓ done"),
+                (f"✗ {name}: {_clip(_bad, 120)}" if _bad else "✓ done"),
                 ("error" if _bad else "ok")) or False)
             feed(text)
         self._tool_thread(_bg, name)
