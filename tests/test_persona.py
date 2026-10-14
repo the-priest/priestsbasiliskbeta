@@ -366,10 +366,19 @@ print(f"     max      armed={_t_armx} disarmed={_t_disx}")
 ck(f"disarmed grouped is smaller ({_t_dis} < {_t_arm})", _t_dis < _t_arm)
 ck(f"disarmed max is much smaller ({_t_disx} < {_t_armx})",
    _t_disx < _t_armx - 5000)
-ck(f"disarmed grouped under 7.7k tok ({_t_dis})", _t_dis < 7700,
+ck(f"disarmed grouped under 7.8k tok ({_t_dis})", _t_dis < 7800,
    "general work should not pay for the engagement prompt; the +~55 tok over "
    "the old 6.7k ceiling is the leashed capability-awareness line, which stops "
-   "the model underselling what it can do when asked, without loading any tool")
+   "the model underselling what it can do when asked, without loading any "
+   "tool. The further +~21 tok to 7.8k is the leashed CODE WORK pair: "
+   "(1) a truncated / [CUT:] read is PART of a file, so never write one back "
+   "-- without it the model answers from the first slice of a file and can "
+   "overwrite the rest, which is data loss, not a style nit; and (2) the "
+   "fetch-read-run form for installers, which is the only route past the "
+   "pipe-to-shell refusal, so omitting it costs a retry loop on every "
+   "`curl | sh` install. Both are leashed-only -- the armed prompt is "
+   "byte-identical -- and leashed stays cheaper than armed, which is what "
+   "the two checks above actually protect")
 ck(f"core tool text under 4.6k tok ({len(kp.CORE_TOOLS_TEXT)//4})",
    len(kp.CORE_TOOLS_TEXT) // 4 < 4600,
    "core ships on EVERY turn in both modes — it is the dominant cost; the "
