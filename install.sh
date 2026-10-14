@@ -157,7 +157,17 @@ for _a in "${OPTIONAL_ART[@]}"; do OPTIONAL_FILES+=("${ASSET_DIR}/${_a}"); done
 EXT_FILES=(__init__.py bench.py browser.py codescan.py engage.py exploits.py extman.py foresight.py headroom.py mcp.py memory.py \
            oracle.py juiceshop.py pentest.py reach.py research.py sandbox.py skills.py tasks.py verify.py webshield.py worker.py xbow.py \
            zdayfind.py workspace.py recall.py unblock.py)
-GITHUB_REPO="${BASILISK_REPO:-the-priest/PriestsBasilisk}"
+# THE BETA REPO'S INSTALLER MUST DEFAULT TO THE BETA REPO.
+# This file lives in priestsbasiliskbeta and defaulted to PriestsBasilisk — the
+# STABLE repo — so running it from a beta checkout silently fetched stable and
+# installed it over the beta:
+#
+#     [+] updating Basilisk 1.2.3.0 → 1.2.2.0
+#
+# i.e. a DOWNGRADE, reported as an update, which also overwrote every local
+# change in ~/.local/share/basilisk. Pointing it at its own repo is the fix;
+# BASILISK_REPO still overrides for anyone who wants stable on purpose.
+GITHUB_REPO="${BASILISK_REPO:-the-priest/priestsbasiliskbeta}"
 GITHUB_BRANCH="${BASILISK_BRANCH:-main}"
 
 # How to re-invoke this installer in the hints we print.  Under `curl|bash`
@@ -852,7 +862,24 @@ NEW_VER="$(_ver_of "${SRC_DIR}/basilisk.py")"
 OLD_VER=""
 [ -f "${INSTALL_DIR}/basilisk.py" ] && OLD_VER="$(_ver_of "${INSTALL_DIR}/basilisk.py")"
 if [ -n "${OLD_VER}" ] && [ -n "${NEW_VER}" ] && [ "${OLD_VER}" != "${NEW_VER}" ]; then
-  ok "updating Basilisk ${OLD_VER} → ${NEW_VER}"
+  # A DOWNGRADE MUST NOT BE ANNOUNCED AS AN UPDATE.
+  # This line read "updating 1.2.3.0 → 1.2.2.0" while installing OLDER code
+  # over newer — which is exactly what the wrong default repo produced, and
+  # the wording is what made it look fine. `sort -V` puts the lower version
+  # first; if that is the incoming one, say so loudly and make it a decision
+  # rather than a side effect. BASILISK_ALLOW_DOWNGRADE=1 proceeds anyway.
+  _lowest="$(printf '%s\n%s\n' "${OLD_VER}" "${NEW_VER}" | sort -V | head -1)"
+  if [ "${_lowest}" = "${NEW_VER}" ]; then
+    warn "DOWNGRADE: installed ${OLD_VER} is NEWER than incoming ${NEW_VER}"
+    warn "fetching from ${GITHUB_REPO}@${GITHUB_BRANCH} — is that the repo you meant?"
+    warn "this overwrites ${INSTALL_DIR} with the older code."
+    if [ "${BASILISK_ALLOW_DOWNGRADE:-0}" != "1" ]; then
+      fatal "refusing to downgrade. Re-run with BASILISK_ALLOW_DOWNGRADE=1 to force, or set BASILISK_REPO to the repo you want."
+    fi
+    warn "BASILISK_ALLOW_DOWNGRADE=1 set — proceeding with ${OLD_VER} → ${NEW_VER}"
+  else
+    ok "updating Basilisk ${OLD_VER} → ${NEW_VER}"
+  fi
 elif [ -n "${OLD_VER}" ] && [ "${OLD_VER}" = "${NEW_VER}" ]; then
   say "Basilisk ${NEW_VER} already current — refreshing files"
 elif [ -n "${NEW_VER}" ]; then

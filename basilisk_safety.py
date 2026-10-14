@@ -489,9 +489,14 @@ def _is_everything_glob(t: str) -> bool:
     return t in ("/*", "/.*", "~/*", "$HOME/*", "${HOME}/*", "/*/*")
 
 
+# A home directory ROOT, by shape: /home/<name>, /Users/<name> (macOS), /root.
+# One more path segment and it is a subdirectory again, which is ordinary work.
+_HOME_ROOT_RE = re.compile(r"^/(?:home|Users)/[^/]+$|^/root$")
+
+
 def _is_root_or_home(t: str) -> bool:
-    """True if the target resolves to the filesystem root or the operator's
-    home directory itself (not a subdirectory of it)."""
+    """True if the target resolves to the filesystem root or A home directory
+    itself (not a subdirectory of one)."""
     if t in ("~", "~/", "$HOME", "${HOME}", "$HOME/", "${HOME}/"):
         return True
     expanded = os.path.expanduser(t) if t.startswith("~") else t
@@ -502,6 +507,20 @@ def _is_root_or_home(t: str) -> bool:
         return True
     home = os.path.expanduser("~").rstrip("/")
     if home and norm == home:
+        return True
+    # ── ANY home root, not just the one this process happens to run as ──
+    # The check above compares against os.path.expanduser("~"), so it caught
+    # `rm -rf ~` and `rm -rf /home/<me>` but not `rm -rf /home/someone-else` —
+    # and Basilisk runs as root, where every home is equally deletable. The
+    # result was a floor that disagreed with itself about one directory
+    # depending on how it was spelled:
+    #
+    #     rm -rf ~              -> REFUSED
+    #     rm -rf /home/user     -> ran, and took every file that user owns
+    #
+    # Matched by shape so it holds for any account, including ones this
+    # process has never heard of.
+    if _HOME_ROOT_RE.match(norm):
         return True
     return False
 
@@ -929,10 +948,30 @@ def _sub_is_catastrophic(args: List[str], depth: int) -> bool:
                     or _is_critical_top_dir_itself(t)):
                 return True
 
-    # recursive chmod / chown on root or a system dir
+    # Recursive chmod / chown on root or a system dir ITSELF.
+    #
+    # THIS USED TO USE _is_system_target, WHICH MATCHES BY PREFIX, so every
+    # path that merely LIVED under a system directory was refused as
+    # catastrophic — with no override, at the execution primitive:
+    #
+    #     chown -R me:me /etc/myapp     -> REFUSED "irreversibly destroy"
+    #     chown -R www:www /srv/app     -> REFUSED
+    #     chown -R me:me /usr/local/src -> REFUSED
+    #
+    # Those are ordinary administration, and a recursive chown is RECOVERABLE
+    # in any case — you chown it back. This file's own header says so: "chmod/
+    # chown are likewise absent from the rules below: wrong permissions are
+    # recoverable, and this gate is about the unrecoverable." The rule had
+    # drifted from the documented intent.
+    #
+    # What stays refused is the whole-tree form, where the recursion walks a
+    # system root and there is nothing to chown back FROM: `chown -R /`,
+    # `chown -R /etc`, `chmod -R 777 /usr`. Same test the `mv`/`cp` rule above
+    # uses, so "the directory itself" means one thing in this file.
     if cmd in ("chmod", "chown", "chgrp") and _has_recursive_flag(rest):
         for t in _operands(rest):
-            if _is_root_or_home(t) or _is_system_target(t):
+            if (_is_root_or_home(t) or _is_critical_dir_itself(t)
+                    or _is_critical_top_dir_itself(t)):
                 return True
 
     # filesystem / partition / device destroyers
@@ -1029,18 +1068,51 @@ def _pipe_chain_is_catastrophic(command: str) -> bool:
             if any(_dangerous_target(t) for t in _operands(up[1:])):
                 return True
 
-    # opaque execution: a shell as a pipe sink, optionally fed by a decoder
+    # ── PIPE-INTO-A-SHELL: NO LONGER A CATASTROPHIC REFUSAL ──────────
+    # `… | sh` used to return True here, i.e. a hard refusal at the execution
+    # primitive with no override. Removed at the operator's instruction, and
+    # the reasoning is worth keeping because it is not "the gate was annoying".
+    #
+    # The rule was never a destruction test. Nothing about `curl … | sh`
+    # irreversibly destroys the system, which is what this function is for and
+    # what its refusal message claims; it was classified catastrophic because
+    # the payload is OPAQUE — the gate cannot see what will run.
+    #
+    # But it did not actually stop opaque remote code running, because the
+    # two-step form was always allowed and always equivalent:
+    #
+    #     curl -fsSL <url> -o /tmp/i.sh  &&  bash /tmp/i.sh     <- allowed
+    #
+    # So an adversary — or a prompt injection, which is the real threat here,
+    # since this process feeds untrusted web pages to a model running as root —
+    # pays one extra command and is through. The only party reliably stopped
+    # was the operator installing software the normal way: uv, rustup, nvm,
+    # bun, deno, ollama and Homebrew all ship exactly that one-liner.
+    #
+    # A control that costs the legitimate user every install and costs an
+    # attacker one extra line is not buying security, and this file already
+    # argues the point itself: "A gate that blocks the operator's normal job is
+    # a gate he switches off, which is worse than no gate."
+    #
+    # What still catches the genuinely destructive pipelines is UNCHANGED and
+    # sits above this comment: `cd / && rm -rf *`, and any upstream naming a
+    # dangerous path feeding `xargs rm -r`. Foresight also still raises a
+    # CAUTION for a fetch piped into a shell (see _RISKY in
+    # basilisk_ext/foresight.py), so the card still says "runs unaudited code"
+    # — it just no longer refuses outright.
+    #
+    # DECODE-THEN-EXECUTE IS NOT THE SAME THING AND STAYS REFUSED.
+    # `… | base64 -d | sh` keeps its refusal, because the argument above does
+    # not apply to it: there is no legitimate installer that ships a base64
+    # blob piped into a shell. Encoding the payload has exactly one effect —
+    # the operator reading the command cannot see what it does — so this shape
+    # is the obfuscation itself, not a convenience being obstructed. The case
+    # the suite pins is `echo "cm0gLXJmIC8=" | base64 -d | sh`, which decodes
+    # to `rm -rf /`.
     for i, args in enumerate(argvs):
         if not args:
             continue
-        b = _base(args[0])
-        if b in _SHELLS and i > 0:
-            # `… | sh`  — but ignore `sh -c "<literal>"` (that payload is
-            # already scanned by the per-sub pass); a bare `| sh` reading
-            # piped stdin is the opaque case.
-            if "-c" not in args:
-                return True
-        if b in _DECODERS and i + 1 < len(argvs):
+        if _base(args[0]) in _DECODERS and i + 1 < len(argvs):
             nb = argvs[i + 1]
             if nb and _base(nb[0]) in _SHELLS:
                 return True

