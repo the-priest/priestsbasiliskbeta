@@ -788,5 +788,67 @@ ck("two GLM calls in one reply both parse",
    str([(x.name, x.args) for x in _bc]))
 
 
+
+# ══════════════════════════════════════════════════════════════════════
+# THE LENIENT PARSER'S THIRD STAGE: PYTHON-LITERAL REPAIR
+# ══════════════════════════════════════════════════════════════════════
+# Two slips strict JSON rejects, both of which cost the ENTIRE call — the body
+# collapses to {"_raw": ...}, so the tool runs on its defaults or the model is
+# told its JSON was malformed and re-sends the same shape:
+#
+#     {"command":"ls",}     trailing comma
+#     {'command':'ls'}      single quotes
+#
+# Both are valid Python literals. ast.literal_eval parses the literal grammar
+# only — no names, calls or attribute access — so a tool body cannot execute
+# anything, and the stage runs ONLY after both strict stages have failed, so no
+# call that parses today can take a different path.
+print("\n== lenient stage 3: python-literal repair ==")
+from basilisk_core import _loads_lenient as _L   # noqa: E402
+
+for _src, _want in (
+    ('{"command":"ls",}', {"command": "ls"}),
+    ("{'command':'ls'}", {"command": "ls"}),
+    ("{'command': 'ls', 'reason': 'look',}", {"command": "ls", "reason": "look"}),
+    ("{'a': True, 'b': False, 'c': None}", {"a": True, "b": False, "c": None}),
+    ('{"a": [1, 2,], }', {"a": [1, 2]}),
+):
+    ck(f"repaired: {_src[:34]}", _L(_src) == _want, repr(_L(_src)))
+
+# Strict JSON must still take the strict path, byte-identical.
+for _src, _want in (
+    ('{"command":"ls"}', {"command": "ls"}),
+    ('{"a":[1,2,{"b":null}]}', {"a": [1, 2, {"b": None}]}),
+    ('{"n":1.5,"t":true,"f":false,"z":null}',
+     {"n": 1.5, "t": True, "f": False, "z": None}),
+    ('{"s":"has \\" quote"}', {"s": 'has " quote'}),
+):
+    ck(f"unchanged: {_src[:34]}", _L(_src) == _want, repr(_L(_src)))
+
+# THE SAFETY PROPERTY. literal_eval evaluates literals, not expressions, so a
+# tool body is data no matter what it contains. Asserted rather than assumed,
+# because this stage reads text a model wrote after reading an untrusted page.
+import os as _os
+_sentinel = "/tmp/_basilisk_literal_eval_sentinel"
+try:
+    _os.unlink(_sentinel)
+except OSError:
+    pass
+for _hostile in (
+    f'__import__("os").system("touch {_sentinel}")',
+    f'{{"a": __import__("os").system("touch {_sentinel}")}}',
+    '{"a": open("/etc/passwd").read()}',
+    'os.system("x")',
+    '{"a": 1} and __import__("os")',
+):
+    ck(f"not executed: {_hostile[:40]}", _L(_hostile) is None, repr(_L(_hostile)))
+ck("no hostile body ran anything", not _os.path.exists(_sentinel),
+   "literal_eval executed code - this stage must be reverted")
+
+# Garbage is still garbage; the caller's {"_raw": ...} fallback must still fire.
+for _bad in ("not json", "{unclosed", "just a sentence here", "42", '"a string"'):
+    ck(f"still rejected: {_bad[:30]!r}",
+       not isinstance(_L(_bad), (dict, list)), repr(_L(_bad)))
+
 print(f"\ntoolsyntax: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

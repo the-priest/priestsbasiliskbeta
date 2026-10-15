@@ -10772,7 +10772,35 @@ def _loads_lenient(json_src: str) -> Any:
     try:
         return json.loads(_escape_raw_ctrl_in_strings(json_src))
     except json.JSONDecodeError:
-        return None
+        pass
+    # ── STAGE 3: READ IT AS A PYTHON LITERAL ─────────────────────────
+    # Two model slips that strict JSON rejects and that cost the whole call,
+    # both measured against this parser:
+    #
+    #     {"command":"ls",}     trailing comma   -> args lost, {"_raw": ...}
+    #     {'command':'ls'}      single quotes    -> args lost, {"_raw": ...}
+    #
+    # A tool call that arrives with NO arguments is worse than one that fails
+    # loudly: the tool runs on its defaults, or the model is told its JSON was
+    # malformed and re-sends the same shape.
+    #
+    # Both are valid PYTHON literals, and ast.literal_eval parses exactly the
+    # literal grammar — no names, no calls, no attribute access, no code — so
+    # it cannot execute anything a model puts in a tool body. It also accepts
+    # Python's True/False/None, which models emit in place of true/false/null.
+    #
+    # It runs ONLY after both strict stages have failed, so no call that parses
+    # today can take a different path, and the result is accepted only when it
+    # is a dict or list — a bare string or number here means the body was never
+    # an argument object and the caller's {"_raw": ...} fallback is correct.
+    try:
+        import ast as _ast
+        _val = _ast.literal_eval(json_src)
+        if isinstance(_val, (dict, list)):
+            return _val
+    except (ValueError, SyntaxError, MemoryError, RecursionError, TypeError):
+        pass
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════
