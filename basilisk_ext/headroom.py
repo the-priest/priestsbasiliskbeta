@@ -548,6 +548,17 @@ def compress_messages(
         return messages, stats
     if not isinstance(messages, list) or not messages:
         return messages, stats
+    # `enabled` means THE FEATURE IS ON, and is set here rather than at the
+    # bottom with the byte counts. It used to be raised only `if blocks:`, so a
+    # run where nothing happened to be compressible reported
+    # {"enabled": False, "blocks": 0} — indistinguishable from the feature
+    # being switched off. That is a real diagnostic trap: it reads as "context
+    # compression is disabled" to anyone checking why a long session is
+    # expensive, when the truth is "it ran and found nothing worth crushing"
+    # (a page of prose, or output already under headroom_min_chars). `blocks`
+    # is the field that says how much was actually done; this one says whether
+    # the pass ran at all.
+    stats["enabled"] = True
 
     try:
         min_chars = int(s.get("headroom_min_chars", _DEFAULT_MIN_CHARS))
@@ -632,7 +643,7 @@ def compress_messages(
         saved = before_total - after_total
         pct = (saved / before_total * 100.0) if before_total else 0.0
         stats.update({
-            "enabled": True, "blocks": blocks,
+            "blocks": blocks,
             "before": before_total, "after": after_total,
             "saved": saved, "pct": round(pct, 1),
         })
