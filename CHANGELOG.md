@@ -55,7 +55,13 @@ cost readout. Plus the bugs a deep pass over every file turned up.**
   values and 928 rgba values, which is why the first attempt changed almost
   nothing on screen. Pinned by 363 assertions, including that each theme's
   black ladder stays monotonic (relative luminance is not HSL lightness:
-  blue at 7% and green at 72% are the same L).
+  blue at 7% and green at 72% are the same L) and that each retinted sheet is
+  still VALID CSS — same selectors, same property names, same brace, paren and
+  declaration counts as the base, every hex a legal length, every rgba() in
+  range, no declaration left without a value, ASCII throughout. GTK's parser
+  does not fail loudly: one malformed value and it drops the rest of the sheet
+  from that point and the app renders in stock Adwaita, which looks exactly
+  like a theme that did nothing.
 - **Tab** toggles the agent; **Shift+Tab** switches leashed/unleashed. Both
   work from the composer and from anywhere in the window.
 - **A token/cost chip** beside the composer: tokens in and out and the dollar
@@ -196,7 +202,7 @@ that does nothing.
   (`sort -V`, overridable with `BASILISK_ALLOW_DOWNGRADE=1`) now refuses to go
   backwards.
 
-**5,493 assertions across 89 suites**, zero red. New: `test_themes.py`,
+**5,584 assertions across 89 suites**, zero red. New: `test_themes.py`,
 `test_spend.py`, `test_readcaps.py`, `test_deadconditions.py`. GUARDRAIL
 byte-identical.
 

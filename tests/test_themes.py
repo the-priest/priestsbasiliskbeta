@@ -467,5 +467,122 @@ ck("a chat restore cannot latch a mode via the keyboard",
 ck("Ctrl/Alt+Tab are left to the window manager",
    re.search(r"KEY_ISO_Left_Tab\) and not ctrl and not alt", _src) is not None)
 
+# ── THE RETINTED SHEET MUST STILL BE VALID CSS ───────────────────────
+# Nothing above this checked SYNTAX, and syntax is the failure that would look
+# exactly like the complaint the themes started from. GTK's CSS parser does not
+# fail loudly: one malformed value and it logs to stderr (which nobody sees in
+# a desktop launch) and drops the rest of the stylesheet from that point on.
+# The app then renders in stock Adwaita and the theme "did nothing" -- the
+# symptom being indistinguishable from a re-tint that did not take.
+#
+# A re-tint is a pure COLOUR substitution, so every one of these is an equality
+# against the base sheet, not a judgement call: same selectors, same property
+# names, same brace and paren counts, same declaration count. Anything else
+# means the substitution ate structure.
+print("\n== every theme's stylesheet is still valid, parseable CSS ==")
+
+def _decomment(css):
+    """CSS with /* ... */ removed.
+
+    Needed because the sheet documents its own palette inside comments, in
+    prose: `smoke  rgba(22, 11, 14, a)`. That is not a declaration and GTK
+    never parses it, but a validator that reads it will report a malformed
+    alpha channel in every theme. Applied to the base and to each theme alike,
+    so the structural equalities below still hold."""
+    return re.sub(r"/\*.*?\*/", " ", css, flags=re.S)
+
+
+_base = _decomment(_CSS.decode("ascii", "replace"))
+
+
+def _structure(css):
+    """Everything about a stylesheet that a COLOUR change must not alter."""
+    return {
+        "{": css.count("{"), "}": css.count("}"),
+        "(": css.count("("), ")": css.count(")"),
+        ";": css.count(";"),
+        "props": sorted(re.findall(r"([-a-zA-Z]+)\s*:", css)),
+        "at": sorted(re.findall(r"@[-a-z]+", css)),
+    }
+
+
+_HEX = re.compile(r"#[0-9a-fA-F]+")
+_RGBA = re.compile(r"\brgba?\(([^()]*)\)")
+_base_struct = _structure(_base)
+ck("the base sheet parses as balanced",
+   _base_struct["{"] == _base_struct["}"]
+   and _base_struct["("] == _base_struct[")"],
+   str({k: v for k, v in _base_struct.items() if k in "{}()"}))
+
+for _key in ORDER:
+    # THEMES[key] is (label, substitution table). The SHEET is what
+    # _retint_css produces from it, and the sheet is what GTK parses.
+    _raw = _retint(_CSS, _key).decode("ascii", "replace")
+    _txt = _decomment(_raw)
+    _st = _structure(_txt)
+
+    ck(f"{_key}: braces balanced ({_st['{']}/{_st['}']})",
+       _st["{"] == _st["}"] and _st["{"] == _base_struct["{"],
+       "a colour substitution cannot add or lose a rule")
+    ck(f"{_key}: parens balanced ({_st['(']}/{_st[')']})",
+       _st["("] == _st[")"],
+       "an unbalanced rgba() silently kills the rest of the sheet")
+    ck(f"{_key}: same declaration count", _st[";"] == _base_struct[";"])
+    ck(f"{_key}: same property names", _st["props"] == _base_struct["props"],
+       "re-tinting must not touch structure")
+    ck(f"{_key}: same at-rules (@define-color etc)",
+       _st["at"] == _base_struct["at"])
+
+    # Still ASCII. The CSS literal is a bytes object precisely so a stray
+    # non-ASCII character is a build error; a re-tint that introduced one would
+    # raise at set_style_sheet time instead.
+    ck(f"{_key}: ASCII only",
+       all(ord(c) < 128 for c in _raw),
+       "the CSS is a bytes literal; non-ASCII would raise on load")
+
+    # Every hex colour is 3, 4, 6 or 8 digits. "#12345" parses as nothing.
+    _bad_hex = sorted({h for h in _HEX.findall(_txt)
+                       if len(h) - 1 not in (3, 4, 6, 8)})
+    ck(f"{_key}: every hex colour is a legal length", not _bad_hex,
+       "malformed: " + ", ".join(_bad_hex[:5]))
+
+    # Every rgba() has 3 or 4 components, channels 0-255, alpha 0-1.
+    _bad_rgba = []
+    for _args in _RGBA.findall(_txt):
+        _parts = [x.strip() for x in _args.split(",")]
+        if len(_parts) not in (3, 4):
+            _bad_rgba.append(_args)
+            continue
+        try:
+            _ch = [float(x) for x in _parts[:3]]
+        except ValueError:
+            _bad_rgba.append(_args)
+            continue
+        if any(v < 0 or v > 255 or v != int(v) for v in _ch):
+            _bad_rgba.append(_args)
+            continue
+        if len(_parts) == 4:
+            try:
+                _a = float(_parts[3])
+            except ValueError:
+                _bad_rgba.append(_args)
+                continue
+            if _a < 0 or _a > 1:
+                _bad_rgba.append(_args)
+    ck(f"{_key}: every rgba() is in range", not _bad_rgba,
+       "malformed: " + "; ".join(_bad_rgba[:3]))
+
+    # No declaration left with an empty value -- the shape a substitution
+    # produces when it matches a colour and replaces it with nothing.
+    _empty = re.findall(r"[-a-zA-Z]+\s*:\s*(?=[;}])", _txt)
+    ck(f"{_key}: no empty declarations", not _empty,
+       f"{len(_empty)} property(ies) lost their value")
+
+    # And the sheet stays about the same size: a runaway replace shows up here
+    # before it shows up on screen.
+    ck(f"{_key}: size within 10% of the base "
+       f"({len(_txt)} vs {len(_base)})",
+       abs(len(_txt) - len(_base)) <= len(_base) * 0.10)
+
 print(f"\nthemes: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)
