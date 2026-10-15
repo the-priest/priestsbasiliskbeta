@@ -90,6 +90,35 @@ cost readout. Plus the bugs a deep pass over every file turned up.**
 - `headroom` reported `enabled: False` when the compression pass had simply
   found nothing worth crushing.
 
+## The leashed prompt described a machine with gates it does not have
+
+Two statements in the system prompt were false, and each cost a capability
+with no gate involved:
+
+- **Section (1c) shipped the UNLEASHED web rule in both modes.** A leashed
+  session was told that reading GitHub, Stack Exchange, Wikipedia or
+  exploit-db needed a one-tap operator approval. The code reads any public URL
+  directly while leashed — the approval only exists while unleashed. A model
+  that believes it needs permission asks for it (there is nothing to ask),
+  announces it cannot read the page, or quietly answers from memory instead of
+  reading the primary source, which is the exact failure the web tools exist
+  to prevent. The section is now mode-aware (swapped by exact text, asserted
+  at import, pinned in both modes by `tests/test_persona.py`).
+- **The installer rule said piping a download into a shell was "refused at the
+  primitive".** It stopped being true when that refusal became a redirection:
+  `curl -fsSL URL | bash` runs. The prompt now says so, still prefers
+  fetch-read-run for a script you have no reason to trust, and still names the
+  one shape that IS refused — a decoder piped into a shell. The test asserts
+  the claim against the real gate rather than against itself.
+
+`list_apps` was documented as taking `filter` while its parameter is
+`filter_text`, and it worked only because both dispatch entries spelled the
+fallback out inline. The validator meanwhile refused the correct spelling with
+"received only unknown argument(s) ['filter_text']". The accepted-argument
+check now also accepts any name the implementation really takes and any alias
+target, so prose drifting can no longer make the validator reject a correct
+call.
+
 ## Found by probing every file
 
 - **Two exploit builders ignored their `url`.** `auth_bypass_headers` assigned
@@ -132,7 +161,7 @@ cost readout. Plus the bugs a deep pass over every file turned up.**
   (`sort -V`, overridable with `BASILISK_ALLOW_DOWNGRADE=1`) now refuses to go
   backwards.
 
-**5,452 assertions across 88 suites**, zero red. New: `test_themes.py`,
+**5,474 assertions across 88 suites**, zero red. New: `test_themes.py`,
 `test_spend.py`, `test_readcaps.py`. GUARDRAIL byte-identical.
 
 ---

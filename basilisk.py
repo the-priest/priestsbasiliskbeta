@@ -4980,6 +4980,14 @@ _ARG_ALIASES: Dict[str, Dict[str, str]] = {
     "cve_lookup":  {"cve": "product", "id": "product", "cve_id": "product",
                     "identifier": "product", "name": "product",
                     "software": "product", "package": "product"},
+    # The persona documents list_apps as taking `filter`; the implementation's
+    # parameter is `filter_text`. It worked only because BOTH dispatch entries
+    # happen to spell the fallback out inline --
+    # `a.get("filter", a.get("filter_text", ""))` -- which is the same
+    # two-places-to-keep-in-step arrangement this table exists to replace.
+    # Declared here so the contract holds wherever the call is made from.
+    "list_apps":   {"filter": "filter_text", "name": "filter_text",
+                    "query": "filter_text", "app": "filter_text"},
 }
 
 # Arguments without which the tool cannot do anything but damage or nonsense.
@@ -5224,6 +5232,45 @@ class ListWidget(Gtk.Box):
 
 
 _STR_PARAMS_CACHE: Optional[Dict[str, frozenset]] = None
+_IMPL_PARAMS_CACHE: Optional[Dict[str, frozenset]] = None
+
+
+def _impl_params() -> Dict[str, frozenset]:
+    """{tool name: EVERY parameter its implementation accepts}.
+
+    Used to widen the accepted-names check. The names the persona documents
+    are the model's contract, but they are prose, and prose drifts: list_apps
+    was documented as taking `filter` while the function's parameter is
+    `filter_text`, so a call using the REAL name was refused with "received
+    only unknown argument(s) ['filter_text']" -- the validator rejecting the
+    correct spelling. A name the implementation actually takes is never
+    unknown, whatever the example says."""
+    global _IMPL_PARAMS_CACHE
+    if _IMPL_PARAMS_CACHE is not None:
+        return _IMPL_PARAMS_CACHE
+    out: Dict[str, frozenset] = {}
+    try:
+        import inspect as _inspect
+        import basilisk_core as _bc
+        for nm in dir(_bc):
+            if not nm.startswith("tool_"):
+                continue
+            fn = getattr(_bc, nm, None)
+            if not callable(fn):
+                continue
+            try:
+                sig = _inspect.signature(fn)
+            except (TypeError, ValueError):
+                continue
+            ps = {pm.name for pm in sig.parameters.values()
+                  if pm.kind in (pm.POSITIONAL_OR_KEYWORD, pm.KEYWORD_ONLY)}
+            if ps:
+                out[nm[5:]] = frozenset(ps)
+    except Exception as e:
+        log(f"implementation-parameter map unavailable: {e}")
+        out = {}
+    _IMPL_PARAMS_CACHE = out
+    return out
 
 
 def _str_params() -> Dict[str, frozenset]:
@@ -5421,6 +5468,15 @@ def _normalise_tool_args(name: str, args: Any) -> Tuple[Dict[str, Any], str]:
     accepted = _spec_arg_names().get(name)
     if not accepted:
         return (out, "")            # no declared contract — nothing to check
+    # The documented names are the contract, but they are prose and prose
+    # drifts. A name the IMPLEMENTATION takes, or an alias target this table
+    # routes to, is never "unknown" however the persona example spells it —
+    # list_apps was documented as `filter` against a `filter_text` parameter,
+    # so the validator refused the correct spelling and (once the alias was
+    # declared) then refused every spelling.
+    accepted = (set(accepted)
+                | set((_ARG_ALIASES.get(name) or {}).values())
+                | set(_impl_params().get(name) or ()))
     if set(out) & accepted:
         return (out, "")            # at least one key landed; run it
     return (out, (

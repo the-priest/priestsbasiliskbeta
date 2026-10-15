@@ -138,7 +138,28 @@ _armed = Bp.build_system_prompt(grouped=_grouped, unleashed=True)
 # is actually open (see build_system_prompt's preload_groups), which is the
 # one place where paying for specs inline is cheaper than a load_tools
 # round-trip that will always be made anyway.
-LEASHED_CEIL = 8600
+#
+# RAISED AGAIN, by ~100 tokens, and this is that accounting. Both pieces are
+# CORRECTIONS of statements that were false, not new instruction:
+#
+#   · the LOOKUP tier (~45 tok net). Section (1c) shipped the UNLEASHED rule
+#     in both modes, so a leashed session was told that reading GitHub, Stack
+#     Exchange or Wikipedia needed a one-tap operator approval. The code reads
+#     any public URL directly while leashed. A model that believes it needs
+#     permission asks for it (there is nothing to ask), says it cannot read
+#     the page, or answers from memory instead of reading the source — which
+#     is the failure the web tools exist to prevent, caused by the prompt.
+#   · the INSTALLER line (~60 tok). It said piping a download into a shell was
+#     "refused at the primitive". That stopped being true when the refusal
+#     became a redirection: `curl -fsSL URL | bash` runs. A model that
+#     believes the install is impossible talks the operator through a manual
+#     one instead of doing it.
+#
+# Both are leashed-only; the armed ceiling is unchanged and armed is still the
+# more expensive prompt, which is what the pair of checks below protects.
+# Tokens spent saying what is true are not the same kind of spend as tokens
+# spent adding rules.
+LEASHED_CEIL = 8750
 ARMED_CEIL = 9000
 ck(f"leashed prompt is within budget ({tok(_leashed):,} <= {LEASHED_CEIL:,})",
    tok(_leashed) <= LEASHED_CEIL,
