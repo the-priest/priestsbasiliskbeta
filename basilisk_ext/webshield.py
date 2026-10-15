@@ -73,9 +73,34 @@ _STRUCT_PATTERNS = [
     (re.compile(r"javascript:\S+", re.I), " "),
     (re.compile(r"data:[^\s;,]{0,40};base64,[A-Za-z0-9+/=]{40,}", re.I),
      " [stripped-data-uri] "),
-    # tool / function call-looking tags an attacker embeds to fake a tool call
-    (re.compile(r"</?\s*(?:tool|function|invoke|antml:\w+|tool_call|"
-                r"function_call)\b[^>]*>", re.I), " [stripped-tag] "),
+    # tool / function call-looking tags an attacker embeds to fake a tool call.
+    #
+    # THE UNDERSCORE NAMES MUST COME FIRST, and leaving them out let the most
+    # important tag of all through. `tool\b` cannot match `tool_result`: `l`
+    # and `_` are both word characters, so there is no boundary between them,
+    # and the alternation then fell through to the other names and matched
+    # nothing. Measured before this change:
+    #
+    #     <tool name="run">   stripped
+    #     </tool>             stripped
+    #     </tool_result>      SURVIVED
+    #     <tool_use>          SURVIVED
+    #
+    # `</tool_result>` is the envelope this very text is wrapped in
+    # (basilisk.py builds "<tool_result>\n{header}{body}\n</tool_result>").
+    # A page carrying one closes its own container early, so everything after
+    # it reads to the model as if it came from OUTSIDE the untrusted block —
+    # which is the containment this module exists to provide. The faked tool
+    # call was already being stripped; the escape from the quarantine was not.
+    #
+    # Longest-first, because Python's alternation is leftmost-match: with
+    # `tool` first the engine matches it, fails `\b`, and tries the next
+    # alternative rather than the longer name.
+    # `<\s*/?\s*` not `</?\s*`: the slash may be preceded by whitespace too
+    # (`< / tool_result >`). Costs nothing and closes an obvious obfuscation.
+    (re.compile(r"<\s*/?\s*(?:tool_result|tool_results|tool_use|tool_call|"
+                r"function_call|antml:\w+|tool|function|invoke)"
+                r"\b[^>]*>", re.I), " [stripped-tag] "),
     # fake conversation-role / instruction tags and brackets
     (re.compile(r"</?\s*(?:system|assistant|user|human|instructions?|im_start|"
                 r"im_end|s>)\s*>", re.I), " [stripped-tag] "),
