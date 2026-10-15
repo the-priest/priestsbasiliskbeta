@@ -682,12 +682,24 @@ DEFAULT_SETTINGS = {
                                         # inline every turn — maximum context, far
                                         # more tokens. Autonomous mode always stays
                                         # lean regardless of this.
-    "max_tool_steps":          150,     # tool round-trips allowed per turn
-                                        # before Basilisk finalizes. Resets every
-                                        # turn (send another message to continue).
-                                        # Raise for very long autonomous runs; a
-                                        # cap still guards against a runaway loop
-                                        # billing you for hundreds of calls.
+    "max_tool_steps":          0,       # tool round-trips allowed per turn
+                                        # before Basilisk finalizes.
+                                        # 0 = UNCAPPED (the default): the turn
+                                        # runs until the model stops calling
+                                        # tools or you press Stop. Set a
+                                        # positive number to cap it; it resets
+                                        # every turn (send another message to
+                                        # continue).
+                                        # THIS KEY USED TO DO NOTHING. It
+                                        # defaulted to 150 and the host then
+                                        # overrode it with 0 whenever
+                                        # approval_mode was "none" -- which is
+                                        # ALWAYS, because _migrate_settings
+                                        # pops approval_mode a few lines below.
+                                        # So an operator who set 20 here got no
+                                        # cap, and the 150 in this file was
+                                        # fiction. Same dead-condition shape as
+                                        # the adaptive-effort heavy rung.
     "headroom_min_chars":      1200,    # don't compress a block under this size
     "headroom_keep_recent":    2,       # leave the last N tool results full
     "headroom_target_ratio":   0.35,    # fallback engine: keep ~this fraction
@@ -1039,6 +1051,13 @@ def _migrate_settings(merged: Dict[str, Any], raw: Dict[str, Any]) -> None:
     merged.pop("approval_mode", None)
     merged.pop("autonomous_mode", None)
     merged.pop("confirm_all_commands", None)
+    # max_tool_steps now MEANS something (see DEFAULT_SETTINGS above: 0 is
+    # uncapped). A stored 150 is the old no-op default that every install
+    # carries, not a cap anyone chose -- honouring it literally would newly
+    # cut long autonomous runs off at 150 steps. A value the operator actually
+    # picked is kept exactly as it is.
+    if raw.get("max_tool_steps") == 150:
+        merged["max_tool_steps"] = 0
 
     # Tool loading: grouped_tools (on = lean) became max_mode (on = full catalog).
     if "max_mode" not in raw and "grouped_tools" in raw:

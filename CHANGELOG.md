@@ -119,6 +119,33 @@ check now also accepts any name the implementation really takes and any alias
 target, so prose drifting can no longer make the validator reject a correct
 call.
 
+## A setting that silently did nothing
+
+`max_tool_steps` has been in DEFAULT_SETTINGS at 150 and doing nothing at all.
+The turn loop read it and then threw the answer away:
+
+    _budget = self.settings.get("max_tool_steps", MAX_TOOL_CHAIN)
+    if self.settings.get("approval_mode", "none") == "none":
+        _budget = 0
+
+`_migrate_settings` POPS `approval_mode` ("so nothing can re-enable a
+confirmation prompt"), so `.get()` always returns its own default, that branch
+always fired, and an operator who set 20 got no cap. Uncapped is still the
+default, and deliberately so — a walk-away job should run until the model
+stops calling tools or Stop is pressed — but it is now expressed as
+`max_tool_steps = 0`, which is what the file says, and a positive value is
+honoured. A stored 150 (the old no-op default every install carries) migrates
+to 0, so no existing install is newly cut off mid-run.
+
+That is the third bug out of the same pattern: a condition that cannot be
+false. The others were the adaptive-effort heavy rung (guarded with
+`and not _auton`, always False, so the bigger reasoning budget was never
+granted) and the propose/write_file split. `tests/test_deadconditions.py` pins
+the class rather than the instance: it proves the premise against the real
+migration, pins the budget, and prints every remaining always-true site so the
+next one is found by reading a test's output instead of by noticing a knob
+that does nothing.
+
 ## Found by probing every file
 
 - **Two exploit builders ignored their `url`.** `auth_bypass_headers` assigned
@@ -161,8 +188,9 @@ call.
   (`sort -V`, overridable with `BASILISK_ALLOW_DOWNGRADE=1`) now refuses to go
   backwards.
 
-**5,474 assertions across 88 suites**, zero red. New: `test_themes.py`,
-`test_spend.py`, `test_readcaps.py`. GUARDRAIL byte-identical.
+**5,490 assertions across 89 suites**, zero red. New: `test_themes.py`,
+`test_spend.py`, `test_readcaps.py`, `test_deadconditions.py`. GUARDRAIL
+byte-identical.
 
 ---
 

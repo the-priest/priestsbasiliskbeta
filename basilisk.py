@@ -219,11 +219,19 @@ def _clip(s, n: int) -> str:
 # read-only tools now batched (many lookups per round-trip), this budget
 # stretches much further than it looks.  On hitting it Basilisk doesn't dead-
 # end — it takes one final, tool-free turn to answer with what it gathered.
-# The y/n confirmation gate and the catastrophic-command hard block still
-# fire independently, so a high budget never means an unsupervised risky run.
-# This 150-step cap applies only in a SUPERVISED (per-command approval) mode;
-# it's overridable per-user via the "max_tool_steps" setting, and it resets
-# every turn so "keep going" always grants a fresh budget.
+# The catastrophic-command hard block and Stop fire independently of depth, so
+# a high budget never means an unguarded run.
+#
+# THIS NUMBER IS A FALLBACK, NOT THE DEFAULT. The shipped default is
+# max_tool_steps = 0, which means uncapped: a walk-away job runs until the
+# model stops calling tools or Stop is pressed. 150 is what a turn falls back
+# to only if the setting is missing entirely. The cap resets every turn, so
+# "keep going" always grants a fresh budget.
+#
+# (It used to be described as applying "only in a SUPERVISED (per-command
+# approval) mode". There is no such mode: _migrate_settings pops
+# approval_mode, which is why max_tool_steps was silently ignored for so long
+# — see _kick_assistant_turn.)
 MAX_TOOL_CHAIN = 150
 # Tools that count as "went and looked". The promise gate below asks whether
 # ANY of these ran this request before it lets a current-events turn end.
@@ -14044,15 +14052,29 @@ class MainWindow(Adw.ApplicationWindow):
         # with whatever was gathered.  The directive below tells the model
         # to stop calling tools; _after_stream ignores any it emits anyway.
         self._tool_chain_depth += 1
-        _budget = self.settings.get("max_tool_steps", MAX_TOOL_CHAIN)
-        # Autonomous walk-away mode (no per-command approval — the default) runs
-        # UNCAPPED: it keeps going until the task is actually finished (the model
-        # stops calling tools) or you press Stop. Stop and the catastrophic-
-        # command hard block fire regardless of depth, so uncapped never means an
-        # unsupervised risky run. The max_tool_steps cap only applies in a
-        # supervised (per-command approval) mode.
-        if self.settings.get("approval_mode", "none") == "none":
-            _budget = 0  # 0 == unlimited: run to completion
+        # ── THE CAP THE OPERATOR SETS IS THE CAP ────────────────────────
+        # This read max_tool_steps and then threw the answer away:
+        #
+        #     if self.settings.get("approval_mode", "none") == "none":
+        #         _budget = 0
+        #
+        # _migrate_settings POPS approval_mode ("so nothing can re-enable a
+        # confirmation prompt"), so .get() always returns its "none" default,
+        # that branch always fired, and max_tool_steps — a documented key in
+        # DEFAULT_SETTINGS — did nothing whatever it was set to. Third instance
+        # of this exact dead-condition shape (the adaptive-effort heavy rung
+        # and the propose/write_file split are the others).
+        #
+        # Uncapped is still the DEFAULT, and that is deliberate: a walk-away
+        # job should run until the model stops calling tools or Stop is
+        # pressed. It is now expressed as max_tool_steps = 0, which is what
+        # DEFAULT_SETTINGS says, with a stored 150 (the old no-op default)
+        # migrated to 0 so no existing install is newly cut off mid-run. Stop
+        # and the catastrophic-command floor fire regardless of depth either
+        # way, so uncapped never means unguarded.
+        _budget = _as_int(self.settings.get("max_tool_steps", 0), 0)
+        if _budget < 0:
+            _budget = 0
         if _budget and self._tool_chain_depth > _budget and not self._tools_locked:
             self._tools_locked = True
             self.terminal_log("── tool budget reached; finalizing answer", "dim")
