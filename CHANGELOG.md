@@ -193,6 +193,41 @@ that does nothing.
   count against `basilisk_core`, builder count against `exploits.py`, line
   count within 10%, and the theme names and count against `_THEME_SPECS`.
 
+## A new install could not chat
+
+The installer asked for a **Groq** key — "Groq is FREE and FAST" — and never
+for the SiliconFlow one. SiliconFlow is the only registered chat provider
+(`basilisk_core.PROVIDERS` has one entry, and DEFAULT_SETTINGS pins
+`active_provider` to it); Novita, GitHub and Google, which the prompt offered
+as alternatives, were removed. So a brand-new install collected a key the chat
+path never reads, never asked for the one it does, and opened to an app that
+returned an API error on every turn with nothing on screen to explain why.
+
+- The **SiliconFlow key is now the first thing asked for**, with the right
+  signup URL, honouring `SILICONFLOW_API_KEY`, and saying plainly that chat
+  will fail until it is set.
+- The **Groq key is still asked for, second and clearly optional**, labelled
+  as what it actually does: Groq's Whisper endpoint as a speech-to-text
+  fallback. Chat does not use it.
+- The installer **no longer pip-installs the `groq` library**. Nothing imports
+  it on any path the app uses: the one provider's engine is `openai_compat`,
+  so `GroqBackend` — the library's only consumer — is never constructed, and
+  Groq's STT is a plain HTTPS POST.
+- `--no-systemd` set a variable no line in the file ever read. Nothing has
+  installed a systemd unit since local-model support went. The flag is still
+  accepted and now documented as inert.
+- The header's step list claimed it installed "the three .py files ... +
+  systemd unit" and that step 3 installed "the Groq Python library (cloud
+  backend, primary)", and skipped steps 4 to 6 entirely. Rewritten to what it
+  does.
+- The import-failed fallback settings wrote `"theme": "basilisk"`, which is
+  not a theme key (so a re-tint silently fell through to the base sheet), and
+  `confirm_all_commands`, which `_migrate_settings` deletes on every load.
+
+`tests/test_assets.py` now checks the prompt against the provider registry
+itself, so adding or removing a provider fails the suite until the installer
+agrees.
+
 ## Restored
 
 - The **offline whisper.cpp STT** path and the browser-engine hardening that
@@ -202,7 +237,7 @@ that does nothing.
   (`sort -V`, overridable with `BASILISK_ALLOW_DOWNGRADE=1`) now refuses to go
   backwards.
 
-**5,584 assertions across 89 suites**, zero red. New: `test_themes.py`,
+**5,601 assertions across 89 suites**, zero red. New: `test_themes.py`,
 `test_spend.py`, `test_readcaps.py`, `test_deadconditions.py`. GUARDRAIL
 byte-identical.
 

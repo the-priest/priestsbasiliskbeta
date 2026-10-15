@@ -5,11 +5,22 @@
 # What it does, in order:
 #   1. checks Python 3.10+
 #   2. installs GTK4 + libadwaita bindings (apt / pacman / dnf)
-#   3. installs the Groq Python library (cloud backend, primary)
-#   7. installs the three .py files + dragon icon + launcher + desktop entry + systemd unit
-#   8. asks for a Groq API key (optional — skip & set it later in Settings)
-#   9. writes settings.json so the app opens straight into a working chat
-#   10. (if present) migrates oracle/* chats and settings to basilisk/*
+#   3. optional extras: context compression, voice (espeak/piper/mic)
+#   4. installs the app's .py files + sidecar package + dragon icon +
+#      launcher + desktop entry
+#   5. asks for a SiliconFlow API key — the one key chat needs — and
+#      optionally a Groq key, which only enables Groq's Whisper
+#      speech-to-text as a fallback
+#   6. writes settings.json so the app opens straight into a working chat
+#   7. (if present) migrates oracle/* chats and settings to basilisk/*
+#
+# (This list used to claim step 3 installed "the Groq Python library (cloud
+# backend, primary)", step 7 "the three .py files ... + systemd unit", and
+# step 8 asked for "a Groq API key". None of that was true any more:
+# SiliconFlow is the only chat provider, nothing installs a systemd unit, and
+# the groq library is not imported by any path the app uses. Worse, the key
+# prompt collected a Groq key and never asked for the SiliconFlow one, so a
+# brand-new install opened to an app that 400s on every turn.)
 #
 # After this: click "Basilisk" in your app grid.  That's it.
 #
@@ -22,17 +33,18 @@
 #   ./install.sh --update            # explicit update (same code path)
 #   ./install.sh --uninstall         # remove Basilisk (chat history kept)
 #   ./install.sh --remove-oracle     # remove the old Oracle install
-#   ./install.sh --no-systemd        # don't install the systemd unit
 #   ./install.sh --no-helpers        # skip optional desktop helpers
 #   ./install.sh --no-voice          # skip voice setup (espeak/piper/mic)
-#   ./install.sh --no-groq           # don't install the groq library / skip key prompt
+#   ./install.sh --no-groq           # skip the optional Groq (STT) key prompt
 #   ./install.sh --no-prompt         # skip ALL interactive prompts
+#   (--no-systemd is still accepted and does nothing: no unit is installed.)
 #
 # Env overrides:
 #   BASILISK_REPO=the-priest/PriestsBasilisk  BASILISK_BRANCH=main  ./install.sh
 #   (that example installs the STABLE repo over this beta; see the note at
 #    GITHUB_REPO below, and expect the downgrade guard to stop you)
-#   GROQ_API_KEY=gsk_...        ./install.sh    # preset key, no prompt
+#   SILICONFLOW_API_KEY=sk-... ./install.sh    # preset chat key, no prompt
+#   GROQ_API_KEY=gsk_...       ./install.sh    # preset STT key, no prompt
 #
 # One-liner install from GitHub:
 #   curl -fsSL https://raw.githubusercontent.com/the-priest/priestsbasiliskbeta/main/install.sh | bash
@@ -43,7 +55,6 @@ set -eo pipefail   # NOTE: no -u — curl|bash leaves BASH_SOURCE empty
 # ── flags ─────────────────────────────────────────────────────────
 
 ACTION="install"
-SKIP_SYSTEMD=0
 SKIP_HELPERS=0
 SKIP_GROQ=0
 SKIP_VOICE=0
@@ -53,7 +64,11 @@ for arg in "$@"; do
     --uninstall)         ACTION="uninstall" ;;
     --update)            ACTION="install" ;;
     --remove-oracle)     ACTION="remove-oracle" ;;
-    --no-systemd)        SKIP_SYSTEMD=1 ;;
+    # Accepted for compatibility and INERT: nothing installs a systemd unit
+    # any more (the local-model service went with Ollama support). The flag was
+    # setting SKIP_SYSTEMD, which no line in this file ever read -- a
+    # documented option that silently did nothing.
+    --no-systemd)        : ;;
     --no-helpers)        SKIP_HELPERS=1 ;;
     --no-groq)           SKIP_GROQ=1 ;;
     --no-voice)          SKIP_VOICE=1 ;;
@@ -340,34 +355,19 @@ from gi.repository import Gtk, Adw
   ok "GTK4 + libadwaita installed"
 fi
 
-# ── 3. Groq library ───────────────────────────────────────────────
-
-if [ $SKIP_GROQ -eq 0 ]; then
-  step "Groq Python library"
-  if python3 -c "import groq" 2>/dev/null; then
-    ok "groq library already present"
-  else
-    say "installing groq (~few MB) via pip"
-    # `python3 -m pip` works whether the user has `pip` or `pip3` on PATH
-    # (or neither — they may need apt to install pip first).
-    if python3 -m pip install --user --quiet groq 2>/dev/null; then
-      ok "groq installed (pip --user)"
-    elif python3 -m pip install --user --break-system-packages --quiet groq 2>/dev/null; then
-      ok "groq installed (pip --user --break-system-packages)"
-    elif command -v pipx >/dev/null && pipx install groq 2>/dev/null; then
-      ok "groq installed (pipx)"
-    elif command -v apt-get >/dev/null && $ESC apt-get install -y python3-pip 2>/dev/null \
-         && python3 -m pip install --user --break-system-packages --quiet groq 2>/dev/null; then
-      ok "groq installed (after pip install)"
-    else
-      warn "could not auto-install groq library — add a SiliconFlow,"
-      warn "Novita, GitHub, or Google key in Settings instead, or fix with:"
-      warn "   python3 -m pip install --user --break-system-packages groq"
-    fi
-  fi
-else
-  warn "skipping groq library (--no-groq)"
-fi
+# ── 3. (no chat library to install) ───────────────────────────────
+#
+# This step used to pip-install `groq` (a few MB, with four fallback
+# strategies and a warning if they all failed). Nothing needs it:
+# SiliconFlow is the only registered provider and its engine is
+# `openai_compat`, which talks to the API over the standard library, so
+# GroqBackend -- the only consumer of the library -- is never constructed.
+# Groq's Whisper speech-to-text, which IS still used as a fallback, is a plain
+# HTTPS POST and needs no library either.
+#
+# Left as a no-op rather than deleted so the step numbering in the header and
+# the --no-groq flag keep their meaning (that flag now skips the optional Groq
+# STT key prompt, which is the only thing Groq is still involved in).
 
 # ── 3b. Headroom (optional context compression) ──────────────────
 #
@@ -1117,12 +1117,54 @@ touch "${DESKTOP_DIR}/${APP_ID}.desktop" 2>/dev/null || true
 
 ok "launcher + desktop entry installed"
 
-# ── 9. Groq API key prompt ────────────────────────────────────────
+# ── 9. API keys ───────────────────────────────────────────────────
+#
+# THE KEY THE APP NEEDS IS THE SILICONFLOW ONE. This step used to ask for a
+# GROQ key and nothing else -- "Groq is FREE and FAST" -- and then offer
+# "SiliconFlow, Novita, GitHub, or Google" as alternatives. SiliconFlow is the
+# ONLY registered chat provider (basilisk_core.PROVIDERS has one entry, and
+# DEFAULT_SETTINGS pins active_provider to it); Novita, GitHub and Google were
+# removed. So a brand-new install collected a key the chat path never reads,
+# never asked for the one it does, and opened to an app that returns an API
+# error on every turn with nothing on screen to explain why.
+#
+# Groq is still worth a prompt, but for what it actually does now: its Whisper
+# endpoint is a speech-to-text fallback (see STT_AUTO_ORDER in
+# basilisk_voice.py). It is asked for second, and clearly labelled.
+
+SF_KEY_TO_WRITE=""
+step "SiliconFlow API key (chat)"
+# Priority: env var > existing settings > prompt
+if [ -n "${SILICONFLOW_API_KEY:-}" ]; then
+  SF_KEY_TO_WRITE="${SILICONFLOW_API_KEY}"
+  ok "using SILICONFLOW_API_KEY from environment"
+elif [ -f "${CONFIG_DIR}/settings.json" ] \
+     && python3 -c "import json; d=json.load(open('${CONFIG_DIR}/settings.json')); exit(0 if d.get('siliconflow_api_key') else 1)" 2>/dev/null; then
+  ok "existing SiliconFlow key preserved in settings"
+elif [ $NO_PROMPT -eq 1 ] || [ ! -t 0 ]; then
+  warn "no chat key set — add one in Settings → Backends before chatting"
+  warn "   get one at https://cloud.siliconflow.com/account/ak"
+else
+  echo
+  echo "  This is the key chat runs on.  Get one at"
+  echo "    https://cloud.siliconflow.com/account/ak"
+  echo "  then paste it here.  Press ENTER to skip and add it later in"
+  echo "  Settings → Backends."
+  echo
+  printf "  SiliconFlow API key: "
+  read -r USER_SF_KEY
+  if [ -n "${USER_SF_KEY}" ]; then
+    SF_KEY_TO_WRITE="${USER_SF_KEY}"
+    ok "chat key captured"
+  else
+    warn "no chat key — the app will open, but every turn will fail until"
+    warn "   you add one in Settings → Backends"
+  fi
+fi
 
 GROQ_KEY_TO_WRITE=""
 if [ $SKIP_GROQ -eq 0 ]; then
-  step "Groq API key (optional)"
-  # Priority: env var > existing settings > prompt
+  step "Groq API key (optional — speech-to-text only)"
   if [ -n "${GROQ_API_KEY:-}" ]; then
     GROQ_KEY_TO_WRITE="${GROQ_API_KEY}"
     ok "using GROQ_API_KEY from environment"
@@ -1130,21 +1172,20 @@ if [ $SKIP_GROQ -eq 0 ]; then
        && python3 -c "import json; d=json.load(open('${CONFIG_DIR}/settings.json')); exit(0 if d.get('groq_api_key') else 1)" 2>/dev/null; then
     ok "existing Groq key preserved in settings"
   elif [ $NO_PROMPT -eq 1 ] || [ ! -t 0 ]; then
-    warn "no key set — add one in Settings → Backends to start chatting"
+    say "no Groq key — speech-to-text will use SiliconFlow or a local model"
   else
     echo
-    echo "  Groq is FREE and FAST.  Sign up at https://console.groq.com"
-    echo "  to get a key, then paste it here.  Press ENTER to skip."
-    echo "  (You can also use SiliconFlow, Novita, GitHub, or Google —"
-    echo "   add any of those keys later in Settings → Backends.)"
+    echo "  Optional.  Chat does NOT use this.  It only adds Groq's Whisper"
+    echo "  endpoint as a speech-to-text fallback (free; console.groq.com)."
+    echo "  Press ENTER to skip."
     echo
     printf "  Groq API key: "
     read -r USER_GROQ_KEY
     if [ -n "${USER_GROQ_KEY}" ]; then
       GROQ_KEY_TO_WRITE="${USER_GROQ_KEY}"
-      ok "key captured"
+      ok "STT key captured"
     else
-      warn "no key — add one later in Settings → Backends"
+      say "skipped — speech-to-text will use SiliconFlow or a local model"
     fi
   fi
 fi
@@ -1156,11 +1197,13 @@ SETTINGS_FILE="${CONFIG_DIR}/settings.json"
 
 SETTINGS_FILE_PATH="${SETTINGS_FILE}" \
 NEW_GROQ_KEY="${GROQ_KEY_TO_WRITE}" \
+NEW_SF_KEY="${SF_KEY_TO_WRITE}" \
 INSTALL_DIR_PATH="${INSTALL_DIR}" \
 python3 - <<'PYEOF'
 import json, os, sys
 settings_file = os.environ['SETTINGS_FILE_PATH']
 new_groq_key  = os.environ.get('NEW_GROQ_KEY', '')
+new_sf_key    = os.environ.get('NEW_SF_KEY', '')
 install_dir   = os.environ.get('INSTALL_DIR_PATH', '')
 
 # Source of truth: basilisk_core.DEFAULT_SETTINGS from the freshly-installed code.
@@ -1197,8 +1240,12 @@ if defaults is None:
         "max_tokens": 2048,
         "system_prompt": "",
         "agent_mode_default": True,
-        "confirm_all_commands": True,
-        "theme": "basilisk",
+        # "ember" is a real theme key (THEME_ORDER in basilisk.py); the
+        # value here used to be "basilisk", which is not one, so a re-tint
+        # silently fell through to the base sheet. And
+        # "confirm_all_commands" is popped by _migrate_settings on every
+        # load -- writing it only put a key on disk that the app deletes.
+        "theme": "ember",
         "ui_scale": 0,
     }
     for key, model in providers.items():
@@ -1217,7 +1264,10 @@ if os.path.exists(settings_file):
 else:
     out = dict(defaults)
 
-# Apply Groq key from this installer run if one was captured
+# Apply the keys captured by this installer run. The SiliconFlow one is the
+# chat key; the Groq one only enables Whisper speech-to-text.
+if new_sf_key:
+    out['siliconflow_api_key'] = new_sf_key
 if new_groq_key:
     out['groq_api_key'] = new_groq_key
 
@@ -1226,7 +1276,10 @@ with open(settings_file, "w") as f:
     json.dump(out, f, indent=2)
 
 print(f"  active_provider = {out.get('active_provider')}")
-print(f"  groq_key        = {'set' if out.get('groq_api_key') else '(not set — add via Settings)'}")
+print(f"  chat key        = "
+      f"{'set' if out.get('siliconflow_api_key') else 'NOT SET - chat will fail until you add one in Settings'}")
+print(f"  stt key (groq)  = "
+      f"{'set' if out.get('groq_api_key') else '(not set - optional)'}")
 PYEOF
 ok "settings written"
 
