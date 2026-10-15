@@ -2,6 +2,13 @@
 """
 reach - native internet-reach tools for Basilisk.
 
+NOT CURRENTLY WIRED. Nothing in the app imports this module; the Exa/GitHub
+tools below are not in either dispatch path and the persona does not teach
+them, so `web_search_smart`, `github_search` and `github_repo` are not tools
+Basilisk has. It is kept because the clients are written and shielded, and
+wiring it is three dispatch entries plus a persona block - but until that
+happens, do not read this file as a description of what the app can do.
+
 The idea, lifted from Agent-Reach but reimplemented natively so there is NO
 third-party package to install: every platform that has a keyless, login-free
 HTTP path gets a small stdlib client here.  Basilisk already reads arbitrary

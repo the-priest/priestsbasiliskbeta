@@ -6684,14 +6684,35 @@ def _shield_web(text: str, source: str = "") -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# HTTP GET HELPER — retained ONLY for the inline image search/fetch.
+# HTTP GET HELPER — for the inline image search/fetch.
 #
-# The web-reading tools were REMOVED (web_search, web_read, web_verify, plus
-# the OSINT, social-media, GitHub and CVE readers, and the reach/Exa sidecar).
-# They pulled attacker-controllable page/post/repo text straight into the
-# model's reasoning context — the classic indirect-prompt-injection vector, and
-# the whole reason a compromised target could try to redirect Basilisk.  What
-# survives below is the low-level GET that image_search uses to reach the
+# WHAT THIS BLOCK USED TO SAY, AND WHY IT WAS WRONG: "The web-reading tools were
+# REMOVED (web_search, web_read, web_verify, plus the OSINT, social-media,
+# GitHub and CVE readers, and the reach/Exa sidecar)." They were removed once,
+# for the reason given below, and then they came BACK — tool_web_read,
+# tool_web_search and tool_web_research are defined a few hundred lines above
+# this comment and are wired into both dispatch paths. Reading that paragraph
+# while actually holding web_read in your hand is how you end up looking for a
+# bug in the wrong file.
+#
+# The reason they were pulled is still the live risk and still governs how they
+# work: a page pulls attacker-controllable text straight into the model's
+# reasoning context (indirect prompt injection). What changed is that the risk
+# is now ANSWERED rather than avoided — every byte of fetched page text goes
+# through _shield_web (basilisk_ext.webshield) into a marked untrusted envelope
+# before it reaches the context, and _web_read_gated holds any non-trusted host
+# outside the autonomous loop while UNLEASHED. The SSRF floor inside
+# tool_web_read refuses internal/private/metadata addresses in every mode and
+# cannot be approved past.
+#
+# Two sidecars from that era are still in the tree and still NOT wired:
+# basilisk_ext/reach.py (Exa semantic search, GitHub search/read) and
+# basilisk_ext/verify.py (multi-source credibility scoring). Nothing imports
+# either one; web_research covers the cross-checking job. They are dead weight,
+# not hidden features — do not assume a `web_search_smart` or `web_verify` tool
+# exists because a module defines one.
+#
+# What survives below is the low-level GET that image_search uses to reach the
 # Openverse / Wikimedia / DuckDuckGo image endpoints; it returns image URLs to
 # RENDER (bytes -> pixels), not page text to reason over, so it is not that same
 # injection surface.

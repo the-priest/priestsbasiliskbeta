@@ -300,9 +300,11 @@ def extra_tools(host: Any) -> Dict[str, Callable[[Dict[str, Any]], str]]:
             a.get("query", a.get("id", a.get("text", a.get("value", "")))))
 
     if S.on("skills_enabled") and S.skl:
-        # skill_write is registered by the HOST (basilisk.py), not here, so its
-        # save can go through Basilisk's own confirm dialog before the sidecar
-        # validates + sandbox-tests + persists via commit_skill().
+        # skill_write is registered by the HOST (basilisk.py), not here, so the
+        # save runs host-side before the sidecar validates + sandbox-tests +
+        # persists via commit_skill(). (This said "so its save can go through
+        # Basilisk's own confirm dialog" — the host has no such dialog; the ast
+        # check and the sandboxed test run are what make the save safe.)
         out["skill_list"] = lambda a: S.skl.tool_list()
         out["skill_run"] = lambda a: S.skl.tool_run(
             a.get("name", ""), a.get("args", {}),

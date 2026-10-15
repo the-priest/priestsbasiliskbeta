@@ -439,8 +439,13 @@ def _teardown() -> None:
 
 def shutdown() -> None:
     """Close the browser if one is running. Safe any time, from any thread,
-    twice."""
-    global _WORKER
+    twice.
+
+    No `global _WORKER` here on purpose: this function only READS the handle.
+    The worker clears it to None from inside _worker_loop as it exits, and
+    _ensure_worker restarts on `is None or not is_alive()`, so a shutdown
+    followed by a fetch gets a fresh worker either way. The bare `global` that
+    used to sit here declared an assignment that never happened."""
     with _WORKER_LOCK:
         w = _WORKER
     if w is not None and w.is_alive():

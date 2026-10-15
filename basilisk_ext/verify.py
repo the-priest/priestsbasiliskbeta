@@ -1,6 +1,14 @@
 """
 verify — multi-source verification for Basilisk.
 
+NOT CURRENTLY WIRED. Nothing in the app imports this module: the
+`web_verify` tool it was written for was removed, and `web_research`
+(basilisk_ext/research.py, reached through tool_web_research) does the
+search-read-cross-check job that ships today. It is kept because the domain
+credibility tiers below are the part worth having, and wiring it back is a
+dispatch entry plus a persona block. Do not assume a `web_verify` tool exists
+because this file defines verify().
+
 The job: when the operator asks for a fact about the current world — or
 anything where being wrong matters — don't answer from one page and don't
 answer from memory.  Pull several INDEPENDENT sources, score each one's
@@ -308,6 +316,17 @@ def verify(
     if not query:
         return {"ok": False, "error": "no query"}
     s = settings or {}
+    # Per-source read cap. This was a hardcoded 4000 at the read call below —
+    # under a sixth of what web_read returns by default (24000), so a claim
+    # sitting past the first few screens of a page simply was not seen, and the
+    # cross-check scored the source as silent on it. `settings` was accepted,
+    # normalised into `s` here, and then read by nothing at all; this is the one
+    # knob it plausibly wanted.
+    try:
+        read_chars = max(2000, min(int(s.get("verify_read_chars", 16000)),
+                                   200000))
+    except (TypeError, ValueError):
+        read_chars = 16000
     try:
         max_sources = max(2, min(int(max_sources), 8))
     except (TypeError, ValueError):
@@ -353,7 +372,7 @@ def verify(
             rec["excerpt"] = "(satire site — not fetched)"
             return rec
         try:
-            rr = read_fn(url, max_chars=4000)
+            rr = read_fn(url, max_chars=read_chars)
             if rr and rr.get("ok"):
                 body = rr.get("text", "")
                 rec["excerpt"] = _best_excerpt(body, query)

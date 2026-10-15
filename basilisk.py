@@ -17982,8 +17982,10 @@ class MainWindow(Adw.ApplicationWindow):
         }
         # Merge sidecar tools (memory_*, skill_list, skill_run).  Returns an
         # empty dict unless the matching feature is enabled, so stock Basilisk is
-        # unchanged.  skill_write is registered here (not in the sidecar) so
-        # the save goes through Basilisk's own confirm dialog.
+        # unchanged.  skill_write is registered here (not in the sidecar) so the
+        # save runs on the host side, where the sandbox tier and the terminal log
+        # live.  (It used to read "so the save goes through Basilisk's own
+        # confirm dialog" — there is no such dialog; see _tool_skill_write.)
         if getattr(self, "_ext", None):
             try:
                 for _tname, _tfn in self._ext.extra_tools(self).items():
@@ -18860,27 +18862,43 @@ class MainWindow(Adw.ApplicationWindow):
         self._tool_thread(_bg, name)
 
     def _action_tool(self, name, fn, description):
-        """Run an action tool (one with side effects: launching apps,
-        typing, moving/deleting files).  Honours the SAME 'Confirm every
-        command' toggle the shell `run` tool uses — when it's on, the
-        operator approves via a dialog first; when off (auto mode), the
-        action runs immediately.  Either way the result is fed back to
-        the model."""
+        """Run an action tool (one with side effects: launching apps, typing,
+        moving/deleting files).  The result is fed back to the model.
+
+        This docstring used to describe a "Confirm every command" toggle and an
+        approval dialog — "when it's on, the operator approves first; when off,
+        the action runs immediately".  Neither exists: autonomous operation is
+        the only posture (see _execute_command, which says so), and the body
+        here has called _go(True) unconditionally for a long time.  A docstring
+        describing a gate that is not there is worse than none — it is the first
+        thing you read when you go looking for why something ran unapproved.
+
+        The structural floor is what actually holds: is_catastrophic_command and
+        the sensitive-path read guard sit under every one of these, and they are
+        not advisory.
+
+        `name` is the tool's own name, used for the terminal label — it was
+        accepted and then dropped, so every action tool logged under whatever
+        _dispatching_tool happened to hold."""
         def _go(allow=True, password=None):
             if not allow:
                 self._feed_tool_result(f"operator declined: {description}")
                 return
-            self._tool_simple(fn)
+            self._tool_simple(fn, name=name)
 
-        # No confirmation — autonomous. The action just runs.
         _go(True)
 
     def _tool_skill_write(self, a):
         """Self-written skill.  The model supplies name/code/test/description/
-        capabilities.  Saving is gated by the same confirm dialog the operator
-        uses for commands: on approval the sidecar ast-checks the code, runs
-        its test IN THE SANDBOX, and keeps it only if the test passes.  Nothing
-        executes in Basilisk's own process."""
+        capabilities.  The sidecar ast-checks the code, runs its test IN THE
+        SANDBOX, and keeps it only if the test passes.  Nothing executes in
+        Basilisk's own process.
+
+        There is no approval step — this said "gated by the same confirm dialog
+        the operator uses for commands", and that dialog does not exist.  What
+        makes the save safe is the ast check and the sandboxed test run, both of
+        which happen regardless; the claim about a gate just sent you looking
+        for one."""
         name = str(a.get("name", "")).strip()
         code = str(a.get("code", ""))
         test = str(a.get("test", ""))
@@ -18907,9 +18925,8 @@ class MainWindow(Adw.ApplicationWindow):
                 feed(json.dumps(r, indent=2, default=str))
             self._tool_thread(_bg, f"skill_save {name}")
 
-        descr = (f"save self-written skill '{name}'"
-                 + (f" (caps: {', '.join(caps)})" if caps else "")
-                 + " — sandbox-tested before keeping")
+        # (The description string that used to label the confirm dialog was
+        # computed here and read by nothing once the dialog went.)
         # No confirmation — autonomous. The skill is saved directly (it's still
         # ast-checked and sandbox-tested before being kept, so nothing unsafe
         # runs in Basilisk's own process regardless).

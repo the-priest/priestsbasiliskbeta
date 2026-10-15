@@ -85,6 +85,81 @@ ck("test badge agrees with the prose claim",
    "the badge and the security-model paragraph must not drift apart")
 
 
+# ── 1b. THE OTHER COUNTED CLAIMS ─────────────────────────────────────
+# Added because the line count and the assertion total both went stale and
+# were found by reading, not by a test: the README said ~63k lines at 72k and
+# 5,162 assertions at 5,412. Everything countable without running the suite is
+# counted here. (The assertion TOTAL itself needs the suite to run, so it is
+# not pinned to a measurement; the badge/prose agreement above at least stops
+# the two copies of the number drifting apart.)
+_core = io.open("basilisk_core.py", encoding="utf-8").read()
+_tools_real = len(set(re.findall(r"^def (tool_[a-z0-9_]+)\(", _core, re.M)))
+_tools_claim = re.search(r"\*\*(\d+) tools\*\*", README)
+ck("tool-count claim present", _tools_claim is not None)
+ck(f"tool count matches basilisk_core ({_tools_real})",
+   _tools_claim and int(_tools_claim.group(1)) == _tools_real,
+   f"claims {_tools_claim.group(1) if _tools_claim else '?'}, "
+   f"found {_tools_real}")
+
+_expl = io.open(os.path.join("basilisk_ext", "exploits.py"),
+                encoding="utf-8").read()
+_builders = len(re.findall(r"^def [a-z][a-z0-9_]*\(", _expl, re.M))
+_bclaims = set(re.findall(r"(\d+) (?:parameterized |parameterised )?exploit "
+                          r"builders", README))
+_bclaims |= set(re.findall(r"The (\d+) exploit builders", README))
+ck("exploit-builder claim present", bool(_bclaims))
+ck(f"every builder count in the README matches exploits.py ({_builders})",
+   all(int(c) == _builders for c in _bclaims),
+   f"claims {sorted(_bclaims)}, found {_builders}")
+
+_py = sorted(glob.glob("*.py")) + sorted(glob.glob("basilisk_ext/*.py"))
+_lines = sum(len(io.open(f, encoding="utf-8").read().splitlines())
+             for f in _py)
+_lclaim = re.search(r"~(\d+)k lines of Python", README)
+ck("line-count claim present", _lclaim is not None)
+# Stated to the nearest thousand and the tree grows every release, so this is
+# a 10% band, not an equality -- tight enough to catch 63k-vs-72k.
+ck(f"line count is within 10% of reality ({_lines})",
+   _lclaim and abs(int(_lclaim.group(1)) * 1000 - _lines) <= _lines * 0.10,
+   f"claims ~{_lclaim.group(1) if _lclaim else '?'}k, found {_lines}")
+
+# The theme picker: the README names the themes, so the names have to be the
+# ones the app actually ships (this is where "nine themes" and a list of eight
+# would part company).
+# Parsed with ast, not a regex: the spec tuples wrap differently line to line
+# (one carries a comment between its fields), and a regex quietly matched six
+# of the nine -- a check that reads less than it claims to.
+_themes = []
+try:
+    import ast as _ast
+    for _n in _ast.walk(_ast.parse(SRC)):
+        if (isinstance(_n, _ast.Assign)
+                and any(getattr(t, "id", "") == "_THEME_SPECS"
+                        for t in _n.targets)
+                and isinstance(_n.value, (_ast.Tuple, _ast.List))):
+            for _e in _n.value.elts:
+                if (isinstance(_e, (_ast.Tuple, _ast.List)) and _e.elts
+                        and isinstance(_e.elts[0], _ast.Constant)):
+                    _themes.append(_e.elts[0].value)
+            break
+except Exception:
+    _themes = []
+ck("the theme table was found and parsed", len(_themes) >= 2,
+   f"parsed {len(_themes)} themes - has _THEME_SPECS moved?")
+if _themes:
+    _named = [t for t in _themes if t in README]
+    ck(f"every shipped theme is named in the README ({len(_themes)})",
+       len(_named) == len(_themes),
+       "missing: " + ", ".join(t for t in _themes if t not in README))
+    _wordnum = {8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve"}
+    _w = _wordnum.get(len(_themes))
+    ck(f"the stated theme count says {_w or len(_themes)}",
+       (_w and (f"**{_w} themes**" in README
+                or f"{_w} themes" in README))
+       or f"{len(_themes)} themes" in README,
+       f"{len(_themes)} themes ship; the README says something else")
+
+
 # ── 2. SAFETY CLAIMS ARE TRUE OF THE CODE ────────────────────────────
 print("\n== safety claims vs code ==")
 _res = kc.tool_run_command("mkfs.ext4 /dev/sda")

@@ -103,10 +103,28 @@ for name, text, ceiling_ms in SHAPES:
 print("\n== scaling must be sub-quadratic ==")
 
 
-def _time(text):
-    t = time.perf_counter()
-    C.strip_tool_calls(text)
-    return time.perf_counter() - t
+def _time(text, reps=7):
+    """BEST of `reps` runs, not one run.
+
+    This used to take a single sample of each size. A single sample measures
+    the machine as much as the code: when the box is busy (the whole suite
+    running in parallel, a build in another terminal), whichever of the two
+    sizes happens to get descheduled decides the ratio, and this check went red
+    on a build whose scaling was fine -- then passed on its own seconds later.
+    A test that cries wolf is worse than no test, because the next real red
+    gets waved through as "that flaky one".
+
+    The minimum is the standard answer: it is the sample least contaminated by
+    other load, and it cannot hide the defect this check exists for -- genuinely
+    quadratic scaling is quadratic in the best case too."""
+    best = None
+    for _ in range(reps):
+        t = time.perf_counter()
+        C.strip_tool_calls(text)
+        d = time.perf_counter() - t
+        if best is None or d < best:
+            best = d
+    return best
 
 
 for label, build in [

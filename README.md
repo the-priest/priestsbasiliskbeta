@@ -7,7 +7,7 @@
 <br/>
 
 <img src="https://img.shields.io/badge/version-1.2.3.0-d97757?style=for-the-badge&labelColor=08090b" alt="version 1.2.3.0">
-<img src="https://img.shields.io/badge/tests-5162%20assertions-2ea043?style=for-the-badge&labelColor=08090b&logo=pytest&logoColor=2ea043" alt="5162 assertions">
+<img src="https://img.shields.io/badge/tests-5412%20assertions-2ea043?style=for-the-badge&labelColor=08090b&logo=pytest&logoColor=2ea043" alt="5412 assertions">
 <img src="https://img.shields.io/badge/licence-MIT-e11d2b?style=for-the-badge&labelColor=08090b" alt="MIT">
 <img src="https://img.shields.io/badge/deps-stdlib%20%2B%20GTK-e11d2b?style=for-the-badge&labelColor=08090b" alt="stdlib + GTK">
 
@@ -174,7 +174,7 @@ It also remembers. Persistent memory across sessions, backed by **SQLite**, with
 
 ## 🖥️ The desktop
 
-A real desktop app, not a terminal wrapper — GTK4 / libadwaita with a dark Aero-glass theme.
+A real desktop app, not a terminal wrapper — GTK4 / libadwaita, Aero-glass over a near-black ground, in **nine themes** you pick in **Settings → Appearance**: ember (the original clay/coral), violet, midnight, abyss, rose, venom, brass, slate and forest. Each one is black first with a single colour through it — the whole stylesheet is retinted algorithmically, every panel and border and glow, not a swapped accent on a grey app.
 
 | | |
 |---|---|
@@ -182,6 +182,8 @@ A real desktop app, not a terminal wrapper — GTK4 / libadwaita with a dark Aer
 | 🗣️ **Voice in and out** | Whisper / SenseVoice speech-to-text, Piper text-to-speech, per-message read-aloud |
 | 🖼️ **Vision** | Drop an image inline and have a vision model actually *look* at it |
 | ↩️ **Steer without stopping** | Type a nudge mid-run and press **Enter** — folded in on the next step, no interruption |
+| ⌨️ **Mode from the keyboard** | **Tab** toggles the agent on and off, **Shift+Tab** switches leashed ⇄ unleashed — from the composer or anywhere in the window |
+| 🧮 **What the chat cost** | A token/cost chip beside the composer: tokens in and out and the dollar figure for *this* chat, counted from the provider's own usage report rather than estimated. Per-model prices are editable in **Settings → Backends** |
 | 📜 **Live terminal panel** | Every command and its raw output, toggled from the header |
 | 🖥️ **Desktop control** | Launch apps, focus windows, type, screenshot, read the screen |
 | 🔌 **MCP** | Connect external MCP servers as extra tools |
@@ -264,7 +266,7 @@ Capability and safety are decoupled on purpose.
 
 **The floor never moves.** The destructive-command gate and the self-tamper guard fire in both modes, at the execution primitive, with no override. (Engagement *scope* is recorded for the report — `scope_set` / `scope_show` — but it is not a gate and does not refuse commands.) The catastrophic-command check is not a naive string match — it sees through obfuscation like `rm${IFS}-rf${IFS}/` (**`$IFS`** substitution) and `sh -c '…'` wrappers, and there is **no "run anyway"** override on a catastrophic hit. It is tuned against false positives too: `rm -rf ~/loot` is *your* loot directory and runs fine; it is `/` and raw device nodes that are blocked. The safety guardrail is a byte-identical, test-pinned block, and the engine will not ship if it drifts.
 
-**Reading the web is tiered, not one closed list.** Trusted sources (NVD, OWASP, PortSwigger) are read freely. Community sources like **exploit-db** and GitHub sit on the **approval side, outside the autonomous loop** — any public host is reachable after a one-tap approval, never auto-fetched mid-run. Cloud-metadata endpoints (`169.254.169.254`) and loopback are refused outright.
+**Reading the web is tiered, not one closed list.** Trusted sources (NVD, OWASP, PortSwigger) are read freely in both modes. **While leashed, so is everything else** — any public URL is fetched directly, because you are in the loop on every turn and research has to be unrestricted to be worth anything. **While unleashed**, community sources like **exploit-db** and GitHub move to the **approval side, outside the autonomous loop**: reachable after a one-tap approval, never auto-fetched mid-run, so a compromised page cannot steer a relentless run onto a host nobody vetted. Cloud-metadata endpoints (`169.254.169.254`) and loopback are refused outright in every mode, and no approval overrides that.
 
 **Untrusted input is treated as untrusted.** Archives are handled with hard guards — **Zip slip** (`commonpath`-checked extraction), **Zip bombs**, **Symlink entries** — all refused *before* anything is written, and refusals are reported rather than silently dropped. Repo work can run inside a **`bubblewrap`** sandbox. A stray `.env` is flagged and kept out of the model's context. Your sudo password never reaches the model, and the agent cannot edit its own safety code.
 
@@ -272,7 +274,7 @@ Capability and safety are decoupled on purpose.
 
 ## 🧬 Inside the machine
 
-~63k lines of Python, standard-library only for the engine (GTK for the desktop), across a deliberately boring, testable architecture:
+~72k lines of Python, standard-library only for the engine (GTK for the desktop), across a deliberately boring, testable architecture:
 
 | Module | What it is |
 |---|---|
@@ -293,7 +295,7 @@ Capability and safety are decoupled on purpose.
 
 ## 🔬 Engineering
 
-**Stdlib only** for the engine. No pytest, no network, no fixtures, no account — **5,162 assertions across 88 suites**, run in under a minute. Four of those suites are adversarial probes that report *findings* rather than a pass count, so their checks are not in that total.
+**Stdlib only** for the engine. No pytest, no network, no fixtures, no account — **5,412 assertions across 88 suites**, run in under a minute. Four of those suites are adversarial probes that report *findings* rather than a pass count, so their checks are not in that total.
 
 Every fix ships with a regression that *fails* on the old code and *passes* on the new. Real GTK is spun up under Xvfb for the UI suites; the chat-bubble layout alone is pinned by 140 fitting checks. Repo work is covered end-to-end rather than layer by layer — a deliberately broken repo is opened as a folder, baselined red, edited through four different tool-call dialects, verified green, diffed and exported, with a 6,000-line file paged and rewritten on the way past.
 
