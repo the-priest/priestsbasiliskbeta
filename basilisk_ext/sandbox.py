@@ -256,12 +256,32 @@ def run_python(code_path: str,
             except subprocess.TimeoutExpired:
                 out, err = "", "sandbox: process did not exit after kill"
         dur = round(_t.time() - t0, 3)
+        # A CUT STREAM SAYS IT WAS CUT. These were bare slices: a script that
+        # printed 30 KB came back as 20 KB that ended mid-line, and the model
+        # read the last line it could see as the last thing that happened --
+        # so a traceback or a summary line past the cap simply did not exist.
+        # The marker goes INSIDE the stream, because that is the only place a
+        # reader of the stream will look.
+        _so, _se = (out or ""), (err or "")
+        _SO_CAP, _SE_CAP = 20000, 8000
+        if len(_so) > _SO_CAP:
+            _so = (_so[:_SO_CAP]
+                   + f"\n\n[TRUNCATED: showing the first {_SO_CAP} of "
+                     f"{len(out or '')} characters of stdout. The rest was "
+                     f"NOT captured - do not treat the line above as the end "
+                     f"of the run.]")
+        if len(_se) > _SE_CAP:
+            _se = (_se[:_SE_CAP]
+                   + f"\n\n[TRUNCATED: showing the first {_SE_CAP} of "
+                     f"{len(err or '')} characters of stderr.]")
         return {
             "ok": (proc.returncode == 0 and not timed_out),
             "tier": tier,
             "rc": proc.returncode,
-            "stdout": (out or "")[:20000],
-            "stderr": (err or "")[:8000],
+            "stdout": _so,
+            "stderr": _se,
+            "stdout_truncated": len(out or "") > _SO_CAP,
+            "stderr_truncated": len(err or "") > _SE_CAP,
             "timed_out": timed_out,
             "duration": dur,
         }

@@ -145,6 +145,52 @@ check now also accepts any name the implementation really takes and any alias
 target, so prose drifting can no longer make the validator reject a correct
 call.
 
+## One tag, read by four things, right only by accident
+
+- **A batched tool result lost its "never compress this" protection, and
+  whether it did depended on the order of the batch.** The host runs read-only
+  tools in parallel and feeds one combined envelope, tagged `[tool: name]` so
+  the compressor knows what produced it. The tag was derived by splitting the
+  batch's combined label at its first colon, so `system_info + read_file: ~/a.py`
+  yielded `"system_info + read_file"` — not a tool name. headroom's skip list
+  (web_read, web_search, read_file, workspace_read, cve_lookup: readers whose
+  entire value is verbatim content) therefore never matched, and a batched
+  `read_file` was compressed to a few hundred characters. It only happened when
+  the batch's first member took no argument. `read_file` is in the fast path, so
+  this was live, not theoretical. The envelope now names every tool in the
+  batch and any one of them on the skip list protects the whole block.
+- **A batch that changed state was recorded as read-only.**
+  `_action_changes_state` split the same combined label the same way, so
+  fourteen state-changing tools that can be batched (loot_record, asset_record,
+  scope_set, submit_flag, oracle_arm, report_findings, verify_solve and the
+  rest) came back False. The repeat guard reads that flag to tell "verify,
+  verify, verify with nothing changing" from "edit, verify, edit, verify", so a
+  state change it could not see was a legitimate next step it might refuse.
+- Two more consumers of the same single name — the web-result capture the
+  follow-through gate reads, and the verifier verdict — now read the whole
+  list. Neither was live (no web or verify tool is currently batchable); the
+  seam is closed while it is cheap, because a gate that fails open fails on
+  exactly the turn it exists to catch. The solo path also clears the batch list
+  now, so a batch whose result never arrived cannot tag the next call.
+- **A sandboxed script's output was cut at 20,000 characters with nothing to
+  say so**, so a traceback or a summary line past the cap did not exist as far
+  as the model was concerned, and the last visible line read as the end of the
+  run. Marked inside the stream, where a reader of the stream will see it.
+- `tests/test_plangate.py` read a fixed 6,000-character window of
+  `_feed_tool_result` under a comment warning that an earlier 4,000 "only just"
+  reached a block at 3,804 and would fail when a neighbour grew. It did exactly
+  that. It reads to the end of the method now, and the "only one call site"
+  check counts call sites instead of one literal argument spelling.
+- **A 338 KB diff came back as 120,000 characters that simply stopped.**
+  `workspace_diff` cut mid-hunk with no marker, so a model writing a commit
+  message or deciding whether an edit was complete read what it could see as
+  the whole change. Now flagged, with the real character count and a line
+  saying the remaining hunks are not shown.
+- `service_status`'s raw systemctl output was head-cut at 4,000 characters —
+  and systemctl puts the recent log lines LAST, which is where the reason a
+  unit is failing lives, so the silent cut dropped exactly the part being
+  looked for.
+
 ## A setting that silently did nothing
 
 `max_tool_steps` has been in DEFAULT_SETTINGS at 150 and doing nothing at all.
@@ -257,7 +303,7 @@ agrees.
   (`sort -V`, overridable with `BASILISK_ALLOW_DOWNGRADE=1`) now refuses to go
   backwards.
 
-**5,630 assertions across 89 suites**, zero red. New: `test_themes.py`,
+**5,646 assertions across 89 suites**, zero red. New: `test_themes.py`,
 `test_spend.py`, `test_readcaps.py`, `test_deadconditions.py`. GUARDRAIL
 byte-identical.
 

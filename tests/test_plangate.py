@@ -343,13 +343,24 @@ ck("the verifier flag is reset with it",
    '_verify_red = ""' in SRC.split("_plan_reset()")[1][:400])
 
 print("\n== ground truth is recorded at ONE choke point ==")
-# Wide enough to reach the verdict block. An earlier draft took [:4000] and
-# the block starts at 3804 — a probe that only just fails is a probe that
-# will silently start failing when a neighbour grows by a line.
-_feed = SRC.split("def _feed_tool_result")[1][:6000]
+# TO THE END OF THE METHOD, NOT A FIXED WINDOW. This took [:6000] under a
+# comment warning that an earlier [:4000] "only just" reached a block at 3804
+# and would start failing when a neighbour grew by a line. That is exactly
+# what happened: a comment added above the verdict block pushed it past 6000
+# and this check went red on code that was perfectly correct. A probe tuned to
+# a magic number measures the number, so take the whole method and stop
+# re-tuning it.
+_feed = SRC.split("def _feed_tool_result")[1]
+_feed = _feed[:_feed.index("\n    def ")]
 ck("verifier_verdict is called from _feed_tool_result", "verifier_verdict(" in _feed)
+# Counted as CALL SITES, not as a literal argument spelling. This was
+# `SRC.count("verifier_verdict(_tool") == 1`, so renaming the variable it is
+# called with — which is what fixing the batch seam required — read as the
+# call site having vanished. The rule being protected is "one place reads the
+# verdict", and that is what is measured now: one def, one call.
+_vv_calls = len(re.findall(r"(?<!def )verifier_verdict\(", SRC))
 ck("…and it is the only call site (no second, drifting one)",
-   SRC.count("verifier_verdict(_tool") == 1)
+   _vv_calls == 1, f"{_vv_calls} call sites")
 ck("a CLEAN verify clears the red flag (a fixed failure must not hold "
    "the turn open)", '_verify_red = ""' in _feed)
 

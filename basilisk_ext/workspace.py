@@ -1828,10 +1828,26 @@ def diff(path: str = "") -> Dict[str, Any]:
                 fromfile=f"a/{rel}", tofile=f"b/{rel}", lineterm="", n=3))
             if d:
                 chunks.append("\n".join(d))
+        _full = "\n\n".join(chunks)
+        _CAP = 120_000
+        _diff = _full
+        if len(_full) > _CAP:
+            # A DIFF CUT MID-HUNK LOOKS LIKE A SMALLER CHANGE. This was a bare
+            # [:120_000], so a large change came back as a diff that simply
+            # stopped — and a model writing a commit message or deciding
+            # whether the edit is complete read what it could see as the whole
+            # change. Say where it stopped and how to get the rest.
+            _diff = (_full[:_CAP]
+                     + f"\n\n[TRUNCATED DIFF: showing the first {_CAP:,} of "
+                       f"{len(_full):,} characters. The remaining hunks are "
+                       f"NOT shown - this is not the whole change. Diff a "
+                       f"single file, or read the files directly.]")
         return {"ok": True, "changed": len(targets),
                 "modified": _STATE.modified, "created": _STATE.created,
                 "deleted": _STATE.deleted,
-                "diff": "\n\n".join(chunks)[:120_000]}
+                "diff_truncated": len(_full) > _CAP,
+                "diff_chars": len(_full),
+                "diff": _diff}
     except ContainmentError as e:
         return {"ok": False, "error": str(e)}
     except Exception as e:

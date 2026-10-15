@@ -4851,8 +4851,18 @@ def tool_service_status(name: Optional[str] = None) -> Dict[str, Any]:
         rc, out, _ = _ro(["systemctl", "status", "--no-pager", "-n", "0",
                           name], timeout=8)
         active = "active (running)" in out or "active (exited)" in out
+        # `raw` was a bare out[:4000]. systemctl status puts the recent log
+        # lines LAST, which is where the reason a unit is failing lives, so a
+        # silent head-cut drops exactly the part being looked for.
+        _raw = out or ""
+        if len(_raw) > 4000:
+            _raw = (_raw[:4000]
+                    + f"\n[TRUNCATED: {len(out) - 4000} more characters of "
+                      f"systemctl output not shown - run "
+                      f"`systemctl status {name}` for the rest]")
         return {"ok": True, "service": name, "active": active,
-                "raw": out[:4000]}
+                "raw_truncated": len(out or "") > 4000,
+                "raw": _raw}
     else:
         rc, out, _ = _ro(["systemctl", "list-units", "--type=service",
                           "--state=running", "--no-pager", "--plain",

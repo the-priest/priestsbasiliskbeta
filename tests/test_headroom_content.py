@@ -41,6 +41,7 @@ Run:  python3 tests/test_headroom_content.py
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -377,6 +378,86 @@ for bad in (None, "", "{", "<<ccr:>>", "[tool: ]", "\x00\x01"):
         ok = False
         print(f"       raised on {bad!r}: {type(e).__name__}: {e}")
     ck(f"junk input safe: {bad!r}", ok)
+
+
+# ── A BATCHED ENVELOPE NAMES SEVERAL TOOLS ───────────────────────────
+# The host runs read-only tools in parallel and feeds ONE combined envelope.
+# The tag it writes can therefore read `[tool: system_info+read_file]`, and
+# _SOURCE_RE used to accept a single name only — so a batched envelope matched
+# nothing, the skip list never fired, and a batched read_file or web_read
+# (whose entire value is verbatim content) was compressed to a few hundred
+# characters. Whether that happened depended on the ORDER of the batch, because
+# the host derived the tag by splitting the combined label at its first colon:
+# protection survived only when the batch's first member took an argument.
+# Order deciding whether a protection applies is not a protection.
+print("\n== a batched tag protects every verbatim reader in it ==")
+ck("a single name still parses",
+   H._source_tools("[tool: web_read]\nx") == ["web_read"])
+ck("a +-joined list parses to every name",
+   H._source_tools("[tool: system_info+read_file]\nx")
+   == ["system_info", "read_file"])
+ck("commas and spaces parse too",
+   H._source_tools("[tool: a , b,c]\nx") == ["a", "b", "c"])
+ck("an untagged body yields no names", H._source_tools("plain body") == [])
+ck("an empty tag yields no names", H._source_tools("[tool: ]\nx") == [])
+ck("_source_tool still answers with the first, for readability",
+   H._source_tool("[tool: system_info+read_file]\nx") == "system_info")
+
+_SRC = "\n".join(f"def fn_{i}(a, b):\n    return a + b  # {i}"
+                 for i in range(2000))
+
+
+def _env(tag, body):
+    return {"role": "user",
+            "content": f"<tool_result>\n[tool: {tag}]\n{body}\n</tool_result>"}
+
+
+def _survives(tag):
+    _msgs = [{"role": "system", "content": "s"},
+             _env(tag, f"file: auth.py\n\n{_SRC}"),
+             {"role": "assistant", "content": "x"},
+             _env("processes", "recent")]
+    _out, _ = H.compress_messages([dict(m) for m in _msgs],
+                                  {"headroom_enabled": True,
+                                   "headroom_keep_recent": 1})
+    return len(_out[1]["content"]) == len(_msgs[1]["content"])
+
+
+for _tag, _want, _why in [
+    ("read_file", True, "solo, already worked"),
+    ("system_info+read_file", True,
+     "the reader is SECOND - this is the case that was being gutted"),
+    ("read_file+list_dir", True, "the reader is first"),
+    ("web_search+system_info", True, "a web reader anywhere protects it"),
+    ("system_info+disk_usage", False,
+     "no verbatim reader in the batch, so compressing it is correct"),
+]:
+    ck(f"[tool: {_tag}] -> {'protected' if _want else 'compressed'}",
+       _survives(_tag) is _want, _why)
+
+# ── AND THE HOST HAS TO WRITE THAT TAG ───────────────────────────────
+# The parsing above is useless if _feed_tool_result still emits one name.
+print("\n== the host tags the envelope with every tool in the batch ==")
+_APP = io.open(os.path.join(_ROOT, "basilisk.py"), encoding="utf-8").read()
+_i = _APP.index("def _feed_tool_result")
+# To the END of the method, not a fixed window: the header is written near its
+# last line, well past any round number.
+_j = _APP.index("\n    def ", _i + 10)
+_feed = _APP[_i:_j]
+ck("it collects a LIST of tool names", "_tools: List[str] = []" in _feed)
+ck("it reads the batch's per-call labels, not just the combined one",
+   "_batch_members" in _feed and "_labels = list(" in _feed)
+ck("the header joins them all",
+   '"+".join(t for t in _tools if t)' in _feed,
+   "a single name is what lost the protection")
+ck("the web-result capture tests EVERY name, not the first",
+   "any(str(t) in _WEB_TOOL_NAMES for t in _tools)" in _feed,
+   "a batched web_search otherwise left _last_web_result unset, and the "
+   "follow-through gate had no top result to read")
+ck("the names are captured before the recall block clears _batch_members",
+   _feed.index("_tools: List[str] = []")
+   < _feed.index("self._batch_members = []"),
+   "the clear happens in a `finally` partway down this method")
 
 print(f"\nheadroom_content: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

@@ -6582,10 +6582,31 @@ def _action_changes_state(label: str) -> bool:
     name for a no-argument call. Total: an unknown tool is treated as NOT
     state-changing, which is the conservative direction — it leaves the
     guard exactly as strict as it is today rather than quietly widening it.
+
+    IT CAN ALSO BE A BATCH'S COMBINED LABEL, "a + b: arg", and that is the
+    case this used to get wrong. Splitting at the first colon gave
+    "system_info + loot_record" — not a tool name, so the answer was False
+    and a batch that DID change state was recorded as read-only. Fourteen
+    state-changing tools are in the fast path and can be batched
+    (loot_record, asset_record, scope_set, submit_flag, oracle_arm,
+    report_findings, verify_solve and the rest), so this was reachable, not
+    theoretical: the repeat guard reads this flag to tell "verify, verify,
+    verify with nothing changing" from "edit, verify, edit, verify", and a
+    state change it cannot see is a legitimate next step it may refuse.
+
+    ANY member changing state makes the action state-changing. Splitting on
+    the batch joiner can also cut an argument that happens to contain " + ",
+    which is harmless here: the extra piece is matched as a whole token
+    against the tool set, so it can only be ignored, never mistaken for a
+    tool. The direction of that error stays conservative.
     """
     try:
-        name = (label or "").split(":", 1)[0].strip()
-        return name in _STATE_CHANGING_TOOLS
+        raw = label or ""
+        for part in raw.split(" + "):
+            name = part.split(":", 1)[0].strip()
+            if name in _STATE_CHANGING_TOOLS:
+                return True
+        return False
     except Exception:
         return False
 
@@ -17377,6 +17398,14 @@ class MainWindow(Adw.ApplicationWindow):
         # it in _feed_tool_result. The guard sits here rather than at each tool
         # because this is the one place every single-tool call passes through.
         self._pending_action = self._action_label(call)
+        # THIS IS A SOLO CALL, SO THE BATCH LIST IS NOT OURS.
+        # _feed_tool_result now reads _batch_members to tag the envelope with
+        # every tool in a batch, and it clears the list when a result is fed.
+        # A batch whose result never arrives (the turn was stopped, the chat
+        # deleted, a worker died) leaves the names behind, and the next solo
+        # call would then be tagged with the previous batch's tools. Clearing
+        # it here costs nothing and removes the window entirely.
+        self._batch_members = []
         _blocked = self._repeat_guard(self._pending_action)
         if _blocked is not None:
             self._activity_note(
@@ -18315,19 +18344,47 @@ class MainWindow(Adw.ApplicationWindow):
         # below clears it, and tag the envelope with it further down.  Same
         # single hook, same reason: instrumenting thirty-odd dispatch sites is
         # how they drift apart.
+        # ── EVERY TOOL IN THE RESULT, NOT WHICHEVER CAME FIRST ──────────
+        # This split the COMBINED label at its first colon, which works for a
+        # solo call and silently misreads a batch. A batch's label is
+        # "system_info + read_file: ~/a.py", so the split yielded
+        # "system_info + read_file" -- a string that is not a tool name, so:
+        #   * headroom's skip list never matched it, and a batched read_file /
+        #     web_read result (whose entire value is verbatim content) was
+        #     compressed to a few hundred characters; and
+        #   * the _WEB_TOOL_NAMES test below never matched, so a batched
+        #     web_search did not record _last_web_result, and the
+        #     follow-through gate that reads the top search result the host
+        #     already fetched had nothing to read.
+        # Both only broke when the batch's FIRST member took no argument. Order
+        # deciding whether a protection applies is not a protection.
+        #
+        # _batch_members holds one label per call and is cleared in the recall
+        # block's `finally` further down, so the names are captured HERE,
+        # before that runs.
         _tool = ""
+        _tools: List[str] = []
         try:
             _pa = self._pending_action or ""
-            _tool = _pa.split(":", 1)[0].strip() if ":" in _pa else _pa.strip()
+            _labels = list(getattr(self, "_batch_members", None) or [])
+            if not _labels and _pa:
+                _labels = [_pa]
+            for _lb in _labels:
+                _nm = (_lb.split(":", 1)[0].strip() if ":" in _lb
+                       else _lb.strip())
+                if _nm and _nm not in _tools:
+                    _tools.append(_nm)
+            _tool = _tools[0] if _tools else ""
         except Exception:
-            _tool = ""
+            _tool, _tools = "", []
 
         # Keep the most recent web result so the follow-through gate can read
         # the TOP result of a search the host already ran — the fix for the
         # model that searches, gets a page of links, then narrates "let me read
         # a real page" turn after turn without ever emitting web_read.
         try:
-            if str(_tool) in _WEB_TOOL_NAMES and (result_text or "").strip():
+            if (any(str(t) in _WEB_TOOL_NAMES for t in _tools)
+                    and (result_text or "").strip()):
                 self._last_web_result = result_text
         except Exception:
             pass
@@ -18365,10 +18422,23 @@ class MainWindow(Adw.ApplicationWindow):
         # opposite of the `_tools_used_this_request` drift that had to be
         # fixed at v1.1.4.0 because it was written at one of two sites.
         try:
-            _vv = verifier_verdict(_tool, result_text or "")
+            # _tools, not _tool, for the same reason as the two consumers
+            # above. NOT a live bug today: no member of _VERIFY_TOOLS is in
+            # the fast path, so a verifier cannot currently be batched, and
+            # the first name is always the only name. This closes the seam
+            # while it is cheap — adding workspace_verify to the batchable
+            # list later would otherwise silently stop the red flag being set
+            # or cleared, and a gate that fails open fails on exactly the turn
+            # it exists to catch.
+            _vv = ""
+            for _t in (_tools or [_tool]):
+                _vv = verifier_verdict(_t, result_text or "")
+                if _vv:
+                    break
             if _vv:
                 self._verify_red = _vv
-            elif str(_tool or "") in ("workspace_verify", "workspace_health"):
+            elif any(str(_t or "") in ("workspace_verify", "workspace_health")
+                     for _t in (_tools or [_tool])):
                 # A verifier that came back clean CLEARS the flag: the gate
                 # must not hold a turn open over a failure that has since
                 # been fixed.
@@ -18411,7 +18481,12 @@ class MainWindow(Adw.ApplicationWindow):
             #
             # So the envelope stays byte-identical and the identity rides
             # inside it, where adding it can't break a matcher.
-            _src = (_tool or "").strip()
+            # All of them, joined with "+", so a batched envelope can be
+            # recognised by every consumer rather than by whichever tool the
+            # label happened to start with. basilisk_core's _TOOL_RESULT_HDR
+            # already strips `[tool:[^]]*]`, and headroom's _SOURCE_RE accepts
+            # the separated list, so no matcher needs the single-name form.
+            _src = "+".join(t for t in _tools if t) or (_tool or "").strip()
             _hdr = f"[tool: {_src}]\n" if _src else ""
             self.store.add_message(
                 chat_id, "user",

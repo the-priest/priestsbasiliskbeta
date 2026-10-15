@@ -53,22 +53,49 @@ _JSON_SAMPLE = 8               # array elements kept head+tail when sampling
 _TOOL_RE = re.compile(r"<tool_result>\n?(.*?)\n?</tool_result>",
                       re.DOTALL)
 # The host writes `[tool: web_read]` as the first line inside the envelope.
-_SOURCE_RE = re.compile(r"^\s*\[tool:\s*([A-Za-z_][\w.-]*)\s*\]\s*$", re.M)
+# A BATCHED RESULT NAMES SEVERAL TOOLS. The host runs read-only tools in
+# parallel and feeds ONE combined envelope, so the tag can read
+# `[tool: system_info+read_file]`. This pattern used to accept a single name
+# only, so a batched envelope matched nothing, `_source_tool` returned "", the
+# skip list below never fired, and a batched read_file / web_read -- whose
+# entire value is verbatim content -- was compressed anyway. Worse, whether it
+# happened at all depended on the ORDER of the batch: the host derived the tag
+# by splitting the combined label at its first colon, so protection survived
+# only when the first tool in the batch happened to take an argument.
+_SOURCE_RE = re.compile(
+    r"^\s*\[tool:\s*([A-Za-z_][\w.-]*(?:\s*[+,]\s*[A-Za-z_][\w.-]*)*)\s*\]\s*$",
+    re.M)
+_SOURCE_SPLIT_RE = re.compile(r"\s*[+,]\s*")
 
 # Readers whose entire value is verbatim content — never compress these.
 _DEFAULT_SKIP_TOOLS = ("web_read", "web_search", "read_file",
                        "workspace_read", "cve_lookup")
 
 
-def _source_tool(body: str) -> str:
-    """The tool named by the `[tool: …]` line, or '' when untagged.
+def _source_tools(body: str) -> List[str]:
+    """Every tool named by the `[tool: …]` line, lowercased; [] when untagged.
 
     Only the first 400 chars are searched: the marker is written as the first
     line, and scanning a whole 200KB dump for it on every frame is a cost with
     no upside.
     """
     m = _SOURCE_RE.search(body[:400])
-    return (m.group(1) or "").strip().lower() if m else ""
+    if not m:
+        return []
+    raw = (m.group(1) or "").strip().lower()
+    return [t for t in _SOURCE_SPLIT_RE.split(raw) if t]
+
+
+def _source_tool(body: str) -> str:
+    """The FIRST tool named by the tag, or '' when untagged.
+
+    Kept because it is the readable form of the question "what produced this",
+    but the skip decision uses _source_tools: a batch that contains even one
+    verbatim-content reader must not be compressed, and asking only about the
+    first member is how that protection became order-dependent.
+    """
+    got = _source_tools(body)
+    return got[0] if got else ""
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 _WS_RUN_RE = re.compile(r"[ \t]{3,}")
 
@@ -617,8 +644,12 @@ def compress_messages(
             # _feed_tool_result).  An explicit source beats inferring one from
             # content, and it makes the exclusion list something the operator
             # can change in settings instead of something only a code edit can.
-            src = _source_tool(body)
-            if src and src in skip_tools:
+            # ANY named tool on the skip list protects the whole envelope.
+            # A batch is one block: compressing it to summarise the nmap dump
+            # inside it would gut the file read sitting beside it, and there is
+            # no way to compress half a block.
+            srcs = _source_tools(body)
+            if any(t in skip_tools for t in srcs):
                 return mo.group(0)
             comp = _compress_block(body, target)
             if len(comp) >= len(body):
