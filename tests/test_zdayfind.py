@@ -116,6 +116,43 @@ print("== dispatch entry shape ==")
 ck("zday_scan with no args errors cleanly", z.zday_scan()["ok"] is False)
 ck("zday_scan code mode works", z.zday_scan(code="eval(x)", filename="a.js")["ok"])
 
+
+# ── A CAPPED SCAN IS NOT A CLEAN SCAN ────────────────────────────────
+# Both scanners cap at max_files (4,000 by default) with `files[:max_files]`,
+# and both used to report only `files_scanned`. So a 12,000-file tree came
+# back "4000 scanned, 12 findings" and read as a clean bill of health: the
+# 8,000 files nobody looked at were indistinguishable from 8,000 files with
+# nothing in them. On a scanner, that is the one error that matters.
+print("== a capped scan says what it did not look at ==")
+_d = tempfile.mkdtemp(prefix="zd-cap-")
+for _i in range(40):
+    with open(os.path.join(_d, f"f{_i}.py"), "w") as _fh:
+        _fh.write("import os\nos.system(request.args['x'])\n")
+
+_r = z.scan_tree(_d, max_files=5)
+ck("scan_tree: the cap still holds", _r.get("files_scanned") == 5)
+ck("scan_tree: it counts the whole candidate set",
+   _r.get("files_total") == 40)
+ck("scan_tree: it counts what it never opened",
+   _r.get("files_not_scanned") == 35)
+ck("scan_tree: and flags itself truncated", _r.get("truncated") is True)
+ck("scan_tree: the note leads with INCOMPLETE SCAN",
+   str(_r.get("note", "")).startswith("INCOMPLETE SCAN"))
+ck("scan_tree: the note refuses the clean-bill reading",
+   "clean result" in str(_r.get("note")))
+
+_v = z.find_variants("os.system(x)", _d, max_files=5)
+ck("find_variants: counts what it never opened",
+   _v.get("files_not_scanned") == 35 and _v.get("truncated") is True)
+ck("find_variants: says absence here is not absence in the tree",
+   "not evidence of absence" in str(_v.get("note")))
+
+_full = z.scan_tree(_d)
+ck("an uncapped scan is NOT flagged truncated",
+   _full.get("truncated") is False and _full.get("files_not_scanned") == 0)
+ck("...and still says how many findings it is showing of how many",
+   "showing up to 60 of" in str(_full.get("note")))
+
 print()
 print(f"zdayfind: {P} passed, {F} failed")
 sys.exit(1 if F else 0)

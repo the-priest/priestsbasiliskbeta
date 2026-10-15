@@ -330,6 +330,13 @@ def scan_tree(path: str = ".", focus: Optional[List[str]] = None,
             if p.suffix.lower() not in _EXT_LANG:
                 continue
             files.append(p)
+    # THE FILE CAP WAS INVISIBLE. `files[:max_files]` quietly drops everything
+    # past 4,000, and the result reported only `files_scanned` -- so a scan of
+    # a 12,000-file tree came back "4000 scanned, 12 findings" and read as a
+    # clean bill of health for the whole repo. The 8,000 files nobody looked at
+    # were indistinguishable from 8,000 files with nothing in them.
+    _files_total = len(files)
+    _not_scanned = max(0, _files_total - max_files)
     for p in files[:max_files]:
         try:
             if p.stat().st_size > _MAX_BYTES:
@@ -345,13 +352,24 @@ def scan_tree(path: str = ".", focus: Optional[List[str]] = None,
             findings.append(h)
         scanned += 1
     findings.sort(key=_rank)
+    _note = ("Ranked worst-first; showing up to 60 of "
+             f"{len(findings)}. Each hit is a lead for manual review or an "
+             "exploit-builder run, not a confirmed bug.")
+    if _not_scanned:
+        _note = (f"INCOMPLETE SCAN - {_files_total} candidate file(s) in this "
+                 f"tree, and the {max_files}-file cap stopped it after "
+                 f"{scanned}: {_not_scanned} file(s) were NOT scanned at all. "
+                 f"Do NOT read this as a clean result for the whole tree - "
+                 f"scan subdirectories separately, or raise max_files. "
+                 + _note)
     return {
         "ok": True, "mode": "scan-tree", "root": str(root),
         "files_scanned": scanned, "files_skipped": skipped,
+        "files_total": _files_total, "files_not_scanned": _not_scanned,
+        "truncated": bool(_not_scanned),
         "count": len(findings), "by_severity": _tally(findings),
         "top": findings[:60],
-        "note": ("Ranked worst-first; showing up to 60. Each hit is a lead for "
-                 "manual review or an exploit-builder run, not a confirmed bug."),
+        "note": _note,
     }
 
 
@@ -390,6 +408,9 @@ def find_variants(like: str, path: str = ".", max_files: int = 4000) -> Dict[str
                    if p.is_file()
                    and p.suffix.lower() in _EXT_LANG
                    and not any(part in _SKIP_DIRS for part in p.parts)])
+    # Same cap, same silence (see scan_tree above).
+    _files_total = len(files)
+    _not_scanned = max(0, _files_total - max_files)
     for p in files[:max_files]:
         try:
             if p.stat().st_size > _MAX_BYTES:
@@ -406,11 +427,20 @@ def find_variants(like: str, path: str = ".", max_files: int = 4000) -> Dict[str
             continue
     # input-reachable first
     hits.sort(key=lambda h: 0 if h["reachable_from_input"] else 1)
+    _note = (f"Occurrences of the same sink; showing up to 80 of {len(hits)}. "
+             "Ones marked reachable_from_input are the strongest variant "
+             "candidates \u2014 the original bug, elsewhere.")
+    if _not_scanned:
+        _note = (f"INCOMPLETE SCAN - {_files_total} candidate file(s), and the "
+                 f"{max_files}-file cap left {_not_scanned} of them unscanned. "
+                 f"Absence here is not evidence of absence in the tree. "
+                 + _note)
     return {
         "ok": True, "mode": "variant", "sinks": sinks, "root": str(root),
+        "files_total": _files_total, "files_not_scanned": _not_scanned,
+        "truncated": bool(_not_scanned),
         "count": len(hits), "matches": hits[:80],
-        "note": ("Occurrences of the same sink. Ones marked reachable_from_input "
-                 "are the strongest variant candidates — the original bug, elsewhere."),
+        "note": _note,
     }
 
 

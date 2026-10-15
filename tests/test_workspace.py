@@ -699,6 +699,33 @@ try:
 finally:
     W.MAX_FILES = _old_max
 
+print("\n== a capped SEARCH says the scan stopped early ==")
+# search() returns at the match cap, which means it also stops SCANNING. It
+# reported truncated:True and nothing else -- the flag, not the consequence.
+# With 6,000 matches across 300 files it came back "count: 120,
+# files_scanned: 6", so the model reads 120 as the total and, worse, treats
+# the 294 files it never opened as clean. `read` already says "INCOMPLETE
+# READ - you have the first N of M lines"; this is the same sentence.
+_sd = os.path.join(BASE, "searchable")
+for _i in range(40):
+    os.makedirs(os.path.join(_sd, f"pkg{_i}"), exist_ok=True)
+    io.open(os.path.join(_sd, f"pkg{_i}", "m.py"), "w").write(
+        "def needle():\n    pass\n" * 20)
+W.import_dir(_sd)
+_r = W.search("needle", max_results=20)
+ck("search: the cap still holds", _r.get("count") == 20)
+ck("search: it is flagged truncated", _r.get("truncated") is True)
+ck("search: the note leads with INCOMPLETE SEARCH",
+   str(_r.get("note", "")).startswith("INCOMPLETE SEARCH"),
+   str(_r.get("note"))[:80])
+ck("search: the note says the unscanned files were not searched",
+   "not yet scanned were not searched" in str(_r.get("note")))
+ck("search: the note says how to narrow it",
+   "glob" in str(_r.get("note")) and "max_results" in str(_r.get("note")))
+_r2 = W.search("no-such-token-anywhere")
+ck("a complete search carries no truncation note",
+   _r2.get("truncated") is False and _r2.get("note") is None)
+
 print("\n== a refusal names its reason ==")
 # "archive contained no extractable files" reads as "the zip was empty", so a
 # zip refused for slip / an absolute path / a symlink / a compression ratio

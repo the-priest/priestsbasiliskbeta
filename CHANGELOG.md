@@ -32,6 +32,15 @@ cost readout. Plus the bugs a deep pass over every file turned up.**
   whole tree. A refusal also names its reason: "archive contained no
   extractable files" reads as "the zip was empty", so an archive refused for
   zip slip or a compression ratio looked like a broken download.
+- **A capped search and a capped scan say the scan stopped early.**
+  `workspace_search` returns at the match cap, which means it also stops
+  SCANNING: with 6,000 matches across 300 files it reported "count: 120,
+  files_scanned: 6" and a bare `truncated: true` — so the model reads 120 as
+  the total and, worse, treats the 294 files it never opened as clean. Both
+  `zday_scan` modes had the same hole at their 4,000-file cap, where a
+  12,000-file tree came back "4,000 scanned, 12 findings" and read as a clean
+  bill of health. All three now count what they never looked at and say, in
+  the words the model acts on, that absence here is not absence in the tree.
 - **Truncated output says it was truncated, everywhere it is shown** — the
   web-read note names the total and how to get the rest, a cut file inside
   `read_many` carries a `[CUT: ...]` marker in its own content, and an
@@ -248,7 +257,7 @@ agrees.
   (`sort -V`, overridable with `BASILISK_ALLOW_DOWNGRADE=1`) now refuses to go
   backwards.
 
-**5,614 assertions across 89 suites**, zero red. New: `test_themes.py`,
+**5,630 assertions across 89 suites**, zero red. New: `test_themes.py`,
 `test_spend.py`, `test_readcaps.py`, `test_deadconditions.py`. GUARDRAIL
 byte-identical.
 

@@ -860,10 +860,33 @@ def search(pattern: str, glob: str = "", regex: bool = False,
                                 for k in range(hi - lo)]
                         hits.append(row)
                         if len(hits) >= max_results:
-                            return {"ok": True, "pattern": pattern,
-                                    "files_scanned": scanned,
-                                    "count": len(hits), "truncated": True,
-                                    "hits": hits}
+                            # A CAPPED SEARCH HAS TO SAY WHAT IT MEANS.
+                            # This returned truncated:True and nothing else,
+                            # which is the flag and not the consequence. The
+                            # scan STOPS at the cap, so `files_scanned` can be
+                            # 7 of 301 and the model reads "120 matches, in
+                            # these 7 files" -- wrong on the count, and wrong
+                            # in the dangerous direction on the files, because
+                            # it then treats the 294 unscanned ones as clean.
+                            # `read` already says "INCOMPLETE READ - you have
+                            # the first N of M lines"; this is the same
+                            # sentence for the same reason.
+                            return {
+                                "ok": True, "pattern": pattern,
+                                "files_scanned": scanned,
+                                "count": len(hits), "truncated": True,
+                                "note": (
+                                    f"INCOMPLETE SEARCH - stopped at the "
+                                    f"{max_results}-match cap after scanning "
+                                    f"only {scanned} file(s). There are MORE "
+                                    f"matches, and the files not yet scanned "
+                                    f"were not searched at all - do NOT read "
+                                    f"this as the full set, and do not "
+                                    f"conclude the pattern is absent "
+                                    f"elsewhere. Narrow it: pass a `glob` "
+                                    f"(e.g. \"*.py\"), a more specific "
+                                    f"pattern, or raise max_results."),
+                                "hits": hits}
         return {"ok": True, "pattern": pattern, "files_scanned": scanned,
                 "count": len(hits), "truncated": False, "hits": hits}
     except ContainmentError as e:
