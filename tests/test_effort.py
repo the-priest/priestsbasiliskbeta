@@ -161,8 +161,15 @@ ck("DEFAULT: heavy turn ALSO disables thinking (this is the build case)",
    _def_heavy.get("enable_thinking") is False, str(sorted(_def_heavy)))
 
 # Opting thinking back ON restores the byte-identical, pre-feature body.
+# stream_options joined the base body when the session cost readout was added:
+# OpenAI-compatible providers only report token usage on a stream when
+# include_usage is asked for, so without it the spend chip can only estimate,
+# and an estimate that is 30% out reads as authoritative while being wrong.
+# It is part of the standard schema, and a provider that 400s on it is handled
+# by its own strip-and-retry (see _usage_rejected), so it belongs in the
+# "pre-feature" set this assertion pins.
 _EXPECTED_KEYS = {"messages", "temperature", "top_p", "max_tokens",
-                  "stream", "model"}
+                  "stream", "model", "stream_options"}
 _run(_settings(deepseek_thinking=True), "light", _urlopen_factory())
 _on_light = dict(SENT[0])
 ck("deepseek_thinking=True: no enable_thinking field (thinking restored)",

@@ -540,6 +540,9 @@ DEFAULT_SETTINGS = {
     # miss a rule. One of: ember, violet, midnight, abyss, rose, venom, brass,
     # slate. An unknown value falls back to the default rather than failing.
     "theme": "violet",
+    # Per-model price override, {"<model id>": [in_usd, out_usd]} per
+    # MILLION tokens. Beats the MODELS catalogue; see model_price().
+    "model_prices": {},
     "ui_scale": 0,  # 0 = auto-detect; manual values 0.3 to 3.0
     "backdrop_brightness": 50,  # 0 = darkest, 100 = brightest, 50 = default
     "show_token_count": False,
@@ -1688,6 +1691,9 @@ class OpenAICompatBackend:
         # losing one model's rejection memo and costing a wasted round-trip.
         # set.add is atomic under the GIL, so no lock is needed once it exists.
         self._extras_rejected: set = set()
+        # Providers that 400 on stream_options.include_usage. Same
+        # pattern as _extras_rejected: ask once, remember a no.
+        self._usage_rejected: set = set()
         # Models that have 400'd on the native `tools` field — degrade them to
         # the text `<tool>` protocol for the rest of the session, same memo
         # pattern as _extras_rejected.
@@ -1811,7 +1817,17 @@ class OpenAICompatBackend:
             "top_p": _topp,
             "max_tokens": opts.get("max_tokens", 2048),
             "stream": True,
+            # ── ASK FOR THE BILL ──
+            # OpenAI-compatible providers only report token usage on a stream
+            # when this is set; without it the session cost can only ever be
+            # estimated from character counts, which is wrong by enough to be
+            # worse than useless. It is a standard field, and a provider that
+            # does not know it is covered by the strip-and-retry below.
         }
+        # Asked for separately from the fields above so the strip-and-retry
+        # below can drop THIS without dropping tools or the thinking toggle.
+        if model not in getattr(self, "_usage_rejected", ()):
+            body_base["stream_options"] = {"include_usage": True}
         # ── NATIVE TOOLS ──
         # A proper OpenAI `tools` schema, so the model replies with structured
         # tool_calls (the flow the V4/V4.1 family is trained for). Standard
@@ -1883,6 +1899,7 @@ class OpenAICompatBackend:
                     url, data=data, headers=self._headers())
                 parts: List[str] = []
                 _finish_reason = ""
+                _usage = None      # None = provider reported nothing
                 _wall_cut = False
                 # Accumulator for STRUCTURED tool calls (the OpenAI-style
                 # delta.tool_calls channel). DeepSeek's own harness consumes
@@ -1934,6 +1951,20 @@ class OpenAICompatBackend:
                             obj = json.loads(chunk)
                         except Exception:
                             continue
+                        # ── THE USAGE CHUNK HAS NO CHOICES ──
+                        # Providers send the token counts in a FINAL chunk
+                        # whose `choices` is an empty list, so this has to be
+                        # read before the skip below — which is exactly where
+                        # it used to be thrown away.
+                        _u = obj.get("usage")
+                        if isinstance(_u, dict):
+                            _usage = {
+                                "in": int(_u.get("prompt_tokens") or 0),
+                                "out": int(_u.get("completion_tokens") or 0),
+                                "cached_in": int(
+                                    (_u.get("prompt_tokens_details") or {})
+                                    .get("cached_tokens") or 0),
+                            }
                         choices = obj.get("choices") or []
                         if not choices:
                             continue
@@ -2009,6 +2040,10 @@ class OpenAICompatBackend:
                     "text": "".join(parts),
                     "backend": self.name,
                     "model": attempt_model,
+                    # Real counts from the provider, or None when it declined
+                    # to report them. None means "unknown" and must NOT be
+                    # shown as zero spend.
+                    "usage": _usage,
                     "cancelled": False,
                     "finish_reason": _finish_reason or ("time" if _wall_cut
                                                         else ""),
@@ -2116,6 +2151,23 @@ class OpenAICompatBackend:
                 # check must precede the stale-id recovery below, or a
                 # rejected thinking toggle sends us hunting for a replacement
                 # model that was never broken.
+                # A provider that does not know stream_options must not cost
+                # the operator the whole turn. Checked BEFORE the extras strip,
+                # because this is the field most recently added and so the
+                # likeliest cause of a fresh 400; the cost of guessing wrong is
+                # one retry that then strips the extras anyway.
+                if (e.code == 400
+                        and "stream_options" in body_base
+                        and attempt_model not in self._usage_rejected
+                        and ("stream_option" in (detail or "").lower()
+                             or "include_usage" in (detail or "").lower())):
+                    self._usage_rejected.add(attempt_model)
+                    log(f"{self.name} {attempt_model} rejected "
+                        f"stream_options.include_usage -> retrying without it; "
+                        f"this chat's cost readout will be incomplete")
+                    idx -= 1            # retry this same model
+                    continue
+
                 if e.code == 400 and sent_extras:
                     self._extras_rejected.add(attempt_model)
                     log(f"{self.name} {attempt_model} rejected "
@@ -2893,6 +2945,96 @@ def _clip(s, n: int) -> str:
     """
     s = "" if s is None else str(s)
     return s if len(s) <= n else s[:max(0, n - 1)] + "\u2026"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# WHAT THIS CHAT HAS COST
+# ══════════════════════════════════════════════════════════════════════
+# Token counts come from the provider's own usage chunk (see stream_chat) —
+# never estimated from character counts, because an estimate that is 30% out
+# is worse than no number at all: it reads as authoritative and is not.
+#
+# Prices are per MILLION tokens and resolve in this order:
+#   1. the `model_prices` setting — {"<model id>": [in, out]}. The operator's
+#      own figure always wins, because the catalogue below is maintained by
+#      hand and a provider can reprice overnight.
+#   2. the MODELS catalogue (ModelInfo.in_usd / out_usd).
+#   3. DEFAULT_PRICE, for a model neither knows about.
+# A cached input token is billed at cached_in_usd where the catalogue has it,
+# which on this provider is roughly a fifth of the uncached rate, so ignoring
+# it overstates a long session badly.
+DEFAULT_PRICE = (0.15, 0.60)      # $/M in, $/M out
+
+
+def model_price(model_id: str, settings: Optional[Dict[str, Any]] = None):
+    """(in_usd, out_usd, cached_in_usd) per MILLION tokens for `model_id`."""
+    mid = (model_id or "").strip()
+    try:
+        over = (settings or {}).get("model_prices") or {}
+        row = over.get(mid)
+        if isinstance(row, (list, tuple)) and len(row) >= 2:
+            return (float(row[0]), float(row[1]),
+                    float(row[2]) if len(row) > 2 else 0.0)
+    except Exception:
+        pass
+    # SILICONFLOW_CATALOGUE, not "MODELS" — an earlier draft of this function
+    # guessed the name, raised NameError on every call, and the broad `except`
+    # below turned that into a silent $0. A cost readout that fails to zero is
+    # worse than one that fails loudly, so the lookup is OUTSIDE any try.
+    for m in SILICONFLOW_CATALOGUE:
+        if m.id == mid:
+            return (m.in_usd, m.out_usd, m.cached_in_usd)
+    return (DEFAULT_PRICE[0], DEFAULT_PRICE[1], 0.0)
+
+
+def usage_cost(usage: Optional[Dict[str, Any]], model_id: str,
+               settings: Optional[Dict[str, Any]] = None) -> float:
+    """USD for one turn's usage dict, or 0.0 when nothing was reported."""
+    if not isinstance(usage, dict):
+        return 0.0
+    p_in, p_out, p_cached = model_price(model_id, settings)
+    try:
+        n_in = max(0, int(usage.get("in") or 0))
+        n_out = max(0, int(usage.get("out") or 0))
+        n_cached = max(0, min(n_in, int(usage.get("cached_in") or 0)))
+    except (TypeError, ValueError):
+        return 0.0          # a non-numeric count is "unknown", not "free"
+    fresh_in = n_in - n_cached
+    return ((fresh_in * p_in)
+            + (n_cached * (p_cached or p_in))
+            + (n_out * p_out)) / 1_000_000.0
+
+
+def fmt_cost(usd: float) -> str:
+    """A money string that never reads as free when it is not.
+
+    Sub-cent spend is the normal case for one turn, and '$0.00' is a lie the
+    operator would reasonably act on, so small amounts keep enough digits to
+    be true."""
+    try:
+        usd = float(usd)
+    except Exception:
+        return "$0"
+    if usd <= 0:
+        return "$0"
+    if usd < 0.01:
+        return f"${usd:.4f}".rstrip("0").rstrip(".")
+    if usd < 1:
+        return f"${usd:.3f}".rstrip("0").rstrip(".")
+    return f"${usd:,.2f}"
+
+
+def fmt_tokens(n: int) -> str:
+    """Compact token count: 940, 12.3k, 1.21M."""
+    try:
+        n = int(n)
+    except Exception:
+        return "0"
+    if n < 1000:
+        return str(n)
+    if n < 1_000_000:
+        return f"{n / 1000:.1f}k".replace(".0k", "k")
+    return f"{n / 1_000_000:.2f}M"
 
 
 def _read(path: str, max_bytes: int = 100_000) -> Optional[str]:

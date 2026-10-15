@@ -50,6 +50,7 @@ from typing import List, Dict, Any, Optional, Callable, Tuple
 
 from basilisk_core import (
     _as_int,
+    usage_cost, fmt_cost, fmt_tokens, model_price,
     fabricated_tool_result, strip_fabricated_results,
     GroqBackend, OpenAICompatBackend, BackendRouter,
     ChatStore, Chat,
@@ -2238,6 +2239,26 @@ headerbar {
         version: this is a status strip, not a chat row. ---- */
 .activity-dock {
     margin: 2px 4px 0 4px;
+}
+/* Session spend: tokens and cost for THIS chat.  Deliberately quiet - it is
+   reference, not a control, so it reads as dim monospace on the card surface
+   and never competes with the send button.  Monospace because the number
+   changes every turn and a proportional font makes it jitter sideways.
+   All three colours are palette values, so it themes with everything else.
+   ASCII only, like the rest of this stylesheet (it is a bytes literal). */
+.spend-chip {
+    margin: 2px 8px 0 4px;
+    padding: 3px 9px;
+    border-radius: 11px;
+    background-color: #171716;
+    border: 1px solid #232120;
+    color: #8e8c88;
+    font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+}
+.spend-chip:hover {
+    color: #dfdedb;
+    border-color: #d97757;
 }
 .activity-dock .activity-feed {
     margin: 0;
@@ -8943,6 +8964,36 @@ class SettingsDialog(Adw.PreferencesDialog):
         tg.add(theme_row)
         d_page.add(tg)
 
+        # ── PRICING FOR THE SPEND CHIP ────────────────────────────────
+        # The catalogue carries published prices, but it is maintained by hand
+        # and a provider can reprice overnight — and the operator may be
+        # running a model that is not in it at all. These two fields override
+        # the catalogue for the ACTIVE model, which is the one the chip is
+        # counting, so the number on screen can always be made true.
+        pg = Adw.PreferencesGroup()
+        pg.set_title("Token pricing")
+        _mid = parent._active_model_id() if hasattr(parent, "_active_model_id") else ""
+        _pin, _pout, _ = model_price(_mid, parent.settings)
+        pg.set_description(
+            f"USD per MILLION tokens for {_mid or 'the active model'}. "
+            "Used by the token chip beside the composer to price this chat. "
+            "Leave as-is to use the published catalogue price.")
+        self._price_model_id = _mid
+        in_row = Adw.SpinRow.new_with_range(0.0, 1000.0, 0.01)
+        in_row.set_title("Input  $/M tokens")
+        in_row.set_digits(3)
+        in_row.set_value(float(_pin))
+        in_row.connect("notify::value", self._on_price_changed)
+        pg.add(in_row)
+        out_row = Adw.SpinRow.new_with_range(0.0, 1000.0, 0.01)
+        out_row.set_title("Output $/M tokens")
+        out_row.set_digits(3)
+        out_row.set_value(float(_pout))
+        out_row.connect("notify::value", self._on_price_changed)
+        pg.add(out_row)
+        self._price_in_row, self._price_out_row = in_row, out_row
+        d_page.add(pg)
+
         dg = Adw.PreferencesGroup()
         dg.set_title("UI scale")
         dg.set_description(
@@ -9900,6 +9951,25 @@ class SettingsDialog(Adw.PreferencesDialog):
     def _on_max(self, row, *args):
         self._set("max_tokens", int(row.get_value()))
 
+    def _on_price_changed(self, *_a):
+        """Store the operator's price for the ACTIVE model, per million tokens.
+
+        Written as a per-model map rather than two flat settings, so switching
+        models does not silently apply one model's price to another's tokens —
+        which would make the chip confidently wrong instead of merely unset.
+        """
+        try:
+            mid = getattr(self, "_price_model_id", "") or ""
+            if not mid:
+                return
+            prices = dict(self.win.settings.get("model_prices") or {})
+            prices[mid] = [round(float(self._price_in_row.get_value()), 4),
+                           round(float(self._price_out_row.get_value()), 4)]
+            self._set("model_prices", prices)
+            self.win._refresh_spend_chip()
+        except Exception as e:
+            log(f"price update failed: {e}")
+
     def _on_theme_changed(self, row, *_a):
         """Persist and apply the chosen theme immediately.
 
@@ -10197,6 +10267,12 @@ class MainWindow(Adw.ApplicationWindow):
             log(f"basilisk_ext not loaded: {_e}")
 
         self.current_chat_id: Optional[int] = None
+        # Per-chat token/cost totals: {chat_id: (in, out, usd, unmetered)}
+        self._spend_by_chat: dict = {}
+        self._spend_in = 0
+        self._spend_out = 0
+        self._spend_usd = 0.0
+        self._spend_unknown = 0
         self.current_agent_mode = bool(self.settings.get("agent_mode_default",
                                                           True))
         # ── UNLEASH: the master switch (the big red dragon button) ──
@@ -11632,6 +11708,24 @@ class MainWindow(Adw.ApplicationWindow):
         self.activity_dock.set_visible(False)
         actions_row.insert_child_after(self.activity_dock, chips_scroll)
 
+        # ── SESSION SPEND CHIP ────────────────────────────────────────
+        # Sits in the actions row beside the activity dock, so it is in the
+        # operator's eyeline while a turn runs without taking a line of its
+        # own. Hidden until the first metered turn, so a fresh chat is not
+        # decorated with "0 tokens · $0".
+        #
+        # It reads "<tokens> · <cost>" for THIS CHAT. Per chat rather than per
+        # process because that is the question actually being asked ("what has
+        # this conversation cost"), and because a long-running window would
+        # otherwise show one number that belongs to no particular piece of
+        # work. A trailing "+" means at least one turn came back with no usage
+        # reported, i.e. the true figure is higher — see _refresh_spend_chip.
+        self.spend_chip = Gtk.Label(label="")
+        self.spend_chip.add_css_class("spend-chip")
+        self.spend_chip.set_valign(Gtk.Align.CENTER)
+        self.spend_chip.set_visible(False)
+        actions_row.insert_child_after(self.spend_chip, self.activity_dock)
+
         area.append(actions_row)
 
         # Staged attachments sit HERE — between the action chips and the
@@ -12124,6 +12218,7 @@ class MainWindow(Adw.ApplicationWindow):
         # one of the children the clear-out below unparents.
         self._switch_session(chat_id)
         self.current_chat_id = chat_id
+        self._load_spend(chat_id)   # totals follow the chat, not the process
         # The dial the backend reads follows the chat, so a chat latched at
         # HIGH keeps thinking at HIGH when you come back to it tomorrow.
         self._apply_chat_effort(chat_id)
@@ -14812,8 +14907,91 @@ class MainWindow(Adw.ApplicationWindow):
                 pass
         return False
 
+    # ══════════════════════════════════════════════════════════════
+    # SESSION SPEND
+    # ══════════════════════════════════════════════════════════════
+    def _account_turn(self, meta):
+        """Fold one turn's provider-reported usage into this chat's totals.
+
+        Per CHAT, not per process: "what has this conversation cost" is the
+        question an operator actually asks, and it has to survive switching
+        chats and come back right. Totals are therefore keyed by chat id and
+        restored by _load_spend when a chat is opened.
+
+        A turn whose provider reported no usage increments _spend_unknown
+        instead of adding zero. Silently treating an unmetered turn as free is
+        how a readout drifts quietly below the real bill, which is the one
+        failure that makes the whole feature untrustworthy.
+        """
+        try:
+            u = (meta or {}).get("usage")
+            if not isinstance(u, dict):
+                self._spend_unknown = getattr(self, "_spend_unknown", 0) + 1
+            else:
+                self._spend_in = getattr(self, "_spend_in", 0) + int(u.get("in") or 0)
+                self._spend_out = getattr(self, "_spend_out", 0) + int(u.get("out") or 0)
+                self._spend_usd = getattr(self, "_spend_usd", 0.0) + usage_cost(
+                    u, (meta or {}).get("model") or "", self.settings)
+            self._save_spend()
+            self._refresh_spend_chip()
+        except Exception as e:
+            log(f"spend accounting failed: {e}")
+
+    def _spend_reset(self):
+        self._spend_in = 0
+        self._spend_out = 0
+        self._spend_usd = 0.0
+        self._spend_unknown = 0
+
+    def _save_spend(self):
+        cid = self.current_chat_id
+        if cid is None:
+            return
+        self._spend_by_chat[cid] = (self._spend_in, self._spend_out,
+                                    self._spend_usd, self._spend_unknown)
+
+    def _load_spend(self, chat_id):
+        row = self._spend_by_chat.get(chat_id)
+        if row:
+            (self._spend_in, self._spend_out,
+             self._spend_usd, self._spend_unknown) = row
+        else:
+            self._spend_reset()
+        self._refresh_spend_chip()
+
+    def _refresh_spend_chip(self):
+        chip = getattr(self, "spend_chip", None)
+        if chip is None:
+            return
+        try:
+            tot = getattr(self, "_spend_in", 0) + getattr(self, "_spend_out", 0)
+            unknown = getattr(self, "_spend_unknown", 0)
+            if not tot and not unknown:
+                chip.set_visible(False)
+                return
+            chip.set_visible(True)
+            txt = f"{fmt_tokens(tot)} · {fmt_cost(getattr(self, '_spend_usd', 0.0))}"
+            if unknown:
+                txt += "+"          # at least one turn went unmetered
+            chip.set_label(txt)
+            tip = (f"This chat: {getattr(self, '_spend_in', 0):,} in + "
+                   f"{getattr(self, '_spend_out', 0):,} out = {tot:,} tokens, "
+                   f"{fmt_cost(getattr(self, '_spend_usd', 0.0))}.")
+            if unknown:
+                tip += (f"\n{unknown} turn(s) reported no usage, so the real "
+                        f"total is higher — that is what the + means.")
+            tip += "\nPrices come from Settings -> Models, or the catalogue."
+            chip.set_tooltip_text(tip)
+        except Exception as e:
+            log(f"spend chip refresh failed: {e}")
+
     def _on_stream_done_body(self, meta):
         final = self.streaming_msg_widget.finish_streaming()
+        # ── WHAT THIS TURN COST ───────────────────────────────────────────
+        # Counts come from the provider's own usage chunk; a turn where it
+        # reported nothing adds nothing, and is counted as UNKNOWN rather than
+        # free (see _spend_unknown, which makes the readout say so).
+        self._account_turn(meta)
         # ── THE BACKEND'S FULL TEXT IS AUTHORITATIVE ──────────────────────
         # Normally the widget buffer and meta["text"] are identical: every
         # content token is pushed through on_token into the buffer. They can
@@ -15183,10 +15361,29 @@ class MainWindow(Adw.ApplicationWindow):
         # itself — the very thing the model kept saying it would do. Bounded to
         # twice per request so it advances the read without becoming its own
         # loop, and it hands the ACTUAL article back for the model to answer from.
+        # reply_is_bare_stall, NOT reply_intends_action. This gate only runs
+        # when `not self._mission_active` -- i.e. in answer mode -- and
+        # reply_intends_action is documented in basilisk_core as the MISSION
+        # loop's question, with answer mode told in the same docstring to use
+        # reply_is_bare_stall instead. Using the mission predicate here meant a
+        # reply that DELIVERED a full answer and merely mentioned a further
+        # step ("...Sources: courts.ie, RTE. Want me to pull the full
+        # articles?") was graded as an unkept promise, so the host fetched the
+        # top result on its own and the operator got a second, unasked-for
+        # message about a page they had already been given the substance of.
+        #
+        # reply_is_bare_stall asks the question that actually matters here: did
+        # this reply hand the operator ANYTHING, or was it only a promise? A
+        # reply carrying real prose, a list or a table has already delivered,
+        # and following a link behind it can only produce a duplicate.
+        #
+        # A genuine stall ("Let me read the top result now.") still scores True
+        # on both predicates, so the loop this gate was written to break is
+        # still broken.
         if (not executable and not cancelled and not self._stop_requested
                 and self.current_agent_mode and not self._tools_locked
                 and not self._mission_active
-                and reply_intends_action(final)
+                and reply_is_bare_stall(final)
                 and (getattr(self, "_tools_used_this_request", set())
                      & _WEB_TOOL_NAMES)
                 and getattr(self, "_forced_followthrough", 0) < 2):
@@ -16189,7 +16386,10 @@ class MainWindow(Adw.ApplicationWindow):
         in that wrapper, and a research fetch must not be a way around it."""
         def _rd(url):
             try:
-                return self._web_read_gated(url, 14000)
+                # Research fetches read as much as a direct one; a
+                # source summarised from a third of its text is the
+                # same defect one layer down.
+                return self._web_read_gated(url, 24000)
             except Exception as e:
                 return {"ok": False, "error": f"{type(e).__name__}: {e}"}
         return _rd
@@ -16283,7 +16483,11 @@ class MainWindow(Adw.ApplicationWindow):
         if n == "workspace_read_many":
             return lambda: tool_workspace_read_many(
                 a.get("paths", a.get("files", a.get("path", a.get("items")))),
-                _i("max_chars", "chars", "limit", default=6000))
+                # 24000, matching tool_workspace_read_many's own default. This
+                # read 6000 and so overrode it on every call the model made —
+                # the same "raised the default, the caller still hardcodes the
+                # old number" defect as the web_read dispatch above.
+                _i("max_chars", "chars", "limit", default=24000))
         if n == "workspace_delete":
             return lambda: tool_workspace_delete(path)
         if n == "workspace_diff":
@@ -17235,10 +17439,17 @@ class MainWindow(Adw.ApplicationWindow):
             # (GitHub, Wikipedia, SO, …) are held outside the autonomous loop
             # and need the operator's approval via a notification. Redirects are
             # re-validated and output shielded. Single-path (own fetch).
+            # THE CAP LIVES HERE, NOT IN tool_web_read's SIGNATURE.
+            # tool_web_read defaults to 24000, and this call site passed 6000
+            # explicitly — so raising the signature default changed nothing
+            # the app actually does, and pages kept coming back cut at ~6,000
+            # of 16,000+ characters with the model reporting it could only
+            # read the first third. A default is only a default for callers
+            # that omit the argument; this one never did.
             "web_read":          lambda a: self._tool_simple(
                 lambda: self._web_read_gated(
                     a.get("url", a.get("u", "")),
-                    _safe_int(a.get("max_chars", 6000), 6000))),
+                    _safe_int(a.get("max_chars", 24000), 24000))),
             "web_sources":       lambda a: self._tool_simple(tool_web_sources),
             # SEARCH, PROPERLY. Several phrasings, several engines, merged
             # and ranked by cross-engine agreement. Both route their fetches
@@ -20745,30 +20956,50 @@ def _shade(hue_deg, light, sat):
 # then appears only on what sits above that line — the raised surfaces, the
 # cards, the borders, the chips, the accent — so the window is black canvas
 # with coloured panels on it, two tones you can point at, not one.
+# SURFACE SATURATION IS LOW ON PURPOSE, and the number is not a taste claim.
+# Measured from the panels of dark themes people actually like: Tokyo Night
+# 0.24-0.26, Catppuccin Mocha 0.16-0.21, Nord 0.16-0.17, One Dark 0.15,
+# Dracula 0.14. Mean 0.24 if Solarized's outlier 0.81 is included, lower if
+# not. This file shipped its panels at 0.44-0.58 -- two to three times that --
+# which is the difference between a theme that is restful to sit in front of
+# all day and one that is merely colourful.
+#
+# 0.34 rather than the 0.24 those themes average, and the reason is arithmetic
+# rather than preference: each of them ships ONE palette, this ships nine, and
+# nine hues have to stay tellable apart at L=0.06 where every hue converges on
+# black. The hues are also spread evenly (40/95/150/195/240/285/330, no gap
+# under 45 degrees) so the separation comes from hue first and saturation only
+# as far as it must -- 0.34 is where all 21 pairs clear a visible margin.
+# Still well under the 0.44-0.58 this file shipped, which was the complaint.
+#
+# The accents are deliberately NOT lowered with them. Muted surfaces under a
+# saturated accent is the pattern every theme in that list uses: the colour
+# then means something (this is focused, this is a link, this is dangerous)
+# instead of being everywhere at once.
 _THEME_SPECS = (
     ("ember",    "Ember — warm charcoal + clay (original)",
      None, 0, 0, None, 0.0),
     ("violet",   "Violet — black + dark purple",
-     265, 0.58, 0.14, ("#6b34b8", "#a87af0", "#7c3aed"), 0.100),
+     285, 0.34, 0.14, ("#6b34b8", "#a87af0", "#7c3aed"), 0.100),
     ("midnight", "Midnight — black + deep blue",
-     219, 0.55, 0.14, ("#2a5cad", "#6aa5f5", "#3568c4"), 0.100),
+     240, 0.34, 0.14, ("#2a5cad", "#6aa5f5", "#3568c4"), 0.100),
     ("abyss",    "Abyss — black + teal",
      # teal is light for its hue: white on #15868f sat at 4.3:1, the one
      # token below the 4.5 UI-text floor. #11737b clears it at 5.6.
-     189, 0.55, 0.14, ("#10767f", "#45c7d1", "#11737b"), 0.100),
+     195, 0.34, 0.14, ("#10767f", "#45c7d1", "#11737b"), 0.100),
     ("rose",     "Rose — black + magenta",
-     330, 0.50, 0.14, ("#a0276b", "#ee6fab", "#bd3180"), 0.100),
+     330, 0.34, 0.14, ("#a0276b", "#ee6fab", "#bd3180"), 0.100),
     ("venom",    "Venom — black + toxic lime",
-     92,  0.45, 0.14, ("#4d6b12", "#a9d94e", "#5e7d1b"), 0.100),
+     95,  0.34, 0.14, ("#4d6b12", "#a9d94e", "#5e7d1b"), 0.100),
     ("brass",    "Brass — black + bronze",
-     42,  0.45, 0.14, ("#6b5014", "#d9b55e", "#8a6a1f"), 0.100),
+     40,  0.34, 0.14, ("#6b5014", "#d9b55e", "#8a6a1f"), 0.100),
     ("slate",    "Slate — black + cool grey (no accent hue)",
      # slate is the monochrome option, so its saturation is the lowest
      # here by design — but it still has to be TELLABLE from ember, which
      # is itself near-neutral. 0.13 left the two within 8/255 on the base
      # surface. 0.22 reads as a cool grey against ember's warm charcoal,
      # which is the distinction that makes it worth offering at all.
-     215, 0.22, 0.09, ("#474d57", "#9aa2b0", "#585f6c"), 0.0),
+     215, 0.18, 0.09, ("#474d57", "#9aa2b0", "#585f6c"), 0.0),
     # TWO-TONE. black_floor=0.100 puts the ladder's two deepest rungs (the base
     # background and the sidebar, at L 0.062 and 0.082) below the line, so they
     # stay true neutral black; the surface, card and border rungs (0.108, 0.155,
@@ -20776,7 +21007,7 @@ _THEME_SPECS = (
     # dark-green panels, borders and chips — the two tones are on screen at the
     # same time, which is the thing the single-hue themes do not do.
     ("forest",   "Forest \u2014 black + dark green (two-tone)",
-     140, 0.52, 0.10, ("#1d6b36", "#4fcc7a", "#1b7a3c"), 0.100),
+     150, 0.34, 0.10, ("#1d6b36", "#4fcc7a", "#1b7a3c"), 0.100),
 )
 
 

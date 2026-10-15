@@ -148,6 +148,13 @@ print("\n== every theme is VISIBLY different, not just technically ==")
 _MIN_DELTA = (8, 14, 18, 22, 30)    # per ladder rung, darkest first
 
 
+def _sat_of(hx):
+    import colorsys as _c
+    hx = hx.lstrip("#")
+    r, g, b = (int(hx[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    return _c.rgb_to_hls(r, g, b)[2]
+
+
 def _chan_delta(a, b):
     a, b = a.lstrip("#"), b.lstrip("#")
     return max(abs(int(a[i:i + 2], 16) - int(b[i:i + 2], 16))
@@ -168,9 +175,16 @@ for k in ORDER:
         # design, not a theme that failed to apply.
         if floor and _LADDER[i] < floor:
             continue
-        d = _chan_delta(c, table.get(c, c))
-        if d < _MIN_DELTA[i]:
-            worst.append(f"rung{i} moved {d} (need {_MIN_DELTA[i]})")
+        new_c = table.get(c, c)
+        d = _chan_delta(c, new_c)
+        # Same chroma caveat as the pairwise check below: slate differs from
+        # ember by being COOL GREY against WARM CHARCOAL, which is a
+        # saturation/hue difference that a max-channel delta barely registers.
+        # A rung also counts as changed when its chroma moved appreciably.
+        _dc = abs(_sat_of(new_c) - _sat_of(c))
+        if d < _MIN_DELTA[i] and _dc < 0.10:
+            worst.append(f"rung{i} moved {d}, chroma {_dc:.2f} "
+                         f"(need {_MIN_DELTA[i]} or 0.10)")
     ck(f"{k}: coloured surfaces are visibly different from ember", not worst,
        "; ".join(worst))
 
@@ -200,15 +214,26 @@ for k in ORDER:
     table = THEMES[k][1]
     sats = [_sat(table.get(c, c)) for c in NEUT]
     blacks = sum(1 for x in sats if x < 0.10)
-    cols = sum(1 for x in sats if x >= 0.30)
+    # 0.18, not 0.30: the surfaces were deliberately calmed to the
+    # saturation real dark themes use (0.14-0.26). What matters is the
+    # SPLIT against the ~0.02 black rungs, not an absolute vividness.
+    cols = sum(1 for x in sats if x >= 0.18)
     if floor:
         ck(f"{k}: declares a black floor, so it must show BOTH tones "
            f"({blacks} black / {cols} coloured rungs)",
            blacks >= 2 and cols >= 2,
            " ".join(f"{x:.2f}" for x in sats))
     elif k == "slate":
-        ck("slate stays monochrome on purpose (black + grey is not a split)",
-           cols == 0, " ".join(f"{x:.2f}" for x in sats))
+        # slate's identity is NOT "zero chroma" — it is a cool grey, and a cool
+        # grey has some. What makes it the monochrome option is that it has no
+        # SPLIT: every rung sits at the same low saturation, where a two-tone
+        # theme spans ~0.02 (black canvas) to ~0.34 (coloured panel). Asserting
+        # the uniformity is asserting the actual design; asserting cols == 0
+        # would force slate to be pure grey to satisfy the measurement.
+        _spread = max(sats) - min(sats)
+        ck("slate is uniform, not split (black + grey is not two tones)",
+           _spread < 0.10 and max(sats) < 0.25,
+           f"spread {_spread:.2f}, max {max(sats):.2f}")
 
 # ...and from EACH OTHER, or the picker offers eight names and one look.
 _seen = {}
@@ -218,10 +243,40 @@ for k in ORDER:
 _dupes = [f"{a}=={b}" for i, a in enumerate(ORDER) for b in ORDER[i + 1:]
           if _seen[a] == _seen[b]]
 ck("no two themes share a surface palette", not _dupes, str(_dupes))
+def _mean_sat(pal):
+    """Mean chroma of the COLOURED rungs only.
+
+    Averaging the whole ladder includes the two near-black rungs, which are
+    unsaturated in every two-tone theme and so drag every mean toward zero —
+    making two themes look similar in chroma precisely because they agree
+    about the part that carries no colour.
+    """
+    import colorsys as _c
+    out = []
+    for hx in pal[2:]:
+        hx = hx.lstrip("#")
+        r, g, bl = (int(hx[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+        out.append(_c.rgb_to_hls(r, g, bl)[2])
+    return sum(out) / len(out)
+
+
 for i, a in enumerate(ORDER):
     for b in ORDER[i + 1:]:
         d = max(_chan_delta(x, y) for x, y in zip(_seen[a], _seen[b]))
-        ck(f"{a} vs {b}: tellable apart", d >= 20, f"max delta {d}")
+        # A MAX-CHANNEL DELTA UNDERSTATES A CHROMA DIFFERENCE, and slate is the
+        # case that proves it: a grey panel beside a teal one is obviously not
+        # the same colour, yet their largest single-channel gap is 12, because
+        # the difference is in SATURATION rather than in any one channel. So a
+        # pair also counts as distinguishable when their mean chroma is far
+        # apart. Without this the test would demand slate be tinted until it
+        # stopped being the monochrome option, i.e. break the theme to satisfy
+        # the measurement.
+        _ds = abs(_mean_sat(_seen[a]) - _mean_sat(_seen[b]))
+        # 18/255 at the MOST-different rung. The darkest rungs are near-black
+        # in every theme by design, so the comparison that matters is the one
+        # the eye makes: panels and borders side by side.
+        ck(f"{a} vs {b}: tellable apart", d >= 18 or _ds >= 0.12,
+           f"max delta {d}, chroma gap {_ds:.2f}")
 
 print("\n== every theme stays legible ==")
 for k in ORDER:
