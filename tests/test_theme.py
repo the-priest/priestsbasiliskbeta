@@ -83,5 +83,68 @@ print("\n== the theme still describes itself honestly ==")
 ck("the palette comment names the Claude/coral theme, not the old blue/Kali one",
    "Claude" in _css and "dragon-blue accent (#a94f34" not in _css)
 
+
+# ── THE UI-SCALE REWRITER MUST READ A NUMBER AS A NUMBER ─────────────
+# _PX_RE was r'(\d+)px'. In "0.8px" that matches only the "8", so _scale_css
+# read a 0.8px hairline as EIGHT pixels, scaled it, and pasted the result back
+# after the "0." -- turning 0.8px into 0.12px at ui_scale 1.5. A 7x shrink in
+# the wrong direction. "10.5px" grew by 0.3px instead of 50% for the same
+# reason. Seven values in the sheet were affected, and only at a ui_scale
+# other than 1.0, which is why nothing caught it: every test ran at 1.0, where
+# _scale_css returns early and the regex never runs.
+print("\n== the px scaler reads whole numbers, decimals included ==")
+
+_app_src = _bsrc.decode("utf-8", "replace")
+_px_src = re.search(r"_PX_RE = re\.compile\((r'[^']*')\)", _app_src)
+ck("_PX_RE was found", _px_src is not None)
+_PX = re.compile(eval(_px_src.group(1))) if _px_src else None
+
+
+def _scaled(text, mult):
+    """_scale_css's replacement, driven by the shipped regex."""
+    def repl(m):
+        raw = m.group(1)
+        n = float(raw)
+        if n <= 2:
+            return f"{raw}px"
+        out = max(1.0, n * mult)
+        if abs(out - round(out)) < 0.05:
+            return f"{int(round(out))}px"
+        return f"{round(out, 1):g}px"
+    return _PX.sub(repl, text)
+
+
+if _PX:
+    ck("the pattern matches a decimal value whole",
+       _PX.findall("0.8px") == ["0.8"], str(_PX.findall("0.8px")))
+    ck("...and a value with digits on both sides",
+       _PX.findall("10.5px") == ["10.5"], str(_PX.findall("10.5px")))
+    ck("...and a plain integer, as before",
+       _PX.findall("16px") == ["16"])
+
+    for _v, _want, _why in [
+        ("16px", "24px", "an integer scales as it always did"),
+        ("14px", "21px", "and stays an integer, not 21.0px"),
+        ("1px", "1px", "a hairline is left alone"),
+        ("2px", "2px", "so is 2px"),
+        ("0.8px", "0.8px", "a SUB-pixel hairline is left alone - it used to "
+                           "come out as 0.12px"),
+        ("0.5px", "0.5px", "same"),
+        ("10.5px", "15.8px", "a fractional value over 2px scales properly - "
+                             "it used to come out as 10.8px"),
+        ("2.2px", "3.3px", "and so does one just over the hairline floor"),
+    ]:
+        _got = _scaled(_v, 1.5)
+        ck(f"at 1.5x, {_v} -> {_want}", _got == _want, f"got {_got}: {_why}")
+
+    # And nothing in the real sheet comes out malformed at any scale.
+    for _mult in (1.25, 1.5, 2.0):
+        _out = _scaled(_css, _mult)
+        _bad = re.findall(r"\d*\.\d+\.\d+px", _out)
+        ck(f"the whole sheet survives {_mult}x with no malformed number",
+           not _bad, str(_bad[:4]))
+        ck(f"...and no 0.12px-style corruption at {_mult}x",
+           "0.12px" not in _out)
+
 print(f"\ntheme: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

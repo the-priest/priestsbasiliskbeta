@@ -145,6 +145,37 @@ check now also accepts any name the implementation really takes and any alias
 target, so prose drifting can no longer make the validator reject a correct
 call.
 
+## The readout you could not read
+
+- **The cost chip was styled to be ignored, and became invisible.** It shipped
+  at 12px in the dim ink (`#8e8c88`) under a comment calling it "deliberately
+  quiet — reference, not a control". That reasoning was wrong about what the
+  thing is: it is a number the operator actively watches while a job runs.
+  And 12px was not 12px. This stylesheet is authored in px that `_scale_css`
+  multiplies by the detected UI scale, which is **0.7 on a desktop monitor** —
+  so the chip rendered at about 8px while the message text beside it rendered
+  at 21px. It is now sized against `.msg-assistant` rather than against a
+  round number: 22px, which lands near 15px on the same screen — clearly
+  legible, still visibly secondary to the message text — in the full-contrast
+  ink, bold, in a pill with room for it. Still monospace, because the number
+  changes every turn and a proportional font makes it jitter sideways, and
+  still built from palette values, so all nine themes re-tint it.
+  `tests/test_spend.py` pins the RATIO to the message text, not an absolute
+  size, because the ratio is what decides whether it can be read.
+- **The UI-scale rewriter read a decimal as the digits after the dot.**
+  `_PX_RE` was `(\d+)px`, which in `0.8px` matches only the `8` — so
+  `_scale_css` treated a 0.8px hairline as EIGHT pixels, scaled that, and
+  pasted the result back after the `0.`, producing `0.12px` at a 1.5 scale. A
+  7× shrink, in the wrong direction. `10.5px` grew by 0.3px instead of 50% for
+  the same reason. Seven values in the sheet were affected, and only at a
+  ui_scale other than 1.0 — which is why nothing caught it: every test ran at
+  1.0, where `_scale_css` returns early and the regex never runs. It now reads
+  the whole number, leaves anything at or below 2px exactly as written (the
+  hairline rule, which now genuinely covers 0.5px and 1.4px instead of
+  mangling them), and keeps an integer an integer. Found while checking
+  whether the bigger chip's own `0.2px` letter-spacing would survive scaling —
+  it did, but only by luck.
+
 ## One tag, read by four things, right only by accident
 
 - **A batched tool result lost its "never compress this" protection, and
@@ -303,7 +334,7 @@ agrees.
   (`sort -V`, overridable with `BASILISK_ALLOW_DOWNGRADE=1`) now refuses to go
   backwards.
 
-**5,646 assertions across 89 suites**, zero red. New: `test_themes.py`,
+**5,672 assertions across 89 suites**, zero red. New: `test_themes.py`,
 `test_spend.py`, `test_readcaps.py`, `test_deadconditions.py`. GUARDRAIL
 byte-identical.
 

@@ -169,6 +169,46 @@ ck("there is a chip, hidden until there is something to show",
    "spend_chip" in _app and "self.spend_chip.set_visible(False)" in _app)
 ck("the chip is styled from palette values, so it themes",
    re.search(r"\.spend-chip\s*\{[^}]*#171716", _app) is not None)
+
+# ── IT HAS TO BE READABLE ────────────────────────────────────────────
+# It shipped at 12px in the DIM ink (#8e8c88) -- the styling for something you
+# are NOT meant to read -- and on a real screen the operator could not make
+# out the number at all. This is a figure being actively watched, so these
+# pin the two properties that decide whether it can be read: size and
+# contrast. Palette values only, so the nine themes still re-tint it.
+_chip = re.search(r"\.spend-chip\s*\{([^}]*)\}", _app)
+ck("the chip rule was found", _chip is not None)
+if _chip:
+    _body = _chip.group(1)
+    _fs = re.search(r"font-size:\s*(\d+)px", _body)
+    ck("it names a font size", _fs is not None)
+    # MEASURED AGAINST THE MESSAGE TEXT, not against a round number. This
+    # sheet is authored in px that _scale_css multiplies by the detected
+    # ui_scale, and that scale is 0.7 on a desktop monitor -- so the 12px this
+    # shipped at rendered at about 8px, while the message text at 30px
+    # rendered at 21px. An absolute floor here would have been a guess about
+    # a number in a file; the ratio is the thing that decides whether it can
+    # actually be read on screen.
+    _msg = re.search(r"\.msg-assistant[^{]*\{[^}]*font-size:\s*(\d+)px",
+                     _app, re.S)
+    ck("the message-text size was found, to measure against", _msg is not None)
+    if _fs and _msg:
+        _ratio = int(_fs.group(1)) / int(_msg.group(1))
+        ck(f"the chip is at least half the message text "
+           f"({_fs.group(1)}px vs {_msg.group(1)}px = {_ratio:.2f})",
+           _ratio >= 0.5,
+           "12px against 30px body text is 0.40 - that is the ratio nobody "
+           "could read")
+        ck("...and still visibly secondary to it, not shouting",
+           _ratio <= 0.85, f"{_ratio:.2f}")
+    ck("it uses the FULL-CONTRAST ink, not the dim one",
+       "#dfdedb" in _body and "#8e8c88" not in _body,
+       "#8e8c88 is the colour for text that does not matter")
+    ck("...and carries a weight so it reads at a glance",
+       re.search(r"font-weight:\s*(\d+)", _body) is not None)
+    ck("the padding gives the pill room for it",
+       re.search(r"padding:\s*(\d+)px", _body) is not None
+       and int(re.search(r"padding:\s*(\d+)px", _body).group(1)) >= 5)
 ck("a '+' marks totals that are known to be incomplete",
    'txt += "+"' in _app)
 

@@ -2249,24 +2249,39 @@ headerbar {
 .activity-dock {
     margin: 2px 4px 0 4px;
 }
-/* Session spend: tokens and cost for THIS chat.  Deliberately quiet - it is
-   reference, not a control, so it reads as dim monospace on the card surface
-   and never competes with the send button.  Monospace because the number
-   changes every turn and a proportional font makes it jitter sideways.
-   All three colours are palette values, so it themes with everything else.
-   ASCII only, like the rest of this stylesheet (it is a bytes literal). */
+/* Session spend: tokens and cost for THIS chat.
+   This was styled "deliberately quiet - reference, not a control": 12px in
+   the DIM ink (#8e8c88) on the card surface, so as not to compete with the
+   send button. That reasoning was wrong about what the thing IS. It is a
+   number the operator actively watches while a job runs, and at that size and
+   contrast it could not be read on a real screen at all -- quiet had become
+   invisible. It now takes the full-contrast ink, a weight and a size that
+   survives a glance from across a desk.
+   SIZED AGAINST THE BODY TEXT, NOT AGAINST A ROUND NUMBER. This sheet is
+   authored in px that _scale_css then multiplies by the detected ui_scale,
+   and that scale is 0.7 on a desktop monitor -- so the message text at 30px
+   here renders at about 21px, and the chip's old 12px rendered at about 8px.
+   That is the whole reason it could not be read. 22px lands near 15px on the
+   same screen: clearly legible, still visibly secondary to the message text.
+   Change it against .msg-assistant, not against what 22 looks like in a file.
+   Still monospace: the number changes every turn and a proportional font
+   makes it jitter sideways. Every colour is a palette value, so all nine
+   themes re-tint it. ASCII only, like the rest of this stylesheet (it is a
+   bytes literal). */
 .spend-chip {
     margin: 2px 8px 0 4px;
-    padding: 3px 9px;
-    border-radius: 11px;
+    padding: 8px 18px;
+    border-radius: 16px;
     background-color: #171716;
     border: 1px solid #232120;
-    color: #8e8c88;
+    color: #dfdedb;
     font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
-    font-size: 12px;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
 }
 .spend-chip:hover {
-    color: #dfdedb;
+    color: #d97757;
     border-color: #d97757;
 }
 .activity-dock .activity-feed {
@@ -21112,7 +21127,16 @@ def _scaled(n: int, floor: int = 1) -> int:
     return max(floor, int(round(n * _UI_SCALE)))
 
 
-_PX_RE = re.compile(r'(\d+)px')
+# THE WHOLE NUMBER, DECIMAL PART INCLUDED. This was r'(\d+)px', which in
+# "0.8px" matches only the "8" — so _scale_css read a 0.8px hairline as EIGHT
+# pixels, scaled that, and pasted the result back after the "0.", turning
+# 0.8px into 0.12px at ui_scale 1.5. A 7x shrink, in the wrong direction, on
+# every sub-pixel value in the sheet; "10.5px" grew by 0.3px instead of 50%
+# for the same reason. Seven values were affected, and only at a ui_scale
+# other than 1.0, which is why nothing caught it.
+#
+# The lookbehind stops it matching inside an already-matched number.
+_PX_RE = re.compile(r'(?<![\d.])(\d*\.?\d+)px')
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -21495,16 +21519,28 @@ def _themed_css(theme: str, scale: float) -> bytes:
 
 def _scale_css(css_bytes: bytes, scale: float) -> bytes:
     """Multiply every Npx in the CSS by `scale`, with a sane floor so
-    border-widths and 1px lines don't disappear."""
+    border-widths and 1px lines don't disappear.
+
+    Handles fractional values (0.5px, 10.5px) as the single numbers they are —
+    see _PX_RE, which used to see only the digits after the decimal point.
+    Anything at or below 2px is left exactly as written: that is the hairline
+    rule, and it now covers 0.5px and 1.4px rather than mangling them."""
     if abs(scale - 1.0) < 0.01:
         return css_bytes
     text = css_bytes.decode("utf-8")
     def repl(m):
-        n = int(m.group(1))
+        raw = m.group(1)
+        try:
+            n = float(raw)
+        except ValueError:                      # pragma: no cover
+            return m.group(0)
         if n <= 2:
-            return f"{n}px"   # don't scale 1px/2px borders
-        scaled = max(1, int(round(n * scale)))
-        return f"{scaled}px"
+            return f"{raw}px"  # hairlines (1px, 2px, 0.5px) stay as written
+        scaled = max(1.0, n * scale)
+        # Integral in, integral out — a 16px font must not become "24.0px".
+        if abs(scaled - round(scaled)) < 0.05:
+            return f"{int(round(scaled))}px"
+        return f"{round(scaled, 1):g}px"
     return _PX_RE.sub(repl, text).encode("utf-8")
 
 
