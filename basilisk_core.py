@@ -732,7 +732,14 @@ DEFAULT_SETTINGS = {
     # cannot end while any are open and must end once none are. See
     # basilisk_ext/tasks.py for why this replaces reading the reply.
     "plan_enabled":            True,
-    "plan_min_steps":          3,        # jobs smaller than this need no plan
+    # ("plan_min_steps": 3 used to sit here, commented "jobs smaller than this
+    # need no plan". NOTHING read it -- not the host, not tasks.py, not the
+    # persona -- so it promised a behaviour the app does not have. Removed
+    # rather than wired: the gate holds a turn open while the model's OWN plan
+    # has open items, and a 2-item plan with 1 item done is exactly the case
+    # that should be held, so a minimum would have weakened a gate that works.
+    # A knob that does nothing is worse than no knob; see
+    # tests/test_deadconditions.py for the same disease in max_tool_steps.)
     "plan_push_max":           6,        # how often the host may push per request
 }
 

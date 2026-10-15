@@ -137,6 +137,14 @@ stops calling tools or Stop is pressed — but it is now expressed as
 honoured. A stored 150 (the old no-op default every install carries) migrates
 to 0, so no existing install is newly cut off mid-run.
 
+`plan_min_steps` was the same disease found by sweeping rather than by
+noticing: a key in DEFAULT_SETTINGS, commented "jobs smaller than this need no
+plan", that nothing read — not the host, not tasks.py, not the persona.
+Removed rather than wired, because the gate holds a turn open while the
+model's OWN plan has open items and a 2-item plan with 1 done is exactly the
+case that should be held, so a minimum would have weakened a gate that works.
+The new suite sweeps every setting and fails if one is read by nothing.
+
 That is the third bug out of the same pattern: a condition that cannot be
 false. The others were the adaptive-effort heavy rung (guarded with
 `and not _auton`, always False, so the bigger reasoning budget was never
@@ -188,7 +196,7 @@ that does nothing.
   (`sort -V`, overridable with `BASILISK_ALLOW_DOWNGRADE=1`) now refuses to go
   backwards.
 
-**5,490 assertions across 89 suites**, zero red. New: `test_themes.py`,
+**5,493 assertions across 89 suites**, zero red. New: `test_themes.py`,
 `test_spend.py`, `test_readcaps.py`, `test_deadconditions.py`. GUARDRAIL
 byte-identical.
 

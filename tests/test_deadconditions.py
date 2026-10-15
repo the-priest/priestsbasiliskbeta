@@ -124,6 +124,44 @@ ck(f"no NEW always-true approval_mode branches ({len(_sites)} known)",
 ck("the budget site is no longer one of them",
    not any("_budget" in t for _, t in _sites))
 
+print("\n== no setting in the file is read by nothing ==")
+# The same disease, found by sweeping instead of by noticing: a key in
+# DEFAULT_SETTINGS that no code ever reads is a promise the app does not keep.
+# `plan_min_steps` was one ("jobs smaller than this need no plan" -- nothing
+# read it, not the host, not tasks.py, not the persona).
+# NB: the loop variable is _fn, not _f. _f is this file's failure
+# counter, and shadowing it made the summary line print
+# "19 passed, basilisk_ext/zdayfind.py failed".
+_FILES = ["basilisk.py", "basilisk_core.py", "basilisk_persona.py",
+          "basilisk_voice.py", "basilisk_scope.py", "basilisk_safety.py",
+          "basilisk_ledger.py"]
+_FILES += [os.path.join("basilisk_ext", f)
+           for f in sorted(os.listdir(os.path.join(_ROOT, "basilisk_ext")))
+           if f.endswith(".py")]
+_blob = {}
+for _fn in _FILES:
+    try:
+        _blob[_fn] = io.open(os.path.join(_ROOT, _fn),
+                             encoding="utf-8").read()
+    except OSError:
+        pass
+_unread = []
+for _k in sorted(C.DEFAULT_SETTINGS):
+    _n = 0
+    for _fn, _t in _blob.items():
+        _c = len(re.findall(r'["\']%s["\']' % re.escape(_k), _t))
+        if _fn == "basilisk_core.py":
+            _c -= 1                     # its own entry in DEFAULT_SETTINGS
+        _n += max(0, _c)
+    # Provider keys are generated and read through f"{provider}_model" /
+    # f"{provider}_api_key", so a literal search cannot see them.
+    if _n == 0 and not re.search(r"_(model|api_key|base_url)$", _k):
+        _unread.append(_k)
+ck(f"every setting is read somewhere ({len(C.DEFAULT_SETTINGS)} keys)",
+   not _unread,
+   "read by nothing: " + ", ".join(_unread)
+   + " -- wire it or delete it; a knob that does nothing is worse than no knob")
+
 print("\n== (1) the heavy rung's write-up is still beside the code ==")
 _core = io.open(os.path.join(_ROOT, "basilisk_core.py"),
                 encoding="utf-8").read()
