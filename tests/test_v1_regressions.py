@@ -557,10 +557,24 @@ ck("the printed-URL recovery exists",
    "printed_url_target(final)" in _SRC
    and 'name=\\"web_read\\"' in _SRC.replace('\\', '\\\\')
    or "printed_url_target(final)" in _SRC)
-ck("it shares the shell recovery's two-tier gate",
-   re.search(r"if _recover_fence and not self\._shell_block_command\(final\)",
-             _SRC) is not None,
-   "mission always; a regular turn only when the reply says it is ACTING")
+# The URL recovery is still two-tier, but the second tier is now the
+# ANSWER-MODE predicate, not the mission one. reply_intends_action is
+# documented in basilisk_core as the mission loop's question; using it on a
+# non-mission turn meant a reply that DELIVERED a full answer and merely
+# mentioned a next step had a link read out of it behind the operator's back —
+# the "why did it answer twice on a web read" report. The block just above
+# already grades those replies with reply_is_bare_stall, so this assertion was
+# the only thing still describing the old shape.
+#
+# The SHELL-block recovery deliberately keeps the wider gate: tightening it
+# would stop a printed command from running, which is a worse failure than one
+# extra fetch.
+ck("the URL recovery is two-tier: mission always, else only a bare stall",
+   re.search(r"_url_fence = \(self\._mission_active or "
+             r"reply_is_bare_stall\(final\)\)", _SRC) is not None,
+   "mission always; a regular turn only when the reply delivered NOTHING")
+ck("...and the shell recovery keeps the original, wider gate",
+   "_recover_fence" in _SRC and "shell_block_command(final)" in _SRC)
 
 print("\n== the contract tells the model this in one rule ==")
 _PERSONA = open(os.path.join(_ROOT, "basilisk_persona.py"),

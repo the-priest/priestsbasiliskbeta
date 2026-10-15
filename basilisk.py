@@ -15272,7 +15272,24 @@ class MainWindow(Adw.ApplicationWindow):
         # never called web_read. The turn ended "done" with a promise in it.
         # Same two-tier gate, so a finished answer that CITES a source is
         # never fetched behind the operator's back.
-        if _recover_fence and not self._shell_block_command(final):
+        #
+        # ...except the second tier of _recover_fence is reply_intends_action,
+        # which is the MISSION loop's predicate (basilisk_core says so in its
+        # docstring and names reply_is_bare_stall as answer mode's). On a
+        # non-mission turn that made "a finished answer that CITES a source"
+        # exactly what DID get fetched: the reply delivered the whole answer,
+        # mentioned a further step, and the host went and read a link out of it
+        # — a second, unasked-for message about a page the operator had already
+        # been given the substance of.
+        #
+        # Narrowed HERE rather than in _recover_fence itself, deliberately. That
+        # flag also gates the printed-SHELL-BLOCK recovery, which is the fix for
+        # "it showed me a command instead of running it"; tightening that would
+        # stop legitimate commands executing, which is a worse failure than an
+        # extra fetch. A mission still always recovers, as before.
+        _url_fence = (self._mission_active or reply_is_bare_stall(final)) \
+            if _recover_fence else False
+        if _url_fence and not self._shell_block_command(final):
             _url = printed_url_target(final)
             if _url:
                 synthetic = ('<tool name="web_read">' + json.dumps({
