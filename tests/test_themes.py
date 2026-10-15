@@ -422,6 +422,20 @@ ck("the Display page has a theme ComboRow",
 ck("picking a theme persists it", '_set("theme", key)' in _src)
 ck("picking a theme applies it live", "self.win.app.apply_theme(key)" in _src)
 
+# THE MIGRATION MUST NOT EAT IT. `theme` was a retired key in an older build,
+# and _migrate_settings still carried `merged.pop("theme", None)` when the
+# picker brought it back as a live setting. Every load deleted it, so a chosen
+# theme survived exactly until the next start and then reverted to the default
+# with nothing to explain why. A key that is revived has to be removed from the
+# retired list in the same change; nothing else enforces that, so this does.
+ck("the settings migration does not drop `theme`",
+   'merged.pop("theme"' not in _core,
+   "a retired-key pop is deleting the live theme setting on every load")
+_retired = re.findall(r'merged\.pop\("([a-z_]+)"', _core)
+ck("...and no retired-key pop names a key that is still declared",
+   not [k for k in _retired if re.search(r'^\s+"%s":' % k, _core, re.M)],
+   str([k for k in _retired if re.search(r'^\s+"%s":' % k, _core, re.M)]))
+
 print("\n== Tab / Shift+Tab mode switching ==")
 # Assertions below read the METHOD BODY, not the whole file. `.*?` under
 # re.DOTALL happily runs past the end of a method and matches something a

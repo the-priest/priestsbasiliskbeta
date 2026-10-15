@@ -1046,7 +1046,13 @@ def _migrate_settings(merged: Dict[str, Any], raw: Dict[str, Any]) -> None:
     merged.pop("grouped_tools", None)
     # Drop retired keys so the file stays clean.
     merged.pop("num_ctx", None)
-    merged.pop("theme", None)
+    # `theme` IS NOT RETIRED ANY MORE and must not be dropped here. It was a
+    # dead key from an older build until the theme picker brought it back as a
+    # live setting, and this line kept silently deleting it on every load: the
+    # operator picked a theme, it saved, and the next start came up on the
+    # default with nothing to explain why. A migration that drops a key has to
+    # be re-checked whenever that key is revived, which is exactly the kind of
+    # thing a reintroduced name gets wrong.
 
 
 def save_settings(settings: Dict[str, Any]) -> None:
