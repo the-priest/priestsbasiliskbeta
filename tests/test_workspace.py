@@ -24,6 +24,7 @@ Run:  python3 tests/test_workspace.py
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import stat
@@ -648,6 +649,73 @@ ck("three edits revert to the IMPORTED content, not the previous edit",
 ck("the workspace is clean again", W.status()["dirty"] is False)
 W.close()
 
+
+# ── A TRUNCATED IMPORT MUST SAY SO ───────────────────────────────────
+# The caps are right; what they REPORTED was not. Both import paths stop at a
+# hard cap and both came back ok:True with a soft note, so a 50,001-file
+# archive became a 40,000-file workspace that looked complete. The model then
+# searches the tree, does not find a function, and reports it as absent from
+# the repo. That is a wrong answer produced by a silent cap, which is the same
+# failure as a read truncated at 6,000 characters with nothing to say so.
+print("\n== a capped import announces that it is partial ==")
+
+_old_max = W.MAX_FILES
+try:
+    W.MAX_FILES = 25          # exercise the cap without building 40k files
+
+    # ZIP path
+    _zp = os.path.join(BASE, "capped.zip")
+    with zipfile.ZipFile(_zp, "w") as _z:
+        for _i in range(60):
+            _z.writestr(f"src/mod{_i}.py", "x = 1\n")
+    _r = W.import_zip(_zp)
+    ck("zip: the cap still holds", _r.get("files") == 25, str(_r.get("files")))
+    ck("zip: the result is flagged truncated", _r.get("truncated") is True,
+       "ok:True with no flag is how this stayed invisible")
+    ck("zip: the note says PARTIAL IMPORT",
+       "PARTIAL IMPORT" in str(_r.get("note")))
+    ck("zip: the note tells the model NOT to infer absence",
+       "Do NOT conclude" in str(_r.get("note")))
+    ck("zip: the entries never examined are counted",
+       any("further entries" in r for r in (_r.get("rejected") or [])),
+       "the cap breaks the loop, so one rejection line stood for thousands")
+
+    # DIRECTORY path
+    _dp = os.path.join(BASE, "bigdir")
+    for _i in range(6):
+        _sub = os.path.join(_dp, f"pkg{_i}")
+        os.makedirs(_sub, exist_ok=True)
+        for _j in range(12):
+            io.open(os.path.join(_sub, f"m{_j}.py"), "w").write("x = 1\n")
+    _r = W.import_dir(_dp)
+    ck("dir: the cap still holds", _r.get("files") == 25, str(_r.get("files")))
+    ck("dir: the result is flagged truncated", _r.get("truncated") is True)
+    ck("dir: the note says PARTIAL IMPORT",
+       "PARTIAL IMPORT" in str(_r.get("note")))
+    ck("dir: the walk STOPS at the cap instead of carrying on",
+       (_r.get("skipped_count") or 0) <= 2,
+       "`break` left only the inner loop, so os.walk kept going through the "
+       "whole tree appending one skip line per directory")
+finally:
+    W.MAX_FILES = _old_max
+
+print("\n== a refusal names its reason ==")
+# "archive contained no extractable files" reads as "the zip was empty", so a
+# zip refused for slip / an absolute path / a symlink / a compression ratio
+# looked like a broken download and got re-downloaded. The reasons were
+# already collected; they never reached the headline.
+_sp = os.path.join(BASE, "allbad.zip")
+with zipfile.ZipFile(_sp, "w") as _z:
+    _z.writestr("../../evil.txt", "x")
+_r = W.import_zip(_sp)
+ck("a wholly-refused archive is still refused", _r.get("ok") is False)
+_err = str(_r.get("error"))
+ck("...and the error says WHY, not just that nothing came out",
+   "zip slip" in _err or "escapes destination" in _err, _err[:120])
+ck("...and it no longer claims the archive was empty",
+   "contained no extractable files" not in _err, _err[:120])
+ck("...and the full reason list is still attached",
+   bool(_r.get("rejected")) and _r.get("rejected_count") == 1)
 
 shutil.rmtree(BASE, ignore_errors=True)
 print(f"\nworkspace: {_p} passed, {_f} failed")

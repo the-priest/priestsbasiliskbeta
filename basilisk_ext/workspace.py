@@ -293,7 +293,18 @@ def _safe_members(zf: zipfile.ZipFile, dest: str) -> Tuple[List[zipfile.ZipInfo]
     total = 0
     real_dest = os.path.realpath(dest)
 
-    for info in zf.infolist():
+    # A CAP THAT BREAKS THE LOOP HIDES EVERYTHING AFTER IT.
+    # The two caps below `break`, and each appended ONE rejection line -- for
+    # the entry that happened to trip it. A 50,001-file archive therefore
+    # imported 40,000 files and reported "1 rejected", with the other 10,001
+    # entries never mentioned: the model then searches the tree, does not find
+    # a function, and concludes it does not exist. The index is recorded here
+    # so the caller can say how many entries were left out and that the import
+    # is PARTIAL.
+    _infos = zf.infolist()
+    _cap_at = -1
+
+    for _idx, info in enumerate(_infos):
         name = info.filename
 
         # Directory entries are fine; we create dirs ourselves anyway.
@@ -345,14 +356,24 @@ def _safe_members(zf: zipfile.ZipFile, dest: str) -> Tuple[List[zipfile.ZipInfo]
                 continue
         total += info.file_size
         if total > MAX_TOTAL_UNPACKED:
-            rejected.append(f"{name} (total unpacked size cap reached)")
+            rejected.append(
+                f"{name} (total unpacked size cap "
+                f"{MAX_TOTAL_UNPACKED / 1e9:.1f} GB reached)")
+            _cap_at = _idx
             break
         if len(accepted) >= MAX_FILES:
             rejected.append(f"{name} (file-count cap {MAX_FILES} reached)")
+            _cap_at = _idx
             break
 
         accepted.append(info)
 
+    if _cap_at >= 0:
+        _left = len(_infos) - _cap_at - 1
+        if _left > 0:
+            rejected.append(
+                f"[{_left} further entries NOT examined or imported - the "
+                f"cap stopped the scan here]")
     return accepted, rejected
 
 
@@ -395,9 +416,25 @@ def import_zip(zip_path: str, name: str = "") -> Dict[str, Any]:
             # never going to be written and its integrity is irrelevant.
             members, rejected = _safe_members(zf, str(tree))
             if not members:
+                # NAME THE REASON. This used to say only "archive contained
+                # no extractable files", which reads as "the zip was empty"
+                # — so a zip refused for zip slip, an absolute path, a
+                # symlink entry or a compression ratio looked like a broken
+                # download, and the operator re-downloaded it. The reasons
+                # were already collected one line above; they just never
+                # reached the headline.
+                _why = ""
+                if rejected:
+                    _first = rejected[0]
+                    _why = (f" — every entry was refused; the first is: "
+                            f"{_first}"
+                            + (f" (and {len(rejected) - 1} more)"
+                               if len(rejected) > 1 else ""))
                 return {"ok": False,
-                        "error": "archive contained no extractable files",
-                        "rejected": rejected[:40]}
+                        "error": f"nothing in this archive could be "
+                                 f"extracted safely{_why}",
+                        "rejected": rejected[:40],
+                        "rejected_count": len(rejected)}
             # Same guarantee testzip gave -- corruption is found before a
             # single byte is written -- at the cost of the accepted set
             # only, and streamed rather than materialised.
@@ -468,6 +505,27 @@ def import_zip(zip_path: str, name: str = "") -> Dict[str, Any]:
             out["rejected_count"] = len(rejected)
             out["note"] = ("Some entries were refused for safety — see "
                            "`rejected`. Nothing was written for those.")
+            # A CAP IS NOT A SAFETY REFUSAL, IT IS A TRUNCATED IMPORT.
+            # Both read as "some entries were refused" before this, and the
+            # difference matters: a refused symlink costs nothing, while a
+            # file-count cap means the tree in front of the model is not the
+            # repo. Say so in the words the model will act on.
+            _cut = next((r for r in rejected
+                         if "cap" in r and "reached" in r), "")
+            if _cut:
+                _left = next((r for r in rejected
+                              if r.startswith("[") and "further entries" in r),
+                             "")
+                out["truncated"] = True
+                out["note"] = (
+                    "PARTIAL IMPORT — a hard cap stopped the unpack, so this "
+                    "workspace is NOT the whole archive: " + _cut
+                    + (" " + _left if _left else "")
+                    + ". Do NOT conclude that something is absent from the "
+                      "repo because you cannot find it here; what is missing "
+                      "was never unpacked. Work on a smaller subtree, or "
+                      "unpack the archive yourself and open the folder."
+                )
         if secrets:
             # Surfaced, not read.  The operator decides.
             out["possible_secrets"] = secrets[:20]
@@ -525,7 +583,18 @@ def import_dir(path: str, name: str = "") -> Dict[str, Any]:
         total = 0
         secrets: List[str] = []
         skipped: List[str] = []
+        # SAME BUG AS THE ZIP PATH, ONE DOOR ALONG, AND LEAKIER. The two caps
+        # below `break`, but that only leaves the INNER `for fn` loop -- so
+        # os.walk carried on through the whole tree, re-tripping the cap and
+        # appending one more skip line per directory, while the result still
+        # came back ok:True with nothing but a "Working on a COPY" note. A
+        # 60,000-file checkout opened as a 40,000-file workspace that looked
+        # complete, and the model then reported code as absent because the
+        # files holding it were never copied.
+        _capped = ""
         for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
+            if _capped:
+                break
             dirnames[:] = [d for d in dirnames
                            if d not in SKIP_DIRS
                            and not os.path.islink(os.path.join(dirpath, d))]
@@ -544,10 +613,15 @@ def import_dir(path: str, name: str = "") -> Dict[str, Any]:
                     skipped.append(f"{rel} (not a regular file)")
                     continue
                 if count >= MAX_FILES:
-                    skipped.append(f"{rel} (file-count cap {MAX_FILES})")
+                    _capped = (f"file-count cap {MAX_FILES} reached at "
+                               f"{rel}")
+                    skipped.append(f"{rel} ({_capped})")
                     break
                 if total + st.st_size > MAX_TOTAL_UNPACKED:
-                    skipped.append(f"{rel} (total size cap)")
+                    _capped = (f"total size cap "
+                               f"{MAX_TOTAL_UNPACKED / 1e9:.1f} GB reached "
+                               f"at {rel}")
+                    skipped.append(f"{rel} ({_capped})")
                     break
                 dest = tree / rel
                 try:
@@ -595,6 +669,17 @@ def import_dir(path: str, name: str = "") -> Dict[str, Any]:
         if skipped:
             out["skipped"] = skipped[:40]
             out["skipped_count"] = len(skipped)
+        if _capped:
+            # A cap is a TRUNCATED copy, not a handful of odd files skipped.
+            out["truncated"] = True
+            out["note"] = (
+                "PARTIAL IMPORT — " + _capped + ", so this workspace is NOT "
+                "the whole directory: only the first " + str(count)
+                + " file(s) were copied. Do NOT conclude that something is "
+                "absent from the project because you cannot find it here; "
+                "what is missing was never copied. Open a subdirectory "
+                "instead. (Your own directory is untouched either way.)"
+            )
         if secrets:
             out["possible_secrets"] = secrets[:20]
             out["secrets_warning"] = (

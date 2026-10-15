@@ -21,6 +21,17 @@ cost readout. Plus the bugs a deep pass over every file turned up.**
   inside a fenced block headed `[attached: /path]` and the model reasoned
   about a third of a file believing it had all of it. Now 200 KB, and a
   truncated attachment announces itself in the message body and in the toast.
+- **A capped repo import announces that it is partial.** Both import paths
+  stop at a hard cap (40,000 files / 2 GB) and both returned `ok: True` with a
+  soft note, so a 50,001-file archive became a 40,000-file workspace that
+  looked complete — and the model, searching a tree that is missing 10,001
+  files, reports code as absent from the repo. Now flagged `truncated` with a
+  note that says so in the words the model acts on, the entries never examined
+  are counted rather than represented by the single line that tripped the cap,
+  and the directory walk stops at the cap instead of carrying on through the
+  whole tree. A refusal also names its reason: "archive contained no
+  extractable files" reads as "the zip was empty", so an archive refused for
+  zip slip or a compression ratio looked like a broken download.
 - **Truncated output says it was truncated, everywhere it is shown** — the
   web-read note names the total and how to get the rest, a cut file inside
   `read_many` carries a `[CUT: ...]` marker in its own content, and an
@@ -237,7 +248,7 @@ agrees.
   (`sort -V`, overridable with `BASILISK_ALLOW_DOWNGRADE=1`) now refuses to go
   backwards.
 
-**5,601 assertions across 89 suites**, zero red. New: `test_themes.py`,
+**5,614 assertions across 89 suites**, zero red. New: `test_themes.py`,
 `test_spend.py`, `test_readcaps.py`, `test_deadconditions.py`. GUARDRAIL
 byte-identical.
 
