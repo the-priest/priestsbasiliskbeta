@@ -76,13 +76,43 @@ for _f in ("exploits.py", "zdayfind.py"):
     if os.path.exists(_p):
         os.remove(_p)
 
+# ── GTK IS A PREREQUISITE FOR THIS ONE CHECK, NOT A RESULT OF IT ──
+# basilisk.py imports gi at module scope, so this block cannot run at all
+# without a working PyGObject. On a box that has none (a container, a CI
+# runner, a headless checkout) it failed with
+#
+#     ImportError: cannot import name '_gi' from partially initialized
+#     module 'gi' (most likely due to a circular import)
+#
+# which says nothing about whether the app survives having its optional
+# modules deleted — the thing this file exists to prove. Reporting that as a
+# FAILURE is worse than not running it: a suite with a permanent red line in
+# it is a suite people stop reading, and this one sat red through every run.
+#
+# So it SKIPS when PyGObject is unavailable, and still runs for real wherever
+# GTK is installed, which is every machine the app itself can run on.
+try:
+    import gi as _gi_probe  # noqa: F401
+    _HAVE_GTK = True
+except Exception as _gi_err:  # pragma: no cover - environment-dependent
+    _HAVE_GTK = False
+    print(f"  SKIP basilisk-imports-without-optional-modules "
+          f"(PyGObject unavailable here: {type(_gi_err).__name__}). "
+          f"This check needs GTK; it runs on any box the app runs on.")
+
 # import basilisk from the mutilated copy in a clean module namespace
+class _SkipCheck(Exception):
+    """Raised to skip the GTK-dependent block without failing."""
+
+
 _saved = dict(sys.modules)
 for _m in list(sys.modules):
     if _m.startswith("basilisk"):
         del sys.modules[_m]
 sys.path.insert(0, _proj)
 try:
+    if not _HAVE_GTK:
+        raise _SkipCheck()
     import basilisk as _Bk  # noqa
     ck("basilisk imports with exploits.py and zdayfind.py deleted", True)
     ck("_exploits degraded to None", getattr(_Bk, "_exploits", "x") is None)
@@ -92,6 +122,8 @@ try:
        isinstance(_r, dict) and _r.get("ok") is False
        and _r.get("unavailable") is True,
        str(_r)[:120])
+except _SkipCheck:
+    pass            # already reported above; not a failure
 except Exception as e:  # noqa
     import traceback
     ck("basilisk imports with exploits.py and zdayfind.py deleted", False,
