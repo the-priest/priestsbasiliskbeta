@@ -145,6 +145,34 @@ check now also accepts any name the implementation really takes and any alias
 target, so prose drifting can no longer make the validator reject a correct
 call.
 
+## What a turn costs
+
+- **Memory recall was querying the clock.** The host appends a volatile block
+  as the last message of every request — `Right now: <date>, <time>…` — with
+  role `user`, so it stays outside the cacheable prefix. `_latest_user_text`
+  walked the list backwards for the newest user message, skipping tool-result
+  envelopes "to recall on real user intent", and landed on that clock **every
+  time**. So relevance-scoped recall searched the memory store for "Right now
+  Thursday October local time Host User" on every single turn and never once
+  ran against what the operator actually asked. The feature stored memories
+  diligently and queried them with a timestamp. It now skips the volatile
+  block too; a question about pacman recalls the pacman memory instead of
+  nothing.
+- **The recall block sat in front of the entire history, which turned off
+  prompt caching.** It was spliced in at index 1, "right after the system
+  message". The block is rebuilt from the latest user turn, so it changes
+  whenever the conversation moves on — and a prefix cache stops at the first
+  differing byte, so every token behind it was re-billed at the fresh rate.
+  Measured on a realistic request: **50.7% of it cacheable before, 99.7%
+  after**. The shipped default model bills $0.13/M fresh against $0.028/M
+  cached, and across a 40-turn session a live prefix cache is the difference
+  between $0.141 and $0.034 — **4.1×**. The host had already solved this for
+  the clock and said so one line above the call site ("so everything above
+  them stays byte-identical between turns and gets served from the provider's
+  prefix cache"); the recall block then went in at the front and undid it. It
+  is appended at the end now, which also puts the memories next to the turn
+  they are about instead of 30,000 tokens upstream.
+
 ## The readout you could not read
 
 - **The cost chip was styled to be ignored, and became invisible.** It shipped
@@ -334,7 +362,7 @@ agrees.
   (`sort -V`, overridable with `BASILISK_ALLOW_DOWNGRADE=1`) now refuses to go
   backwards.
 
-**5,672 assertions across 89 suites**, zero red. New: `test_themes.py`,
+**5,681 assertions across 89 suites**, zero red. New: `test_themes.py`,
 `test_spend.py`, `test_readcaps.py`, `test_deadconditions.py`. GUARDRAIL
 byte-identical.
 

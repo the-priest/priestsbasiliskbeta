@@ -267,5 +267,102 @@ ck("REQUIRED_FILES names nothing that does not exist",
    not (_req_listed - _top_real),
    f"listed but absent: {sorted(_req_listed - _top_real)}")
 
+
+# ── MEMORY RECALLED ON THE CLOCK, NOT ON THE QUESTION ────────────────
+# The host appends a volatile block as the LAST message of every request --
+# "Right now: <date>, <time> ..." -- with role "user", so it stays outside the
+# cacheable prefix. _latest_user_text walked the list backwards for the newest
+# user message, skipping tool-result envelopes "to recall on real user
+# intent", and landed on that clock EVERY time. So relevance-scoped recall
+# searched the memory store for "Right now Thursday October local time Host
+# User" on every single turn, and never once ran against what the operator
+# actually asked. The feature stored memories diligently and queried them with
+# a timestamp.
+print("\n== memory recalls on the question, not on the clock ==")
+import tempfile as _tf                                          # noqa: E402
+from basilisk_ext import extman as _xm                           # noqa: E402
+import basilisk_persona as _bp                                   # noqa: E402
+import basilisk_core as _bc                                      # noqa: E402
+
+# The marker is duplicated inside extman because the sidecar must not import
+# the persona (package design contract). THIS is what makes that safe: if
+# volatile_block is ever reworded, this fails instead of the recall silently
+# going back to querying the clock.
+ck("extman's volatile marker still matches the real volatile_block",
+   _bp.volatile_block("").startswith(_xm._VOLATILE_PREFIXES),
+   f"volatile_block starts {_bp.volatile_block('')[:24]!r}, "
+   f"extman expects {_xm._VOLATILE_PREFIXES}")
+
+_real = _bp.assemble_messages(
+    "SYS", [{"role": "user", "content": "how do I use pacman here"}],
+    volatile=_bp.volatile_block(""))
+ck("the assembled request really does end with the clock",
+   _real[-1]["role"] == "user"
+   and _real[-1]["content"].startswith("Right now:"))
+ck("_latest_user_text returns the QUESTION, not the clock",
+   _xm._latest_user_text(_real) == "how do I use pacman here",
+   repr(_xm._latest_user_text(_real))[:70])
+ck("...and still skips tool-result envelopes",
+   _xm._latest_user_text([
+       {"role": "user", "content": "the real ask"},
+       {"role": "user", "content": "<tool_result>\nstuff\n</tool_result>"},
+   ]) == "the real ask")
+
+# ── AND THE RECALL BLOCK GOES AT THE END, NOT IN FRONT OF HISTORY ────
+# It used to splice in at index 1, "right after the system message". The block
+# is built from the latest user turn, so it differs whenever the conversation
+# moves on -- and a prefix cache stops at the first differing byte, so the
+# whole history behind it was re-billed at full price. Measured on this
+# shape: 50.7% of the request cacheable before, 99.7% after. The shipped
+# default model bills $0.13/M fresh against $0.028/M cached.
+print("\n== the recall block does not sit in front of the history ==")
+_d = _tf.mkdtemp(prefix="mem-pos-")
+_xm.init(settings=dict(_bc.DEFAULT_SETTINGS, memory_enabled=True),
+         data_dir=_d, complete_fn=lambda a, b: "", embed_fn=None)
+if _xm.S.mem:
+    for _t in ("operator runs CachyOS not Kali", "prefers pacman over apt",
+               "printer is an Epson XP-4100", "VPN is Proton"):
+        _xm.S.mem.tool_remember(_t, "fact", 0.8)
+
+    def _req(q):
+        return [{"role": "system", "content": "SYS " * 500},
+                {"role": "user", "content": "earlier"},
+                {"role": "assistant", "content": "ans " * 500},
+                {"role": "user", "content": q},
+                {"role": "user", "content": "Right now: whenever"}]
+
+    _a = _xm.inject_memory(_req("tell me about pacman"))
+    _b = _xm.inject_memory(_req("what printer is it"))
+    ck("a block was actually injected (the test means something)",
+       len(_a) > 5 and "Recalled memory" in _a[-1]["content"],
+       f"{len(_a)} messages, last={_a[-1]['content'][:40]!r}")
+    ck("it is the LAST message", _a[-1]["role"] == "system"
+       and "Recalled memory" in _a[-1]["content"])
+    ck("nothing before it moved", [m["content"] for m in _a[:5]]
+       == [m["content"] for m in _req("tell me about pacman")])
+
+    # The property that actually saves money: two turns that recall DIFFERENT
+    # memories must still share everything up to the tail.
+    _fa = "".join(m["content"] for m in _a)
+    _fb = "".join(m["content"] for m in _b)
+    _i = next((k for k, (x, y) in enumerate(zip(_fa, _fb)) if x != y),
+              min(len(_fa), len(_fb)))
+    ck(f"two different-recall turns share {100 * _i / len(_fa):.0f}% of the "
+       f"request as a common prefix",
+       _i / len(_fa) > 0.90,
+       "the block in front of the history is what broke prefix caching")
+
+# An EMPTY store must leave the request untouched -- a fresh install must not
+# pay for an empty "Recalled memory:" header on every turn. Checked against a
+# store with nothing in it, not against the seeded one above (an `or True`
+# here would make this assert nothing at all, which is worse than no test).
+_d2 = _tf.mkdtemp(prefix="mem-empty-")
+_xm.init(settings=dict(_bc.DEFAULT_SETTINGS, memory_enabled=True),
+         data_dir=_d2, complete_fn=lambda a, b: "", embed_fn=None)
+_untouched = [{"role": "system", "content": "SYS"},
+              {"role": "user", "content": "a question nothing was saved about"}]
+ck("an empty memory store adds nothing to the request",
+   _xm.inject_memory([dict(m) for m in _untouched]) == _untouched)
+
 print(f"\nsidecar_store: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

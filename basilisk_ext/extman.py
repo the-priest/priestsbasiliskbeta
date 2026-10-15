@@ -217,10 +217,32 @@ def system_prompt_block() -> str:
 # ── hook 1: recall injection (before stream_chat) ─────────────────────────
 
 def inject_memory(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """Given the assembled message list, return it with a compact recall
-    block spliced in right after the system message.  Relevance-scoped:
-    pulls the top-k memories matching the latest user turn, never the whole
-    store, so the token window does not grow with history."""
+    """Given the assembled message list, return it with a compact recall block
+    added at the END.  Relevance-scoped: pulls the top-k memories matching the
+    latest user turn, never the whole store, so the token window does not grow
+    with history.
+
+    THE POSITION IS THE WHOLE POINT, AND IT USED TO BE WRONG.
+    This spliced the block in at index 1, "right after the system message" --
+    directly in front of the entire conversation. The block is built from the
+    LATEST user turn, so it differs on every turn that recalls anything, and a
+    provider's prefix cache matches a prefix: the first differing byte ends the
+    hit. Everything after index 1 -- all the history, every tool result, the
+    largest and most expensive part of the request -- was therefore re-billed
+    at full input price on every one of those turns. On the shipped default
+    model that is $0.13/M against $0.028/M cached: a 4.6x multiplier on the
+    dominant cost.
+
+    The host had already solved this for the clock, and said so one line above
+    the call site: "The clock and the addendum go last, as their own trailing
+    message, so everything above them stays byte-identical between turns and
+    gets served from the provider's prefix cache." The recall block then went
+    in at the front and undid it.
+
+    So it goes last too. Recency also suits it: the memories are about the turn
+    being answered, and they now sit next to it rather than 30,000 tokens
+    upstream of it.
+    """
     if not (S.ready and S.on("memory_enabled") and S.mem):
         return messages
     try:
@@ -232,10 +254,13 @@ def inject_memory(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
         block = S.mem.format_block(hits)
         if not block:
             return messages
-        recall_msg = {"role": "system", "content": block}
-        if messages and messages[0].get("role") == "system":
-            return [messages[0], recall_msg, *messages[1:]]
-        return [recall_msg, *messages]
+        # APPENDED, unconditionally. Anywhere at the end preserves the
+        # cacheable prefix, which is the whole point; the host's trailing
+        # volatile block (the clock) is 22 tokens and carries role "user", so
+        # there is nothing to be gained by detecting it and inserting before
+        # it -- only a content sniff that would rot the first time that block
+        # is reworded.
+        return [*messages, {"role": "system", "content": block}]
     except Exception:
         _log("[inject_memory] " + traceback.format_exc())
         return messages
@@ -378,12 +403,35 @@ def foresight(command: str, kind: str = "shell") -> Dict[str, Any]:
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
+# The host appends a VOLATILE block as the last message of every request --
+# "Right now: <date>, <time> local time.  Host: ...  User: ..." -- carrying
+# role "user" so it sits outside the cacheable prefix (see
+# basilisk_persona.volatile_block and assemble_messages).
+#
+# That made it the "latest user text", so memory recall has been querying the
+# CLOCK on every single turn: the feature stored memories diligently and then
+# searched them for "Right now Thursday October local time Host User", which
+# matches nothing anybody saved. Relevance-scoped recall never once ran
+# against what the operator actually asked.
+#
+# This module must not import basilisk_persona (see the package docstring --
+# the sidecar depends only on the stdlib plus injected callables), so the
+# marker is duplicated here. tests/test_sidecar_store.py imports BOTH and
+# fails if volatile_block stops starting with it, which is what makes a
+# duplicated string safe to rely on.
+_VOLATILE_PREFIXES = ("Right now:",)
+
+
 def _latest_user_text(messages: List[Dict[str, str]]) -> str:
     for m in reversed(messages):
         if m.get("role") == "user":
-            c = m.get("content", "")
+            c = m.get("content", "") or ""
             # ignore tool-result envelopes; recall on real user intent
             if "<tool_result>" in c:
+                continue
+            # ...and ignore the host's trailing clock block, for the same
+            # reason: it is not something the operator said.
+            if c.lstrip().startswith(_VOLATILE_PREFIXES):
                 continue
             return c
     return ""
