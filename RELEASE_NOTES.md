@@ -1,3 +1,140 @@
+# v1.2.3.0
+
+**The leashed-mode release: reads that are not cut short, a gate that stops
+blocking ordinary work, nine themes, keyboard mode switching, and a running
+cost readout. Plus the bugs a deep pass over every file turned up.**
+
+## Reads stopped being cut short
+
+- **The 6,000-character cap was never actually lifted.** `tool_web_read`'s
+  signature default had been raised to 24,000, but the dispatch table called
+  `self._web_read_gated(url, _safe_int(a.get("max_chars", 6000), 6000))` — so
+  every page still came back cut at ~6,000 characters and the model kept
+  reporting "I could only read the first ~6,000 of 16,188 characters". A
+  default is only a default for callers that omit the argument, and this one
+  never did. Three call sites fixed (the dispatch entry, the research path at
+  14,000, and `workspace_read_many`). `tests/test_readcaps.py` tests the CALL
+  SITES rather than the defaults, because that is where it hid.
+- **An attached file is a read path too.** The paperclip read 40,000 bytes —
+  half of `tool_read_file`'s own 80,000 default, passed explicitly — and said
+  nothing about the cut, so a 120 KB source file arrived as its first 40 KB
+  inside a fenced block headed `[attached: /path]` and the model reasoned
+  about a third of a file believing it had all of it. Now 200 KB, and a
+  truncated attachment announces itself in the message body and in the toast.
+- **Truncated output says it was truncated, everywhere it is shown** — the
+  web-read note names the total and how to get the rest, a cut file inside
+  `read_many` carries a `[CUT: ...]` marker in its own content, and an
+  incomplete workspace read is marked `[INCOMPLETE: ...]`.
+
+## The gate stopped blocking ordinary work
+
+- **foresight no longer refuses routine development.** `rm -rf node_modules`,
+  `rm -rf ./build`, `rm -rf ~/project/dist` and the rest of the daily cleanup
+  are allowed; the home-directory and filesystem roots are still refused. The
+  git rules were narrowed to the two that matter (a bare `--force` push and
+  `clean -x`). `kill -9`, `chown` on a project tree and `passwd` no longer
+  trip rules written for something else.
+- **Downloads work.** `curl -fsSL https://.../install.sh | bash` is a
+  redirection with an explanation rather than a wall; a decoder piped into a
+  shell (`base64 -d | sh`) is still refused. 115 ordinary developer commands
+  are pinned as plain-allowed.
+- **The engagement scope gate was removed** as an execution gate. Scope is
+  still recorded for the report (`scope_set` / `scope_show`) and still shapes
+  the write-up; it no longer refuses commands. The destructive floor and the
+  self-tamper guard are unchanged and still fire in both modes.
+- `chown` is refused only on a critical directory ITSELF, not on anything
+  beneath one.
+
+## The desktop
+
+- **Nine themes**, picked in Settings → Appearance: ember (the original
+  clay/coral), violet, midnight, abyss, rose, venom, brass, slate and forest.
+  Each is black-first with a single colour through it. The whole stylesheet is
+  retinted algorithmically — every panel, border, glow and popover — rather
+  than a listed palette of fourteen colours over a sheet that holds 250 hex
+  values and 928 rgba values, which is why the first attempt changed almost
+  nothing on screen. Pinned by 363 assertions, including that each theme's
+  black ladder stays monotonic (relative luminance is not HSL lightness:
+  blue at 7% and green at 72% are the same L).
+- **Tab** toggles the agent; **Shift+Tab** switches leashed/unleashed. Both
+  work from the composer and from anywhere in the window.
+- **A token/cost chip** beside the composer: tokens in and out and the dollar
+  figure for THIS chat, taken from the provider's own usage report rather than
+  estimated from characters. The usage chunk arrives with an empty `choices`
+  list, so it is read before the "no choices, skip" branch — the one line that
+  silently disables the whole feature. A turn the provider did not meter counts
+  as unknown, not as free, and the chip marks an incomplete total with a `+`.
+  Per-model prices are editable in Settings → Backends.
+- The theme setting was being deleted on every load (`_migrate_settings`
+  popped it), so the picker reset at every restart.
+
+## Tool calling
+
+- A call whose JSON has a **trailing comma or single quotes** no longer loses
+  its arguments: the lenient loader gained an `ast.literal_eval` stage
+  (literals only — nothing executes).
+- **A scalar the model wrapped in an array** is unwrapped. A hostile-type
+  sweep of all 157 tools found 18 that raised `AttributeError` on
+  `{"url": ["https://x"]}` — `(url or "").strip()` with a list in `url`. Done
+  once at the dispatch choke point, and only where the implementation's own
+  signature annotates that parameter `str`, the list holds one item and that
+  item is a scalar.
+- **The printed-URL recovery no longer fires on a delivered answer**, so a
+  reply that merely mentions a URL is not turned into a second fetch, and
+  `web_read` does not run twice for one question.
+- `webshield` no longer lets a page close its own quarantine envelope: a
+  `</tool_result>` inside fetched text is stripped along with the rest of the
+  tool-channel tags.
+- `headroom` reported `enabled: False` when the compression pass had simply
+  found nothing worth crushing.
+
+## Found by probing every file
+
+- **Two exploit builders ignored their `url`.** `auth_bypass_headers` assigned
+  it and never read it again, so all seventeen header sets and path mutations
+  were hardcoded to `/admin`; `auth_attack` printed the literal `TARGET_HOST`
+  and `/login` in its hydra commands while the ffuf command beside them in the
+  same list substituted correctly, so one of the two commands in every answer
+  was ready to run and the other had to be hand-edited.
+- **Four pieces of documentation described gates that do not exist** — an
+  approval dialog for action tools and for skill saves (there is none;
+  autonomous operation is the only posture, and the ast check plus the
+  sandboxed test run are what make a skill save safe) — and one block in
+  `basilisk_core` claimed the web-reading tools had been REMOVED while
+  `tool_web_read` is defined a few hundred lines above it.
+- `basilisk_ext/reach.py` and `basilisk_ext/verify.py` are imported by nothing;
+  each now says so at the top so neither reads as a description of what the app
+  can do. `verify`'s `settings` argument was normalised into a local and then
+  read by nothing, while its per-source read cap sat hardcoded at 4,000.
+- `_action_tool` accepted the tool's `name` and dropped it, so every action
+  tool logged under whatever the dispatcher happened to be holding.
+- The perf suite took a single timing sample per size, so whichever size got
+  descheduled decided the ratio — it went red during a parallel run and passed
+  alone seconds later. Best-of-seven now.
+- The website, `llms.txt` and the README all still described a web reader that
+  "reads only from a fixed allow-list" and refuses anything off it. That is not
+  how it works in either mode; all three now describe the shield and the
+  per-mode tiering.
+- Stated numbers that had gone stale: ~63k lines (72,274), 5,162 assertions,
+  and a suite count of 85 against 88 files. `tests/test_readme.py` now pins
+  every countable claim that can be checked without running the suite — tool
+  count against `basilisk_core`, builder count against `exploits.py`, line
+  count within 10%, and the theme names and count against `_THEME_SPECS`.
+
+## Restored
+
+- The **offline whisper.cpp STT** path and the browser-engine hardening that
+  existed only in the operator's local zip and had never been pushed.
+- The installer no longer downgrades a newer install over a stable one: the
+  beta `install.sh` defaulted to the stable repository, and a version check
+  (`sort -V`, overridable with `BASILISK_ALLOW_DOWNGRADE=1`) now refuses to go
+  backwards.
+
+**5,444 assertions across 88 suites**, zero red. New: `test_themes.py`,
+`test_spend.py`, `test_readcaps.py`. GUARDRAIL byte-identical.
+
+---
+
 # v1.2.1.0
 
 **The two real fixes the operator found overnight, pinned so they can't come

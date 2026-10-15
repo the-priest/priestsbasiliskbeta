@@ -72,6 +72,19 @@ ck(f"version badge matches basilisk.py ({_ver_src})",
    _ver_badge and _ver_badge.group(1) == _ver_src,
    f"badge={_ver_badge.group(1) if _ver_badge else '?'} src={_ver_src}")
 
+# The release history has to reach the version the app reports. VERSION said
+# 1.2.3.0 while the newest entry in both CHANGELOG.md and RELEASE_NOTES.md was
+# v1.2.1.0 -- two releases with no record at all, which is how "what changed?"
+# becomes unanswerable. Nothing pinned it, so nothing noticed.
+for _doc in ("CHANGELOG.md", "RELEASE_NOTES.md"):
+    _txt = io.open(_doc, encoding="utf-8").read()
+    _top = re.search(r"^#\s*v([\d.]+)", _txt, re.M)
+    ck(f"{_doc} has a version heading", _top is not None)
+    ck(f"{_doc}'s newest entry is the shipped version ({_ver_src})",
+       _top and _top.group(1) == _ver_src,
+       f"newest entry v{_top.group(1) if _top else '?'}, "
+       f"VERSION {_ver_src}")
+
 _suites = len(glob.glob("tests/test_*.py"))
 _claimed = re.search(r"([\d,]+)\s+assertions across\s+(\d+)\s+suites", README)
 ck("assertion/suite claim present", _claimed is not None)

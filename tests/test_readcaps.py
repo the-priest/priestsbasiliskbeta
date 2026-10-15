@@ -108,6 +108,26 @@ for fn, src in (("basilisk.py", _app), ("basilisk_core.py", _core),
             _live.append(f"{fn}:{i}: {st[:70]}")
 ck("no live max_chars=6000 anywhere", not _live, "; ".join(_live[:3]))
 
+print("\n== the paperclip: an attached file is a read path too ==")
+# Same bug, a different door. The attachment reader passed max_bytes=40_000 --
+# half of tool_read_file's own 80_000 default -- and the message it built said
+# nothing about the cut, so a 120 KB file arrived as its first 40 KB inside a
+# fenced block headed "[attached: /path]".
+m = re.search(r"_ATTACH_MAX_BYTES\s*=\s*([\d_]+)", _app)
+ck("the attachment cap is a named constant", bool(m),
+   "inline literal - that is how it drifted from the default last time")
+if m:
+    ck(f"attachment cap {m.group(1)} >= tool_read_file's own default (80000)",
+       int(m.group(1).replace("_", "")) >= 80_000, m.group(1))
+m = re.search(r"tool_read_file\(path,\s*max_bytes=([^)]+)\)", _app)
+ck("the attach read passes the constant, not a literal",
+   bool(m) and "_ATTACH_MAX_BYTES" in m.group(1),
+   m.group(1) if m else "call site not found")
+ck("a truncated attachment says so in the message body",
+   'r.get("truncated")' in _app and "TRUNCATED" in _app)
+ck("...and the toast says it too",
+   '" (truncated)"' in _app or "(truncated)" in _app)
+
 print("\n== a truncated read must announce itself ==")
 # Raising the cap does not remove truncation, it moves it. When a read IS cut,
 # the fact has to travel with the payload or the model reasons about a

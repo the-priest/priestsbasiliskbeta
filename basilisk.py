@@ -5222,6 +5222,49 @@ class ListWidget(Gtk.Box):
             self.append(row)
 
 
+_STR_PARAMS_CACHE: Optional[Dict[str, frozenset]] = None
+
+
+def _str_params() -> Dict[str, frozenset]:
+    """{tool name: the parameters its implementation annotates as `str`}.
+
+    Read from the real signatures in basilisk_core the first time it is asked,
+    never from a hand-written table: a tool that changes its arguments would
+    leave the table behind, and a table that is wrong here would coerce an
+    argument that was correct.
+
+    This exists for the one-element-list case below. basilisk_core has
+    `from __future__ import annotations`, so annotations arrive as the STRINGS
+    "str" / "Optional[str]" rather than the type object -- compare as text."""
+    global _STR_PARAMS_CACHE
+    if _STR_PARAMS_CACHE is not None:
+        return _STR_PARAMS_CACHE
+    out: Dict[str, frozenset] = {}
+    try:
+        import inspect as _inspect
+        import basilisk_core as _bc
+        for nm in dir(_bc):
+            if not nm.startswith("tool_"):
+                continue
+            fn = getattr(_bc, nm, None)
+            if not callable(fn):
+                continue
+            try:
+                sig = _inspect.signature(fn)
+            except (TypeError, ValueError):
+                continue
+            strs = {pm.name for pm in sig.parameters.values()
+                    if str(pm.annotation).replace("<class '", "").rstrip("'>")
+                    in ("str", "Optional[str]")}
+            if strs:
+                out[nm[5:]] = frozenset(strs)
+    except Exception as e:
+        log(f"string-parameter map unavailable (unwrapping disabled): {e}")
+        out = {}
+    _STR_PARAMS_CACHE = out
+    return out
+
+
 def _spec_arg_names() -> Dict[str, set]:
     """{tool: {accepted argument names}} lifted from the persona contract."""
     global _SPEC_ARGS_CACHE
@@ -5324,6 +5367,37 @@ def _normalise_tool_args(name: str, args: Any) -> Tuple[Dict[str, Any], str]:
     for alias, real in (_ARG_ALIASES.get(name) or {}).items():
         if alias in out and not str(out.get(real) or "").strip():
             out[real] = out.pop(alias)
+    # ── A ONE-ELEMENT LIST WHERE A STRING WAS MEANT ─────────────────
+    # The int/float coercion above deliberately leaves list and dict alone,
+    # because several tools really do take them (edits, paths, findings). But
+    # `{"url": ["https://x"]}` is a different mistake: a model wrapping ONE
+    # scalar in an array, which every tool-calling model does sometimes, and
+    # which is unambiguous to undo.
+    #
+    # A hostile-type sweep of all 157 tools found 18 that raise AttributeError
+    # on it -- `(url or "").strip()` with a list in `url` -- among them
+    # web_read, web_search, web_research, open_url, workspace_import,
+    # analyze_image and the whole juiceshop family. _tool_thread guarantees a
+    # result either way, so the turn no longer HANGS on this (that was fixed
+    # separately), but what the model gets back is
+    #     error: web_read failed with AttributeError: 'list' object has no
+    #     attribute 'strip'
+    # which costs a turn to recover from and tells it nothing about which
+    # argument was wrong.
+    #
+    # Only unwrapped when the implementation's own signature annotates that
+    # parameter `str` (see _str_params), the list holds exactly one item, and
+    # that item is a scalar. A longer list, a nested list, or a parameter typed
+    # Any/List is left exactly as it arrived -- those are either real typed
+    # arguments or a genuine mistake the tool should report in its own words.
+    _strs = _str_params().get(name)
+    if _strs:
+        for k in list(out):
+            v = out[k]
+            if (k in _strs and isinstance(v, (list, tuple)) and len(v) == 1
+                    and isinstance(v[0], (str, int, float))
+                    and not isinstance(v[0], bool)):
+                out[k] = str(v[0])
     # ── REQUIRED ARGUMENTS MUST ACTUALLY BE PRESENT ──
     # Checking "did ANY key land" is not enough, and the operator's round-2
     # audit proved it: `copy_path{path=/etc/hostname}` aliased cleanly to
@@ -19831,6 +19905,22 @@ class MainWindow(Adw.ApplicationWindow):
     _ATTACH_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp",
                           ".bmp", ".svg"}
 
+    # How much of an attached text file is folded into the message.
+    #
+    # This was 40,000 bytes -- HALF of tool_read_file's own default of 80,000,
+    # passed explicitly, which is the same shape as the web_read cap that sat
+    # at 6,000 while its default said 24,000: the default advertises the
+    # limit, the call site IS the limit. And _finish_attach said nothing about
+    # a cut, so attaching a 120 KB source file put its first 40 KB in a fenced
+    # block under "[attached: /path]" and the model reasoned about a third of a
+    # file believing it had the whole thing.
+    #
+    # 200 KB is roughly 5,000 lines of source -- an attachment is a file the
+    # operator deliberately picked, so it should arrive whole. Anything past
+    # that is ANNOUNCED in the message body now rather than silently dropped,
+    # and the context compressor handles the size if the model is small.
+    _ATTACH_MAX_BYTES = 200_000
+
     def _attach_file(self, path):
         if not path:
             self._show_toast("Could not get file path.")
@@ -19846,7 +19936,7 @@ class MainWindow(Adw.ApplicationWindow):
             return
         # Text-like file: read its contents into the message.
         def _bg():
-            r = tool_read_file(path, max_bytes=40_000)
+            r = tool_read_file(path, max_bytes=self._ATTACH_MAX_BYTES)
             GLib.idle_add(self._finish_attach, path, r)
         threading.Thread(target=_bg, daemon=True).start()
 
@@ -19854,10 +19944,23 @@ class MainWindow(Adw.ApplicationWindow):
         if not r.get("ok"):
             self._show_toast(f"Read error: {r.get('error')}")
             return False
-        body = r["content"]
+        body = r.get("content", "")
+        # A TRUNCATED ATTACHMENT HAS TO SAY SO. The read is capped; before this
+        # the cut was invisible -- same fenced block, same "[attached: path]"
+        # header, just less file. A model cannot ask for the rest of something
+        # it does not know was shortened.
+        note = ""
+        if r.get("truncated"):
+            note = (f"\n[NOTE: this attachment is TRUNCATED - the first "
+                    f"{len(body):,} characters of a {r.get('size', 0):,}-byte "
+                    f"file. If you need the rest, read it with read_file "
+                    f"(or open its folder as a workspace and page through "
+                    f"it); do NOT assume what is below is the whole file.]")
         self._attach_add("file", path,
-                         f"[attached: {path}]\n```\n{body}\n```")
-        self._show_toast(f"Attached: {os.path.basename(path)}")
+                         f"[attached: {path}]{note}\n```\n{body}\n```")
+        self._show_toast(
+            f"Attached: {os.path.basename(path)}"
+            + (" (truncated)" if r.get("truncated") else ""))
         return False
 
     # ── history ─────────────────────────────────────────────────

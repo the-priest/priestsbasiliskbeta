@@ -383,5 +383,78 @@ for _n, _fn in _alltools:
 ck("no tool raised on empty or numeric-string input", not _raised,
    "; ".join(_raised[:6]))
 
+
+# ── 8. a one-element list where a string was meant ───────────────────
+# A hostile-type sweep of all 157 tools (every string parameter handed None,
+# [], ["a"], {}, 0, -1, True, a 12-digit int, a float and a 3-element list)
+# found 18 that raise AttributeError on exactly one shape: a scalar the model
+# wrapped in an array. `(url or "").strip()` with ["https://x"] in `url`.
+#
+# _tool_thread guarantees a result either way, so this no longer HANGS the
+# turn — but what came back was
+#     error: web_read failed with AttributeError: 'list' object has no
+#     attribute 'strip'
+# which costs a round trip and does not say which argument was wrong.
+print("\n== a scalar the model wrapped in an array ==")
+_sp = Bk._str_params()
+ck("the string-parameter map was read from the real signatures",
+   len(_sp) > 100 and _sp.get("web_read") == frozenset({"url"}),
+   f"{len(_sp)} tools, web_read={sorted(_sp.get('web_read', ()))}")
+
+for _t, _k, _given, _want in [
+    ("web_read", "url", ["https://x.tld/a"], "https://x.tld/a"),
+    ("web_search", "query", ["nmap release"], "nmap release"),
+    ("web_research", "question", ["what changed"], "what changed"),
+    ("open_url", "url", ["https://x.tld"], "https://x.tld"),
+    ("workspace_import", "zip_path", ["~/p.zip"], "~/p.zip"),
+    ("read_file", "path", ["~/a.py"], "~/a.py"),
+    ("write_file", "content", ["x = 1"], "x = 1"),
+]:
+    _a, _e = norm(_t, {_k: _given})
+    ck(f"{_t} {_k}={_given!r} is unwrapped", _a.get(_k) == _want, str(_a))
+
+# What must NOT be unwrapped. Each of these is either a real typed argument or
+# a mistake the tool itself should describe — guessing at them is how a
+# normaliser starts corrupting correct calls.
+_a, _e = norm("workspace_read_many", {"paths": ["a.py"]})
+ck("a parameter typed Any/List is left alone (paths)",
+   _a.get("paths") == ["a.py"], str(_a))
+_a, _e = norm("web_read", {"url": ["a", "b"]})
+ck("a two-element list is left alone", _a.get("url") == ["a", "b"], str(_a))
+_a, _e = norm("web_read", {"url": [{"u": 1}]})
+ck("a nested object is left alone", _a.get("url") == [{"u": 1}], str(_a))
+_a, _e = norm("web_read", {"url": [True]})
+ck("a bool is left alone (str(True) is 'True', which is truthy)",
+   _a.get("url") == [True], str(_a))
+_a, _e = norm("web_read", {"url": "https://plain"})
+ck("a correct call is untouched", _a.get("url") == "https://plain", str(_a))
+
+# And the end-to-end claim: normalise, then CALL, and nothing raises. This is
+# the check that actually pins the fix — the unwrapping above is only useful
+# if the tool behind it survives.
+print("\n== normalise -> call: the 18 that used to raise ==")
+_broke = []
+for _t, _args in [
+    ("web_read", {"url": ["https://x.invalid/a"]}),
+    ("open_url", {"url": ["https://x.invalid"]}),
+    ("list_apps", {"filter_text": ["firefox"]}),
+    ("workspace_import", {"zip_path": ["/nonexistent.zip"]}),
+    ("analyze_image", {"image_path": ["/nonexistent.png"]}),
+    ("screenshot", {"save_path": ["/tmp/x.png"]}),
+    ("delete_path", {"path": ["/nonexistent-probe-path"]}),
+]:
+    _na, _err = norm(_t, _args)
+    if _err:
+        continue
+    _fn = getattr(_C, "tool_" + _t, None)
+    if _fn is None:
+        continue
+    try:
+        _fn(**_na)
+    except Exception as _ex:
+        _broke.append(f"{_t}: {type(_ex).__name__}: {_ex}")
+ck("no tool raises on a one-element-list argument once normalised",
+   not _broke, "; ".join(_broke[:4]))
+
 print(f"\ntoolargs: {_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)
