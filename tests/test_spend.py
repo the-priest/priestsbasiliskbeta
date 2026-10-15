@@ -99,6 +99,40 @@ ck("tokens compact: 1.21M", C.fmt_tokens(1_210_000) == "1.21M",
    C.fmt_tokens(1_210_000))
 ck("a junk token count does not crash", C.fmt_tokens("x") == "0")
 
+print("\n== the total survives closing the app ==")
+# It did not. _spend_by_chat was a plain dict on the window under a docstring
+# that said "per CHAT, not per process" — and it was per process exactly: every
+# chat read zero on the next launch, including one that had been running all
+# afternoon. A cost readout that resets is not a cost readout.
+import json as _json
+import tempfile as _tf
+_prev = C.SPEND_LEDGER_JSON
+try:
+    C.SPEND_LEDGER_JSON = __import__("pathlib").Path(
+        _tf.mkdtemp(prefix="spendtest-")) / "spend.json"
+    ck("an absent ledger reads as empty, not as a crash",
+       C.load_spend_ledger() == {})
+    C.save_spend_ledger({"7": [120, 340, 0.00231, 1]})
+    _back = C.load_spend_ledger()
+    ck("a saved row comes back with its four numbers",
+       _back.get("7") == [120, 340, 0.00231, 1], str(_back))
+    ck("keys are strings (JSON has no integer keys, so int would split a chat)",
+       all(isinstance(k, str) for k in _back))
+    C.save_spend_ledger({"9": [1, 2, 3.0, 0], "bad": "junk", "x": [1]})
+    _back = C.load_spend_ledger()
+    ck("a malformed row is dropped, the good ones kept",
+       list(_back) == ["9"], str(_back))
+    open(C.SPEND_LEDGER_JSON, "w").write("{not json")
+    ck("a corrupt file costs the history, not the app",
+       C.load_spend_ledger() == {})
+    C.save_spend_ledger({str(i): [i, i, float(i), 0]
+                         for i in range(C.SPEND_LEDGER_MAX + 50)})
+    ck("the file is bounded so a long-lived install cannot grow it forever",
+       len(C.load_spend_ledger()) <= C.SPEND_LEDGER_MAX,
+       str(len(C.load_spend_ledger())))
+finally:
+    C.SPEND_LEDGER_JSON = _prev
+
 print("\n== the wiring that makes any of it possible ==")
 _src = open(os.path.join(_ROOT, "basilisk_core.py"), encoding="utf-8").read()
 ck("the stream asks the provider to report usage",
@@ -123,6 +157,12 @@ ck("an unmetered turn increments the unknown counter",
    "_spend_unknown" in _app)
 ck("totals are kept per CHAT, not per process",
    "_spend_by_chat" in _app and "_load_spend" in _app)
+ck("...and the map is SEEDED FROM DISK, so a restart does not zero it",
+   "load_spend_ledger()" in _app and "save_spend_ledger(self._spend_by_chat)"
+   in _app)
+ck("the chip's tooltip names a settings page that exists",
+   "Settings -> Display -> Token pricing" in _app
+   and "Settings -> Models" not in _app)
 ck("...and are restored when a chat is opened",
    "self._load_spend(chat_id)" in _app)
 ck("there is a chip, hidden until there is something to show",

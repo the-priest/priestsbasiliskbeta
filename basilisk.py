@@ -51,6 +51,7 @@ from typing import List, Dict, Any, Optional, Callable, Tuple
 from basilisk_core import (
     _as_int,
     usage_cost, fmt_cost, fmt_tokens, model_price,
+    load_spend_ledger, save_spend_ledger,
     fabricated_tool_result, strip_fabricated_results,
     GroqBackend, OpenAICompatBackend, BackendRouter,
     ChatStore, Chat,
@@ -10341,8 +10342,11 @@ class MainWindow(Adw.ApplicationWindow):
             log(f"basilisk_ext not loaded: {_e}")
 
         self.current_chat_id: Optional[int] = None
-        # Per-chat token/cost totals: {chat_id: (in, out, usd, unmetered)}
-        self._spend_by_chat: dict = {}
+        # Per-chat token/cost totals: {chat_id (str): [in, out, usd, unmetered]}
+        # Loaded from disk, because "per chat, not per process" has to survive
+        # closing the app -- it did not, and every chat read zero on the next
+        # launch, including one that had been running all afternoon.
+        self._spend_by_chat: dict = load_spend_ledger()
         self._spend_in = 0
         self._spend_out = 0
         self._spend_usd = 0.0
@@ -15021,11 +15025,15 @@ class MainWindow(Adw.ApplicationWindow):
         cid = self.current_chat_id
         if cid is None:
             return
-        self._spend_by_chat[cid] = (self._spend_in, self._spend_out,
-                                    self._spend_usd, self._spend_unknown)
+        # str keys throughout: this map is written to JSON, which has no
+        # integer keys, so an int key here and a str key after a restart would
+        # read as two different chats.
+        self._spend_by_chat[str(cid)] = [self._spend_in, self._spend_out,
+                                         self._spend_usd, self._spend_unknown]
+        save_spend_ledger(self._spend_by_chat)
 
     def _load_spend(self, chat_id):
-        row = self._spend_by_chat.get(chat_id)
+        row = self._spend_by_chat.get(str(chat_id))
         if row:
             (self._spend_in, self._spend_out,
              self._spend_usd, self._spend_unknown) = row
@@ -15054,7 +15062,8 @@ class MainWindow(Adw.ApplicationWindow):
             if unknown:
                 tip += (f"\n{unknown} turn(s) reported no usage, so the real "
                         f"total is higher — that is what the + means.")
-            tip += "\nPrices come from Settings -> Models, or the catalogue."
+            tip += ("\nPrices come from Settings -> Display -> Token pricing, "
+                    "or the published catalogue.")
             chip.set_tooltip_text(tip)
         except Exception as e:
             log(f"spend chip refresh failed: {e}")

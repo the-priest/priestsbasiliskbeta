@@ -3030,6 +3030,63 @@ def fmt_cost(usd: float) -> str:
     return f"${usd:,.2f}"
 
 
+# ── THE SPEND LEDGER ─────────────────────────────────────────────────
+# The chip beside the composer answers "what has THIS chat cost". The totals
+# lived in a dict on the window, under a docstring that said "per CHAT, not per
+# process" -- and they were per process exactly: close the app and every chat
+# read zero again, including the one you had been running all afternoon. A cost
+# readout that resets is not a cost readout.
+#
+# A tiny JSON sidecar rather than a column on the chat table: the numbers are
+# derived, four per chat, and losing the file costs nothing but the history of
+# a number. Bounded so a long-lived install cannot grow it without limit.
+SPEND_LEDGER_JSON = DATA_DIR / "spend.json"
+SPEND_LEDGER_MAX = 500
+
+
+def load_spend_ledger() -> Dict[str, Any]:
+    """{chat_id (str): [tokens_in, tokens_out, usd, unmetered_turns]}.
+
+    Never raises and never returns anything but a dict: a corrupt or
+    half-written file costs the cost history, not the app."""
+    try:
+        if not SPEND_LEDGER_JSON.exists():
+            return {}
+        with open(SPEND_LEDGER_JSON, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        out: Dict[str, Any] = {}
+        for k, v in data.items():
+            if not isinstance(v, (list, tuple)) or len(v) < 4:
+                continue
+            try:
+                out[str(k)] = [int(v[0]), int(v[1]), float(v[2]), int(v[3])]
+            except (TypeError, ValueError):
+                continue
+        return out
+    except Exception:
+        return {}
+
+
+def save_spend_ledger(rows: Dict[str, Any]) -> None:
+    """Atomic write of the spend sidecar, newest SPEND_LEDGER_MAX chats kept.
+
+    Atomic for the same reason settings.json is: this is written on every
+    metered turn, so a crash mid-write is not a rare case."""
+    try:
+        items = [(str(k), list(v)) for k, v in (rows or {}).items()
+                 if isinstance(v, (list, tuple)) and len(v) >= 4]
+        if len(items) > SPEND_LEDGER_MAX:
+            items = items[-SPEND_LEDGER_MAX:]
+        tmp = SPEND_LEDGER_JSON.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(dict(items), f)
+        os.replace(tmp, SPEND_LEDGER_JSON)
+    except Exception as e:
+        log(f"spend ledger save failed: {e}")
+
+
 def fmt_tokens(n: int) -> str:
     """Compact token count: 940, 12.3k, 1.21M."""
     try:

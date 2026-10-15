@@ -7,7 +7,7 @@
 <br/>
 
 <img src="https://img.shields.io/badge/version-1.2.3.0-d97757?style=for-the-badge&labelColor=08090b" alt="version 1.2.3.0">
-<img src="https://img.shields.io/badge/tests-5444%20assertions-2ea043?style=for-the-badge&labelColor=08090b&logo=pytest&logoColor=2ea043" alt="5444 assertions">
+<img src="https://img.shields.io/badge/tests-5452%20assertions-2ea043?style=for-the-badge&labelColor=08090b&logo=pytest&logoColor=2ea043" alt="5452 assertions">
 <img src="https://img.shields.io/badge/licence-MIT-e11d2b?style=for-the-badge&labelColor=08090b" alt="MIT">
 <img src="https://img.shields.io/badge/deps-stdlib%20%2B%20GTK-e11d2b?style=for-the-badge&labelColor=08090b" alt="stdlib + GTK">
 
@@ -174,7 +174,7 @@ It also remembers. Persistent memory across sessions, backed by **SQLite**, with
 
 ## 🖥️ The desktop
 
-A real desktop app, not a terminal wrapper — GTK4 / libadwaita, Aero-glass over a near-black ground, in **nine themes** you pick in **Settings → Appearance**: ember (the original clay/coral), violet, midnight, abyss, rose, venom, brass, slate and forest. Each one is black first with a single colour through it — the whole stylesheet is retinted algorithmically, every panel and border and glow, not a swapped accent on a grey app.
+A real desktop app, not a terminal wrapper — GTK4 / libadwaita, Aero-glass over a near-black ground, in **nine themes** you pick in **Settings → Display**: ember (the original clay/coral), violet, midnight, abyss, rose, venom, brass, slate and forest. Each one is black first with a single colour through it — the whole stylesheet is retinted algorithmically, every panel and border and glow, not a swapped accent on a grey app.
 
 | | |
 |---|---|
@@ -183,7 +183,7 @@ A real desktop app, not a terminal wrapper — GTK4 / libadwaita, Aero-glass ove
 | 🖼️ **Vision** | Drop an image inline and have a vision model actually *look* at it |
 | ↩️ **Steer without stopping** | Type a nudge mid-run and press **Enter** — folded in on the next step, no interruption |
 | ⌨️ **Mode from the keyboard** | **Tab** toggles the agent on and off, **Shift+Tab** switches leashed ⇄ unleashed — from the composer or anywhere in the window |
-| 🧮 **What the chat cost** | A token/cost chip beside the composer: tokens in and out and the dollar figure for *this* chat, counted from the provider's own usage report rather than estimated. Per-model prices are editable in **Settings → Backends** |
+| 🧮 **What the chat cost** | A token/cost chip beside the composer: tokens in and out and the dollar figure for *this* chat, counted from the provider's own usage report rather than estimated. Per-model prices are editable in **Settings → Display → Token pricing** |
 | 📜 **Live terminal panel** | Every command and its raw output, toggled from the header |
 | 🖥️ **Desktop control** | Launch apps, focus windows, type, screenshot, read the screen |
 | 🔌 **MCP** | Connect external MCP servers as extra tools |
@@ -295,7 +295,7 @@ Capability and safety are decoupled on purpose.
 
 ## 🔬 Engineering
 
-**Stdlib only** for the engine. No pytest, no network, no fixtures, no account — **5,444 assertions across 88 suites**, run in under a minute. Four of those suites are adversarial probes that report *findings* rather than a pass count, so their checks are not in that total.
+**Stdlib only** for the engine. No pytest, no network, no fixtures, no account — **5,452 assertions across 88 suites**, run in under a minute. Four of those suites are adversarial probes that report *findings* rather than a pass count, so their checks are not in that total.
 
 Every fix ships with a regression that *fails* on the old code and *passes* on the new. Real GTK is spun up under Xvfb for the UI suites; the chat-bubble layout alone is pinned by 140 fitting checks. Repo work is covered end-to-end rather than layer by layer — a deliberately broken repo is opened as a folder, baselined red, edited through four different tool-call dialects, verified green, diffed and exported, with a 6,000-line file paged and rewritten on the way past.
 
@@ -325,7 +325,7 @@ If it earns its place in your kit, star the repo and tell someone who would use 
 
 <br/>
 
-### Built by one person, around a day job. Verified by 5,444 assertions. Priced at nothing.
+### Built by one person, around a day job. Verified by 5,452 assertions. Priced at nothing.
 
 <sub>Clone it, read it, run the suite, then point it at something you own.</sub>
 

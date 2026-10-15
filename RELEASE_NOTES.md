@@ -64,7 +64,9 @@ cost readout. Plus the bugs a deep pass over every file turned up.**
   list, so it is read before the "no choices, skip" branch — the one line that
   silently disables the whole feature. A turn the provider did not meter counts
   as unknown, not as free, and the chip marks an incomplete total with a `+`.
-  Per-model prices are editable in Settings → Backends.
+  Totals are kept in a bounded JSON sidecar, so "per chat, not per process"
+  survives closing the app — it did not, and every chat read zero on the next
+  launch. Prices are editable in Settings -> Display -> Token pricing.
 - The theme setting was being deleted on every load (`_migrate_settings`
   popped it), so the picker reset at every restart.
 
@@ -130,7 +132,7 @@ cost readout. Plus the bugs a deep pass over every file turned up.**
   (`sort -V`, overridable with `BASILISK_ALLOW_DOWNGRADE=1`) now refuses to go
   backwards.
 
-**5,444 assertions across 88 suites**, zero red. New: `test_themes.py`,
+**5,452 assertions across 88 suites**, zero red. New: `test_themes.py`,
 `test_spend.py`, `test_readcaps.py`. GUARDRAIL byte-identical.
 
 ---
