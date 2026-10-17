@@ -6170,6 +6170,21 @@ def _find_watermark_svg() -> Optional[str]:
 _WATERMARK_SVG_PATH = _find_watermark_svg()
 
 
+def _find_backdrop_image() -> Optional[str]:
+    """The operator's own photographic backdrop for the whole window.
+
+    Deliberately a SEPARATE lookup from the dragon watermark: that art is the
+    shipped, alpha-baked fallback, while this is whatever image the operator
+    dropped into assets/app/ to be the real background.  Its own name keeps
+    the two from ever standing in for each other, and returning None when the
+    file is absent is what leaves the dragon as the fallback path."""
+    return _find_asset("basilisk-backdrop.jpg")
+
+
+# Resolved once at import; _build_chat_watermark prefers it over the dragon.
+_BACKDROP_IMAGE_PATH = _find_backdrop_image()
+
+
 def _find_cross_svg() -> Optional[str]:
     """Locate the operator's cross emblem (shown as the user avatar)."""
     candidates = _asset_paths("basilisk-cross.svg")
@@ -11296,15 +11311,37 @@ class MainWindow(Adw.ApplicationWindow):
             log(f"backdrop brightness apply failed: {e}")
 
     def _build_chat_watermark(self):
-        """A large, faint dragon watermark for behind the chat.  Loads either a
-        PNG (the dragon emblem, already alpha-baked) or an SVG.  Non-interactive
-        (never grabs touch/clicks), scaled to fit, low opacity so it sets the
-        mood without fighting the text.  Returns None if the art isn't on disk."""
+        """The full-window backdrop art, drawn behind the sidebar, the chat and
+        the composer at once.  Prefers the operator's own image
+        (`_BACKDROP_IMAGE_PATH`, an opaque photograph); falls back to the
+        shipped dragon watermark, PNG (already alpha-baked) or SVG.
+        Non-interactive (never grabs touch/clicks), scaled to fit, low opacity
+        so it sets the mood without fighting the text.  Returns None if no art
+        is on disk at all."""
         path = _WATERMARK_SVG_PATH
-        if not path:
+        if not path and not _BACKDROP_IMAGE_PATH:
             return None
         try:
-            if path.lower().endswith(".png"):
+            # ── THE OPERATOR'S OWN IMAGE COMES FIRST ──
+            # This is not the shipped watermark and must not be treated like
+            # one: it is an opaque photograph rather than alpha-baked art, and
+            # an operator who put a file there wants to SEE it — the dragon is
+            # the fallback for the installs that never had one.  Kept at the
+            # watermark's own bounded size and through the same shared cache
+            # for the reason spelled out under the PNG branch: this file
+            # backdrops a chat that repaints on every scroll frame and every
+            # streamed token, so a full-res decode per frame buys pixels the
+            # scrim then throws away.
+            #
+            # 0.45 and not more: it is the SAME legibility ceiling the shipped
+            # art is held to (test_guiwiring pins every literal opacity in this
+            # method below half strength), and the operator can lift the real
+            # brightness from the Display page's slider without editing this.
+            tex, opacity = None, 0.0
+            if _BACKDROP_IMAGE_PATH:
+                tex = _cached_texture(_BACKDROP_IMAGE_PATH, 1100)
+                opacity = 0.45
+            if tex is None and path and path.lower().endswith(".png"):
                 # BOUNDED, AND SHARED. Full resolution is 1672x941, i.e. a 6MB
                 # RGBA texture that COVER rescales behind the chat on every
                 # repaint — and the chat repaints on every scroll frame and
@@ -11335,7 +11372,7 @@ class MainWindow(Adw.ApplicationWindow):
                 # this value together are what keep the neon lines in the
                 # art from competing with the UI's own red.
                 opacity = 0.48
-            else:
+            elif tex is None and path:
                 tex = _svg_texture(path, 720)
                 opacity = 0.2
             if tex is None:
