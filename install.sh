@@ -164,8 +164,15 @@ REQUIRED_FILES=(basilisk.py basilisk_core.py basilisk_safety.py basilisk_scope.p
 # basilisk-btn-expand.png are new to this list: basilisk.py has always
 # looked for them but they were in no install list, so remote installs
 # silently lacked them.
+# basilisk-backdrop.jpg is on this list for that same reason: it is the
+# operator's own photograph, resolved by _find_backdrop_image() -> _find_asset()
+# -> ${INSTALL_DIR}/basilisk-backdrop.jpg, and _build_chat_watermark() prefers
+# it over the dragon.  It was left off, so a fresh install had the file in the
+# repo and in the wheel but never on disk, and the window silently fell back to
+# the dragon watermark.  Anything _find_asset() looks for must be named here —
+# this array (via OPTIONAL_FILES below) is also what a curl|bash install fetches.
 ASSET_DIR="assets/app"
-OPTIONAL_ART=(org.thepriest.basilisk.svg basilisk-dragon.svg basilisk-watermark.png basilisk-cross.svg basilisk-avatar.png basilisk-logo.png basilisk-priest.png basilisk-sigil.svg basilisk-btn-settings.png basilisk-btn-bell.png basilisk-btn-terminal.png basilisk-btn-minimise.png basilisk-btn-close.png basilisk-btn-expand.png basilisk-btn-attach.png basilisk-btn-camera.png basilisk-btn-suggest.png basilisk-btn-sound.png basilisk-btn-unleash.png)
+OPTIONAL_ART=(org.thepriest.basilisk.svg basilisk-dragon.svg basilisk-watermark.png basilisk-backdrop.jpg basilisk-cross.svg basilisk-avatar.png basilisk-logo.png basilisk-priest.png basilisk-sigil.svg basilisk-btn-settings.png basilisk-btn-bell.png basilisk-btn-terminal.png basilisk-btn-minimise.png basilisk-btn-close.png basilisk-btn-expand.png basilisk-btn-attach.png basilisk-btn-camera.png basilisk-btn-suggest.png basilisk-btn-sound.png basilisk-btn-unleash.png)
 OPTIONAL_FILES=(basilisk_btn_art.py)
 for _a in "${OPTIONAL_ART[@]}"; do OPTIONAL_FILES+=("${ASSET_DIR}/${_a}"); done
 # basilisk_ext sidecar modules — fetched in remote (curl|bash) mode so phones
