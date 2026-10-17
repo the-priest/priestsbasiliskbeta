@@ -7709,6 +7709,75 @@ def tool_web_sources() -> Dict[str, Any]:
     }
 
 
+# ── A REASONING MODEL IN THE VISION SLOT ANSWERS CONFIDENTLY AND WRONGLY ──
+# issue #2: `vision_model` was pointed at a REASONING model.  The operator had
+# set it to this app's own pinned CHAT model (`DeepSeek-V4.1-Flash`), which is
+# the obvious thing to paste into a box labelled "vision model" and the wrong
+# thing to put there.  A reasoning model handed an image spends its output
+# budget on a deliberation pass BEFORE it writes the description, so the
+# operator gets an answer that is cut off mid-sentence AND confabulated: it
+# "described" a CachyOS/KDE/Wayland desktop as "Windows with a Rainmeter skin",
+# inventing a V-for-Vendetta wallpaper that was not on screen.  A confidently
+# wrong read is worse than no read, because nothing downstream can tell it
+# apart from a good one.
+#
+# The repair path below cannot catch this: _resolve_vision_model() only fixes
+# an id the provider does NOT know.  A VALID id of the wrong CLASS sails
+# straight through, which is why the check is on the NAME.
+_VISION_REASONING_HINTS = ("-r1", "reasoning", "thinking", "-cot", "qwq",
+                           "deepseek-v", "deepseek-r", "magistral")
+# Bare o1/o3 must be a WHOLE token: a plain substring probe would flag any id
+# that merely contains "o1", and a false positive here breaks working vision.
+_VISION_BARE_REASONING_RE = re.compile(r"(?:^|[^a-z0-9])o[13](?:[^a-z0-9]|$)")
+# A model can be BOTH (a "-Thinking" VL model, or deepseek-vl2 -- note that
+# "deepseek-v" matches that id as well).  Anything advertising vision wins the
+# argument: the documented failure is a model that cannot see at all, not one
+# that thinks while it looks.
+_VISION_OK_HINTS = ("vl", "vision", "llava", "moondream", "pixtral",
+                    "internvl", "minicpm-v", "glm-4v", "glm-5v", "omni")
+
+
+def _vision_provider_spec(base_url: str = "") -> Optional[ProviderSpec]:
+    """The ProviderSpec serving `base_url`, or None for a custom/unknown root.
+
+    The vision tool is handed a base_url, not a backend name, so this is how it
+    reaches the registry entry that knows a model's quirks (its think_off
+    switch, its catalogue).  Same match as _resolve_vision_model() below, kept a
+    separate copy deliberately: that function's return value is pinned by
+    test_v1_regressions, and refactoring it would put this new behaviour behind
+    the same pinned test.
+    """
+    try:
+        for _sp in PROVIDERS_BY_KEY.values():
+            if base_url and str(getattr(_sp, "base_url", "")).rstrip("/") == \
+                    str(base_url).rstrip("/"):
+                return _sp
+    except Exception:
+        pass
+    return None
+
+
+def _assert_vision_model_sane(model: str) -> None:
+    """Raise ValueError when `model` will think instead of look.
+
+    Failing loud beats returning a confident wrong answer: the caller turns this
+    into an ordinary tool error that NAMES the setting to change, which is the
+    one thing the reported failure never did.  Deliberately lenient about
+    anything it cannot classify -- an unknown id against a custom endpoint is
+    left alone, because a guess must never override a deliberate choice.
+    """
+    m = (model or "").strip().lower()
+    if not m or any(h in m for h in _VISION_OK_HINTS):
+        return
+    if any(h in m for h in _VISION_REASONING_HINTS) or \
+            _VISION_BARE_REASONING_RE.search(m):
+        raise ValueError(
+            f"vision_model={model!r} looks like a REASONING model, so an image "
+            "read would spend its budget thinking and come back truncated or "
+            "invented. Pick a non-reasoning vision model in Settings -> Display "
+            "-> Images & vision, e.g. 'Qwen/Qwen2.5-VL-72B-Instruct'.")
+
+
 def _resolve_vision_model(model: str, base_url: str = "") -> str:
     """A vision model the provider actually carries.
 
@@ -7775,6 +7844,18 @@ def tool_analyze_image(image_path: str, question: str = "",
                          "key for and set the vision model, then retry."}
     # Repair a stale or mistyped model id rather than failing on it.
     model = _resolve_vision_model(model, base_url)
+    # ── A VALID ID OF THE WRONG CLASS IS THE ONE CASE NOTHING ELSE CATCHES ──
+    # The repair above fixes what the provider does not know. It cannot fix a
+    # reasoning model, because that id is perfectly valid -- it is just the
+    # wrong KIND of model for looking at a picture, and the result is a
+    # truncated, invented description that reads like a successful read.
+    # Refuse with an error that names the setting. Returned as a normal tool
+    # dict rather than raised out: every other exit from this function is a
+    # dict and the callers rely on that, so the guard raises and this catches.
+    try:
+        _assert_vision_model_sane(model)
+    except ValueError as _e:
+        return {"ok": False, "error": str(_e)}
     try:
         with open(p, "rb") as f:
             raw = f.read(13_000_000)
@@ -7792,7 +7873,12 @@ def tool_analyze_image(image_path: str, question: str = "",
             {"type": "text", "text": question},
             {"type": "image_url", "image_url": {"url": data_url}},
         ]}],
-        "max_tokens": 1024,
+        # 2048, not the old 1024: a vision answer is LONG -- the scene, the
+        # objects, and every legible string read verbatim -- and the reported
+        # failure was a read that ran out of room mid-sentence. This is a
+        # description task, not a chat turn, so it gets its own budget and does
+        # not read the effort ladder's clamps.
+        "max_tokens": 2048,
         "stream": False,
     }
     # ── AN ALWAYS-THINKING VISION MODEL WILL SPEND THIS BUDGET ON ITSELF ──
@@ -7800,12 +7886,33 @@ def tool_analyze_image(image_path: str, question: str = "",
     # VISION_MODELS, so it is a likely pick here — and its thinking cannot be
     # turned off and DEFAULTS TO MAXIMUM DEPTH when reasoning_effort is
     # omitted. "Describe this image" is not a reasoning problem; left at the
-    # default the model can spend the whole 1024-token budget deliberating and
+    # default the model can spend the whole output budget deliberating and
     # return an EMPTY content field, which the branch below then reported as
     # "the model may not support images" — a wrong diagnosis that sends the
     # operator to change a setting that was correct.
     if supports_reasoning_effort(model):
         payload.update(reasoning_extra(model, "low"))
+    # ── AND TURN THE PROBE'S THINKING OFF WHERE THE VENDOR LETS US ──
+    # reasoning_extra above is the DIAL (GLM-5.x). This is the SWITCH. A model
+    # whose spec carries a think_off -- the DeepSeek V4/V4.1 family, which is
+    # exactly what went wrong in the report -- has no dial to lower, so
+    # omitting the switch leaves it at the vendor default, and the vendor
+    # default is ON. The chat path takes this same step for this same reason
+    # (see "THINKING IS OFF BY DEFAULT ON MODELS THAT LET US TURN IT OFF" in
+    # the request builder); this is the vision path catching up.
+    # `deepseek_thinking` is deliberately NOT consulted here: that setting is
+    # about how the operator wants CHAT turns to behave, and a vision read is a
+    # description task with one right answer, not a chat turn.
+    # Guarded end to end -- an unknown model, or a custom endpoint that matches
+    # no spec, simply gets no field, exactly as before.
+    _spec_v = _vision_provider_spec(base_url)
+    if _spec_v is not None:
+        try:
+            _info_v = _spec_v.info(model)
+        except Exception:
+            _info_v = None
+        if _info_v is not None and _info_v.think_off:
+            payload.update(_info_v.think_off)
     try:
         req = urllib.request.Request(
             _join_url(base_url, "chat/completions"),
